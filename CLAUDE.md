@@ -15,7 +15,6 @@ headings when editing.
 
 ```sh
 . ~/esp/esp-idf/export.sh          # every new shell; needs zopfli on PATH too
-idf.py set-target esp32c6          # once per build dir
 idf.py build                       # builds the coordinator AND the updater (subproject)
 idf.py -p /dev/cu.usbmodem* flash monitor   # bootloader, full partition table, both apps
 idf.py app-flash                   # coordinator only

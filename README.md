@@ -76,7 +76,6 @@ git clone -b v5.5.5 --recursive https://github.com/espressif/esp-idf.git ~/esp/e
 # in every new shell
 . ~/esp/esp-idf/export.sh
 
-idf.py set-target esp32c6
 idf.py -p /dev/cu.usbmodem* flash monitor
 ```
 

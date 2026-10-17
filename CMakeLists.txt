@@ -36,6 +36,7 @@ externalproject_add(updater
     CMAKE_ARGS -DIDF_PATH=${idf_path} -DIDF_TARGET=${idf_target}
                -DPYTHON=${python} -DPYTHON_DEPS_CHECKED=1
                -DSDKCONFIG=${zbc_updater_dir}/sdkconfig
+               -DCCACHE_ENABLE=${CCACHE_ENABLE}   # idf.py's --ccache reaches only this project
     INSTALL_COMMAND ""
     BUILD_ALWAYS 1   # its own build decides whether anything changed
     BUILD_BYPRODUCTS "${zbc_updater_bin}")

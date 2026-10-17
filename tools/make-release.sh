@@ -24,22 +24,32 @@ build=${1:-build}
 out=${2:-dist}
 
 [ -f "$build/flash_args" ] || { echo "make-release: no $build/flash_args - run idf.py build first" >&2; exit 1; }
-build=$(cd "$build" && pwd)
-version=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["project_version"])' \
-                   "$build/project_description.json")
-# ESP-IDF's version when git describe fails: no repository, or one git refuses
-# to read, as in a container that runs as another user.
-[ "$version" != 1 ] || { echo "make-release: the build has no version - git describe failed" >&2; exit 1; }
-usb="elixcon_light_hub-$version-usb"
+build=$(CDPATH='' cd -- "$build" && pwd)
+
+# A key of the build's project_description.json.
+desc() {
+    python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' \
+            "$build/project_description.json" "$1"
+}
+project=$(desc project_path)
 
 rm -rf "$out"
-mkdir -p "$out/$usb"
-out=$(cd "$out" && pwd)
+mkdir -p "$out"
+out=$(CDPATH='' cd -- "$out" && pwd)
 
 # flash_args is "<options>" on its first line, then "<offset> <file>" per image,
 # relative to the build directory. The root CMakeLists.txt has already swapped in
 # the full partition table and added the updater, and merge-bin reads it too.
-idf.py -C "$(dirname "$0")/.." -B "$build" merge-bin -o "$out/elixcon_light_hub-factory.bin"
+# idf.py runs `all` before merge-bin, which can reconfigure and rebuild, so the
+# version is read only after it.
+idf.py -C "$project" -B "$build" merge-bin -o "$out/elixcon_light_hub-factory.bin"
+
+version=$(desc project_version)
+# ESP-IDF's version when git describe fails: no repository, or one git refuses
+# to read, as in a container that runs as another user.
+[ "$version" != 1 ] || { echo "make-release: the build has no version - git describe failed" >&2; exit 1; }
+usb="elixcon_light_hub-$version-usb"
+mkdir "$out/$usb"
 
 cd "$build"
 cp flash_args "$out/$usb/"

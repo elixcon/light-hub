@@ -2,6 +2,7 @@
 # CI and a fresh clone build from sdkconfig.defaults; sdkconfig is generated from
 # it and holds whatever menuconfig changed locally.
 /build/
+/updater/build/
 managed_components/
 sdkconfig
 sdkconfig.old

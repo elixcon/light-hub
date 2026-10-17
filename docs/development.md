@@ -12,7 +12,6 @@ git clone -b v5.5.5 --recursive https://github.com/espressif/esp-idf.git ~/esp/e
 # in every new shell
 . ~/esp/esp-idf/export.sh
 
-idf.py set-target esp32c6
 idf.py build
 idf.py -p /dev/cu.usbmodem* flash monitor
 ```
@@ -87,7 +86,7 @@ later.
 ## Continuous integration
 
 `.github/workflows/firmware.yml` runs the host tests and the web page's tests, checks that the
-committed `main/www/index.html` is what `web/` builds, and then builds both images in the
+committed `main/www/index.html` is what `web/` builds, and alongside them builds both images in the
 `espressif/idf:v5.5.5` container, from `sdkconfig.defaults`. Every push uploads the images as a
 workflow artifact, and a `v*` tag also publishes them as a GitHub release. Options set only in a
 local `sdkconfig`, such as `CONFIG_ZBC_HEAP_WATCH`, are off in those builds. `sdkconfig` itself is

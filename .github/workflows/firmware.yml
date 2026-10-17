@@ -1,5 +1,5 @@
-# Host tests and the web page's tests, then both firmware images from
-# sdkconfig.defaults. Every run keeps the images as a workflow artifact; a v* tag
+# Host tests and the web page's tests, and alongside them both firmware images
+# from sdkconfig.defaults. Every run keeps the images as a workflow artifact; a v* tag
 # also publishes them as a GitHub release. See docs/development.md.
 name: firmware
 
@@ -61,7 +61,7 @@ jobs:
       # commit is safe to start from.
       - uses: actions/cache@v6
         with:
-          path: /tmp/ccache
+          path: ${{ env.CCACHE_DIR }}
           key: ccache-idf-v5.5.5-${{ github.sha }}
           restore-keys: ccache-idf-v5.5.5-
       - name: Build
