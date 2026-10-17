@@ -1,9 +1,9 @@
 # Elixcon Light Hub
 
-Elixcon Light Hub is firmware that turns one ESP32-C6 board into a hub for your lights that
-exposes each room (a group of lights) as a single Matter device. The board runs its own Zigbee
-network on the chip's 802.15.4 radio, joins your Wi-Fi with the same chip, and serves a web page
-where you pair lamps, put them in rooms and switch them. Everything runs on the board.
+Elixcon Light Hub is firmware for an ESP32-C6 board that makes the lights of a room act as one:
+Zigbee lamps, and LED strips or relays wired to the board, become a single dimmable light in Apple
+Home, Home Assistant or Alexa, over Matter. The board runs its own Zigbee network, joins your Wi-Fi
+with the same chip, and serves the web page you set it up with. Everything runs on the board.
 
 <p align="center">
   <img src="docs/images/rooms.jpg" width="260" alt="The Rooms page: a switch and a brightness slider for each room">
@@ -21,6 +21,18 @@ device that runs a network.
 > The amount of Zigbee hardware I had available was limited, so please feel free to send a PR for
 > additional devices or features. I’m not sure if we can fit every desired feature into 4 MB
 > flash, but I'm eager to see what's possible.
+
+## The idea
+
+- **One light per room.** Controllers see a room as one dimmable light; the board works out what
+  each lamp does.
+- **Scenes on one slider.** Each lamp has a curve for its brightness and its colour temperature or
+  colour across the room's brightness, so dimming the room walks through scenes you design: a warm
+  floor lamp at 10 %, everything bright and cool at 100 %. Unlike Zigbee scenes, there is nothing to
+  teach each controller.
+- **Independent.** Wired switches and Zigbee remotes are handled on the board, so they keep working
+  when Home Assistant, a controller, the internet or the router is down. The exception: a board
+  that starts without Wi-Fi turns Zigbee off after about two minutes, until the network is back.
 
 ## What it does
 
@@ -44,7 +56,7 @@ device that runs a network.
   OTA collection, one device at a time.
 - Optional access control with keys, and a button sequence to get back in when the keys are lost.
 
-Scenes and effects are not supported.
+Zigbee scenes and effects are not supported; the response curves take the place of scenes.
 
 ## What you need
 
