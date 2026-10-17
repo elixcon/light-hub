@@ -1,3 +1,7 @@
+# So a fresh checkout (and CI) builds for the C6 without `idf.py set-target`,
+# which would otherwise mean the plain ESP32.
+CONFIG_IDF_TARGET="esp32c6"
+
 #
 # Partition Table
 #

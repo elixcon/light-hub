@@ -2,7 +2,6 @@
 # CI and a fresh clone build from sdkconfig.defaults; sdkconfig is generated from
 # it and holds whatever menuconfig changed locally.
 /build/
-/build-*/
 managed_components/
 sdkconfig
 sdkconfig.old
@@ -13,7 +12,5 @@ sdkconfig.old
 # The web UI's dependencies. Its build output, main/www/index.html, is committed.
 node_modules/
 
-__pycache__/
-*.pyc
 .DS_Store
 .claude/settings.local.json

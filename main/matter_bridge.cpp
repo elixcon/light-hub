@@ -1062,8 +1062,8 @@ typedef enum {
 } mb_ep_kind_t;
 
 typedef struct {
-    uint8_t kind;           /* mb_ep_kind_t */
-    bool    mode_select;    /* a light with the Adaptive Lighting Mode Select cluster */
+    mb_ep_kind_t kind;
+    bool         mode_select;    /* a light with the Adaptive Lighting Mode Select cluster */
 } mb_ep_spec_t;
 
 /* The Mode Select cluster's two modes, the same for every group. The cluster asks a
@@ -1112,9 +1112,9 @@ static void init_modes(void)
 static esp_err_t device_type_cb(endpoint_t *ep, uint32_t device_type_id, void *priv)
 {
     const mb_ep_spec_t *spec = static_cast<const mb_ep_spec_t *>(priv);
-    const uint8_t kind = spec ? spec->kind
-                              : static_cast<uint8_t>(device_type_id == ESP_MATTER_ON_OFF_PLUG_IN_UNIT_DEVICE_TYPE_ID
-                                                         ? MB_EP_ADAPTIVE : MB_EP_LIGHT);
+    const mb_ep_kind_t kind = spec ? spec->kind
+                                   : (device_type_id == ESP_MATTER_ON_OFF_PLUG_IN_UNIT_DEVICE_TYPE_ID ? MB_EP_ADAPTIVE
+                                                                                                        : MB_EP_LIGHT);
     if (kind == MB_EP_ADAPTIVE) {
         endpoint::on_off_plug_in_unit::config_t config;
         return endpoint::on_off_plug_in_unit::add(ep, &config);

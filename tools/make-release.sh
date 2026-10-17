@@ -16,7 +16,7 @@
 #
 #   tools/make-release.sh [build-dir] [out-dir]     defaults: build dist
 #
-# Needs the ESP-IDF environment, for esptool. The version is the one the build
+# Needs the ESP-IDF environment, for idf.py. The version is the one the build
 # put in the image (git describe), so the zip is named as the firmware reports.
 set -eu
 
@@ -24,8 +24,12 @@ build=${1:-build}
 out=${2:-dist}
 
 [ -f "$build/flash_args" ] || { echo "make-release: no $build/flash_args - run idf.py build first" >&2; exit 1; }
+build=$(cd "$build" && pwd)
 version=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["project_version"])' \
                    "$build/project_description.json")
+# ESP-IDF's version when git describe fails: no repository, or one git refuses
+# to read, as in a container that runs as another user.
+[ "$version" != 1 ] || { echo "make-release: the build has no version - git describe failed" >&2; exit 1; }
 usb="elixcon_light_hub-$version-usb"
 
 rm -rf "$out"
@@ -34,22 +38,20 @@ out=$(cd "$out" && pwd)
 
 # flash_args is "<options>" on its first line, then "<offset> <file>" per image,
 # relative to the build directory. The root CMakeLists.txt has already swapped in
-# the full partition table and added the updater.
-(
-    cd "$build"
-    esptool.py --chip esp32c6 merge_bin -o "$out/elixcon_light_hub-factory.bin" @flash_args
-    cp flash_args "$out/$usb/"
-    sed 1d flash_args | while read -r _offset file; do
-        mkdir -p "$out/$usb/$(dirname "$file")"
-        cp "$file" "$out/$usb/$file"
-    done
-    cp elixcon_light_hub.bin elixcon_light_hub.elf "$out/"
-    cp updater/elixcon_light_hub_updater.bin "$out/"
-)
+# the full partition table and added the updater, and merge-bin reads it too.
+idf.py -C "$(dirname "$0")/.." -B "$build" merge-bin -o "$out/elixcon_light_hub-factory.bin"
 
-(cd "$out" && python3 -m zipfile -c "$usb.zip" "$usb" && rm -rf "$usb")
+cd "$build"
+cp flash_args "$out/$usb/"
+sed 1d flash_args | while read -r _offset file; do
+    mkdir -p "$out/$usb/$(dirname "$file")"
+    cp "$file" "$out/$usb/$file"
+done
+cp elixcon_light_hub.bin elixcon_light_hub.elf updater/elixcon_light_hub_updater.bin "$out/"
 
 cd "$out"
+python3 -m zipfile -c "$usb.zip" "$usb"
+rm -rf "$usb"
 if command -v sha256sum >/dev/null 2>&1; then
     sha256sum -- * > SHA256SUMS
 else

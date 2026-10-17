@@ -41,10 +41,14 @@ jobs:
             exit 1
           }
 
+  # Alongside the tests rather than after them: release waits for all three.
   build:
-    needs: [host-tests, web]
     runs-on: ubuntu-latest
     container: espressif/idf:v5.5.5
+    env:
+      # The image turns ccache on (IDF_CCACHE_ENABLE); kept between runs below.
+      CCACHE_DIR: /tmp/ccache
+      CCACHE_MAXSIZE: 1G
     steps:
       - uses: actions/checkout@v7
         with:
@@ -53,11 +57,17 @@ jobs:
       # without this git refuses the repository and the version becomes "1".
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - run: apt-get update && apt-get install -y zopfli
+      # ccache keys on the preprocessed source, so the newest cache of any
+      # commit is safe to start from.
+      - uses: actions/cache@v6
+        with:
+          path: /tmp/ccache
+          key: ccache-idf-v5.5.5-${{ github.sha }}
+          restore-keys: ccache-idf-v5.5.5-
       - name: Build
         shell: bash
         run: |
           . "$IDF_PATH/export.sh"
-          idf.py set-target esp32c6
           idf.py build
           tools/make-release.sh build dist
       - uses: actions/upload-artifact@v7
@@ -68,7 +78,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [host-tests, web, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -81,12 +91,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          docs="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/docs"
-          sed "s|@DOCS@|$docs|g" > notes.md <<'EOF'
-          - **A blank board:** `elixcon_light_hub-factory.bin`, written at `0x0`. It erases everything stored.
-          - **A board already in use, over USB:** unzip `elixcon_light_hub-<version>-usb.zip` and run `esptool.py --chip esp32c6 -p <port> write_flash @flash_args` inside it. It keeps the paired devices, rooms, keys and Wi-Fi.
-          - **Over the network:** upload `elixcon_light_hub.bin` (*Settings → Update firmware*, see [Firmware updates](@DOCS@/updates.md)).
-          - `elixcon_light_hub.elf` decodes a crash record from this build ([Development](@DOCS@/development.md#after-a-crash)).
+          base="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME"
+          sed "s|@BASE@|$base|g" > notes.md <<'EOF'
+          - `elixcon_light_hub-factory.bin`: a blank board. It erases everything stored.
+          - `elixcon_light_hub-<version>-usb.zip`: a board already in use, over USB. It keeps everything stored.
+          - `elixcon_light_hub.bin`: an update over the network.
+          - `elixcon_light_hub_updater.bin`: converting an ESPHome device, or replacing the updater.
+          - `elixcon_light_hub.elf`: decodes a crash record from this build.
+
+          How to write each one: [Installing](@BASE@/README.md#installing), [Firmware updates](@BASE@/docs/updates.md), [Converting](@BASE@/docs/converting.md), [After a crash](@BASE@/docs/development.md#after-a-crash).
           EOF
           gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
              --verify-tag --title "$GITHUB_REF_NAME" --notes-file notes.md --generate-notes
