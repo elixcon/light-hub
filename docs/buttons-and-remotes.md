@@ -11,6 +11,8 @@ a remote the coordinator knows (IKEA BILRESA and SYMFONISK, Hue dimmer switch an
 Aqara mini switch), *Set up* asks for a room and creates all of its buttons with ready-made actions.
 For any other remote, use *Add a button* and press the button on the remote that you mean.
 
+<img src="images/remotes.jpg" width="320" alt="The Remotes page: a set-up Hue Smart Button, two remotes not set up yet, and the board's BOOT button with its rules">
+
 Pair a remote while it is awake. The bindings it needs are set up while it joins, and a sleepy
 device that misses them only gets them when a later neighbour scan catches it listening, so press it
 once after pairing.
@@ -95,6 +97,8 @@ A button has four gestures: `short`, `long`, `double` and `triple`. The triple p
 a remote that counts its own presses. Each gesture has a list of rules, tried in order, and the
 first one whose `when` matches is the one that runs. A final `"when":"always"` therefore reads as
 "otherwise". A button holds twelve rules across all its gestures.
+
+<img src="images/button-rules.jpg" width="320" alt="A button's rules: a short press toggles the living room, a hold dims it, and a double press lifts a dim room to 80 % or otherwise sets it to 30 %">
 
 A rule acts on a room (`group`) or on one light (`ieee` and `ep`, as `/api/devices` names it,
 including wired lights and Matter lamps), and its `when` is checked against that same room or light.

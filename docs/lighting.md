@@ -15,6 +15,8 @@ colours converted for them, so the page has one colour wheel for every lamp.
 The coordinator also subscribes to attribute reports, so a lamp switched from somewhere else shows
 its new state.
 
+<img src="images/lights.jpg" width="320" alt="The Lights page: Zigbee, Matter and wired lights, each with a switch and a slider">
+
 ## Rooms
 
 Rooms (called groups in the API) are kept by the coordinator. It holds the list of members and sends
@@ -24,6 +26,8 @@ the lamps in a room change a few tens of milliseconds apart instead of in lockst
 
 Make a room with *New room* on the *Rooms* page, then open it to choose its lights. A light can be
 in more than one room.
+
+<img src="images/room-edit.jpg" width="320" alt="A room's page: its name, its lights, and how it offers Adaptive Lighting">
 
 ## Fade time
 
@@ -122,6 +126,11 @@ whatever warmth or colour it has: the room's brightness does not change it.
 
 Curves are edited at the top of a light's page.
 
+<p>
+  <img src="images/curve-brightness.jpg" width="300" alt="A brightness curve, with another room member's curve drawn faintly behind it">
+  <img src="images/curve-colour.jpg" width="300" alt="A temperature and colour path: red-orange at 1 %, then warm white turning cooler towards the top">
+</p>
+
 Brightness is a graph with a few draggable points and a strip that previews the whole dimming range.
 When the light is in a room, the other members' curves are drawn faintly behind it, so you can see
 how the room fits together.
@@ -197,6 +206,8 @@ An empty field follows the sun. Drag the sunrise and sunset handles on the chart
 The sun's own times stay dotted on the chart, and the stretch between them is shaded. A moved
 sunrise or sunset keeps half an hour clear of noon and of solar midnight, and a polar day or night
 is not stretched.
+
+<img src="images/adaptive-day.jpg" width="320" alt="A room's Adaptive Lighting day, with the evening held until 21:00 although the sun sets at 18:40">
 
 The times are local clock times, so the coordinator needs a time zone. The page sends the browser's
 own zone with the first limit, and daylight saving time is handled on the coordinator. The zone is

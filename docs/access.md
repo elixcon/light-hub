@@ -13,6 +13,8 @@ Press *Secure it* and this browser is given a key. The key is shown once, in gro
   curl -H 'Authorization: Bearer K7M2Q-9XH4T-R3WZP-6NBVA' http://zigbee.local/api/devices
   ```
 
+<img src="images/access-key.jpg" width="320" alt="The key a browser is given when the coordinator is secured, shown once">
+
 *Settings → Access* lists every key with when it was last used, and revokes keys. Revoke the last
 one and the coordinator is open to everyone again. The Wi-Fi setup page never asks for a key, and a
 full factory reset erases the keys.

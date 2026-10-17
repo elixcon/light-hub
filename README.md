@@ -5,6 +5,12 @@ exposes each room (a group of lights) as a single Matter device. The board runs 
 network on the chip's 802.15.4 radio, joins your Wi-Fi with the same chip, and serves a web page
 where you pair lamps, put them in rooms and switch them. Everything runs on the board.
 
+<p align="center">
+  <img src="docs/images/rooms.jpg" width="260" alt="The Rooms page: a switch and a brightness slider for each room">
+  <img src="docs/images/curve-colour.jpg" width="260" alt="A lamp's warmth and colour path across the room slider">
+  <img src="docs/images/remotes.jpg" width="260" alt="The Remotes page: Zigbee remotes and a wired button with their rules">
+</p>
+
 In these documents the board running the firmware is called the coordinator, the Zigbee name for the
 device that runs a network.
 

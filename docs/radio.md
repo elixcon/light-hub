@@ -43,6 +43,8 @@ within 5 dB of the quietest one, and lists the preferred channels 11, 15, 20 and
 are free. Those are the Zigbee Light Link channels, where some devices find a network faster. While
 the radio measures, remotes are not heard, and Wi-Fi is slow for a second at a time.
 
+<img src="images/zigbee-channel.jpg" width="320" alt="A channel survey: the energy on each Zigbee channel, the Wi-Fi channels marked, and the current channel 20 found to be the best">
+
 ## Wi-Fi sleep
 
 Zigbee only listens while Wi-Fi is not using the antenna. The arbiter gives ordinary 802.15.4

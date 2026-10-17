@@ -8,6 +8,8 @@ strips the signing wrapper IKEA puts around its files, and uploads the plain OTA
 coordinator. The coordinator itself never talks to the internet. *Install from a file* takes an
 `.ota` or `.zigbee` file from your computer instead.
 
+<img src="images/zigbee-device-update.jpg" width="320" alt="A lamp's device card after Check for updates: a newer image is available to install">
+
 ## How an update runs
 
 The coordinator holds one image of up to 512 KiB, in the `zb_ota` partition. Most of the collection

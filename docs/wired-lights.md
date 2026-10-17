@@ -12,6 +12,8 @@ On the *Lights* page, choose *Add a wired light* and set its wiring:
 - what it does at power-on: off, on, or as it was;
 - its kind: a relay (on/off), dimmable, tunable white, or tunable white with three channels.
 
+<img src="images/wired-light.jpg" width="320" alt="A tunable-white strip's wiring: its two pins, the kelvin of each white, and the PWM frequency">
+
 A dimmable light, such as a single-colour LED strip on a MOSFET, drives one pin with PWM. It has
 brightness, and you set its PWM frequency as for tunable white below.
 

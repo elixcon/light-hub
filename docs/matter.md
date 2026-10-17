@@ -20,6 +20,8 @@ within a second or two.
    Home, *Share device* in Home Assistant) and use the code it gives you. That is the dependable way
    to add it to Alexa.
 
+<img src="images/matter.jpg" width="320" alt="Settings → Matter: the controllers the bridge is in, and its pairing code and QR code">
+
 The Matter page lists every controller the bridge is in. There is room for five, and Apple Home
 takes two: one named after your home, and an unnamed one for Apple's own keychain. Both come from
 the same pairing, so two entries after adding the bridge to Apple Home alone is expected. Once a
