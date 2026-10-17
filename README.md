@@ -49,7 +49,8 @@ Scenes and effects are not supported.
 ## What you need
 
 - An ESP32-C6 board with at least 4 MB of flash. A Shelly Gen4 or another ESP32-C6 device running
-  ESPHome works too ([converting one](docs/converting.md)).
+  ESPHome can be converted ([converting one](docs/converting.md)), but **Shelly conversions have
+  not been tested successfully yet**: be ready to flash the unit over its UART if one fails.
 - A 2.4 GHz Wi-Fi network.
 - Zigbee lamps, and remotes if you want them. Matter lamps and lights wired to the board work as
   well.
@@ -140,7 +141,8 @@ Wi-Fi](docs/radio.md) explains the channels and the link counters in `/api/statu
   lamps
 - [Access](docs/access.md): keys and the failsafe
 - [Firmware updates](docs/updates.md), and [updating Zigbee devices](docs/zigbee-device-updates.md)
-- [Converting a Shelly or ESPHome device](docs/converting.md)
+- [Converting a Shelly or ESPHome device](docs/converting.md): not yet tested successfully on a
+  Shelly
 - [Radio and Wi-Fi](docs/radio.md): channels, Wi-Fi sleep and link counters
 - [REST API](docs/api.md)
 - [Development](docs/development.md): building, tests and source layout

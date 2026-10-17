@@ -1,9 +1,30 @@
 # Converting a Shelly or ESPHome device
 
+> [!WARNING]
+> **Shelly conversions have not been tested successfully yet.** A conversion that goes wrong can
+> leave the unit unable to start, and the only way back is its UART. Do not start unless you are
+> prepared to open the unit and flash it over serial:
+>
+> - a USB-to-serial adapter with 3.3 V logic, wired to the unit's TX, RX, GND and 3.3 V pads;
+> - the ESP32-C6's boot pin, GPIO9, held to GND while the unit powers up, which starts the chip's
+>   ROM bootloader instead of the firmware;
+> - **the unit disconnected from mains the whole time.** Many Shelly units have no isolation between
+>   mains and their low-voltage side, so power it only from the adapter's 3.3 V while it is open.
+>
+> With that wired, save the whole flash before converting: `esptool.py --chip esp32c6 -p <port>
+> read_flash 0 0x800000 shelly-backup.bin` (8 MB on a Gen4). Writing it back with `write_flash 0x0
+> shelly-backup.bin` returns the unit to exactly what it shipped with. Over UART the unit is an
+> ordinary ESP32-C6, so the [factory image](../README.md#from-a-release) installs the coordinator
+> on it as on any blank board.
+
 Two kinds of ready-made ESP32-C6 hardware can be turned into a coordinator over the network, without
 opening them. Both conversions erase the original firmware.
 
 ## A Shelly Gen4 on its own firmware
+
+> [!WARNING]
+> Not yet tested successfully. Read the [warning at the top of this page](#converting-a-shelly-or-esphome-device)
+> and have the UART wired and the flash saved before you upload anything.
 
 A Shelly Gen4 (ESP32-C6, 8 MB) on stock firmware 2.0.0 takes third-party firmware through its own
 update page. The package hands Shelly's installer the updater as the firmware, plus the unit's own
