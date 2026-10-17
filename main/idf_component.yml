@@ -1,0 +1,12 @@
+## IDF Component Manager Manifest File
+dependencies:
+  idf:
+    version: ">=5.5"
+  espressif/esp-zigbee-lib:
+    version: "==2.0.4"
+  espressif/mdns:
+    version: "^1.8"
+  # Pinned exactly, as esp-zigbee-lib is: v1.6.0 is the release built against
+  # IDF v5.5.5, and a newer one follows esp-matter main onto IDF 6.
+  espressif/esp_matter:
+    version: "==1.6.0"

@@ -1,0 +1,8 @@
+## The updater's one managed dependency, the mDNS responder wifi_manager.c
+## starts - so a box in the updater still answers at <hostname>.local. Same
+## range as the coordinator's main/idf_component.yml.
+dependencies:
+  idf:
+    version: ">=5.5"
+  espressif/mdns:
+    version: "^1.8"

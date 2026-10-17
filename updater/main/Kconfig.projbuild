@@ -1,0 +1,3 @@
+# The coordinator's own options, read from its main/: the shared modules use
+# the access-key, setup-hotspot and SoftAP ones, and two copies would drift.
+rsource "../../main/Kconfig.projbuild"

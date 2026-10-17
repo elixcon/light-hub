@@ -1,0 +1,59 @@
+#!/bin/sh
+# Packages a finished `idf.py build` as the files a release carries:
+#
+#   elixcon_light_hub-factory.bin        bootloader, table, updater and coordinator in one
+#                                        image for a blank board, written at 0x0. The gaps
+#                                        are filled with 0xFF, and the data partitions lie
+#                                        in them, so it erases everything stored.
+#   elixcon_light_hub-<version>-usb.zip  flash_args and the files it names, for
+#                                        `esptool.py write_flash @flash_args`, which keeps
+#                                        the data partitions
+#   elixcon_light_hub.bin                the coordinator alone, for POST /update
+#   elixcon_light_hub_updater.bin        the updater alone, for /api/updater/image or an
+#                                        ESPHome conversion
+#   elixcon_light_hub.elf                to decode a crash record (docs/development.md)
+#   SHA256SUMS
+#
+#   tools/make-release.sh [build-dir] [out-dir]     defaults: build dist
+#
+# Needs the ESP-IDF environment, for esptool. The version is the one the build
+# put in the image (git describe), so the zip is named as the firmware reports.
+set -eu
+
+build=${1:-build}
+out=${2:-dist}
+
+[ -f "$build/flash_args" ] || { echo "make-release: no $build/flash_args - run idf.py build first" >&2; exit 1; }
+version=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["project_version"])' \
+                   "$build/project_description.json")
+usb="elixcon_light_hub-$version-usb"
+
+rm -rf "$out"
+mkdir -p "$out/$usb"
+out=$(cd "$out" && pwd)
+
+# flash_args is "<options>" on its first line, then "<offset> <file>" per image,
+# relative to the build directory. The root CMakeLists.txt has already swapped in
+# the full partition table and added the updater.
+(
+    cd "$build"
+    esptool.py --chip esp32c6 merge_bin -o "$out/elixcon_light_hub-factory.bin" @flash_args
+    cp flash_args "$out/$usb/"
+    sed 1d flash_args | while read -r _offset file; do
+        mkdir -p "$out/$usb/$(dirname "$file")"
+        cp "$file" "$out/$usb/$file"
+    done
+    cp elixcon_light_hub.bin elixcon_light_hub.elf "$out/"
+    cp updater/elixcon_light_hub_updater.bin "$out/"
+)
+
+(cd "$out" && python3 -m zipfile -c "$usb.zip" "$usb" && rm -rf "$usb")
+
+cd "$out"
+if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum -- * > SHA256SUMS
+else
+    shasum -a 256 -- * > SHA256SUMS
+fi
+echo "make-release: $version"
+ls -l

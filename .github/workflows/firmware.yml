@@ -1,0 +1,92 @@
+# Host tests and the web page's tests, then both firmware images from
+# sdkconfig.defaults. Every run keeps the images as a workflow artifact; a v* tag
+# also publishes them as a GitHub release. See docs/development.md.
+name: firmware
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: make -C test
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: sudo apt-get update && sudo apt-get install -y zopfli
+      - run: npm ci
+      - run: npm test
+      - run: npm run check
+      # The firmware embeds the committed main/www/index.html, never builds it, so
+      # a UI change that was not rebuilt and committed would ship the old page.
+      - name: The committed page is what web/ builds
+        run: |
+          npm run build
+          git diff --stat --exit-code -- ../main/www/index.html || {
+            echo "::error file=main/www/index.html::not what web/ builds - run npm run build in web/ and commit it"
+            exit 1
+          }
+
+  build:
+    needs: [host-tests, web]
+    runs-on: ubuntu-latest
+    container: espressif/idf:v5.5.5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0   # the tags: the firmware's version is git describe
+      # The workspace belongs to the runner's user and the container runs as root;
+      # without this git refuses the repository and the version becomes "1".
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - run: apt-get update && apt-get install -y zopfli
+      - name: Build
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py set-target esp32c6
+          idf.py build
+          tools/make-release.sh build dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: firmware
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: firmware
+          path: dist
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          docs="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/docs"
+          sed "s|@DOCS@|$docs|g" > notes.md <<'EOF'
+          - **A blank board:** `elixcon_light_hub-factory.bin`, written at `0x0`. It erases everything stored.
+          - **A board already in use, over USB:** unzip `elixcon_light_hub-<version>-usb.zip` and run `esptool.py --chip esp32c6 -p <port> write_flash @flash_args` inside it. It keeps the paired devices, rooms, keys and Wi-Fi.
+          - **Over the network:** upload `elixcon_light_hub.bin` (*Settings → Update firmware*, see [Firmware updates](@DOCS@/updates.md)).
+          - `elixcon_light_hub.elf` decodes a crash record from this build ([Development](@DOCS@/development.md#after-a-crash)).
+          EOF
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
+             --verify-tag --title "$GITHUB_REF_NAME" --notes-file notes.md --generate-notes

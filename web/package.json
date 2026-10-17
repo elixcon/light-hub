@@ -1,0 +1,26 @@
+{
+  "name": "zbc-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build && npm run size-check",
+    "size-check": "sh scripts/size-check.sh",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "test": "node --test test/*.test.ts",
+    "dev:mock": "node mock/server.mjs & ZBC_TARGET=http://localhost:8765 vite"
+  },
+  "devDependencies": {
+    "@lucide/svelte": "^1.45.0",
+    "@sveltejs/vite-plugin-svelte": "7.3.0",
+    "@tailwindcss/vite": "4.3.3",
+    "@types/node": "^22.20.2",
+    "clsx": "2.1.1",
+    "svelte": "5.57.0",
+    "svelte-check": "4.3.4",
+    "tailwindcss": "4.3.3",
+    "typescript": "5.9.3",
+    "vite": "8.3.0",
+    "vite-plugin-singlefile": "2.3.3"
+  }
+}

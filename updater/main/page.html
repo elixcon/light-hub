@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Elixcon Light Hub updater</title>
+<style>
+  :root { color-scheme: light dark; --bg: #f6f6f4; --fg: #1b1b1a; --muted: #6b6b66; --card: #fff;
+          --line: #deded9; --accent: #2f6fdb; --bad: #b3261e; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #151515; --fg: #ececea; --muted: #9a9a94; --card: #1f1f1f; --line: #333; --accent: #7aa7ff; --bad: #ff8a80; }
+  }
+  body { margin: 0; padding: 32px 16px; background: var(--bg); color: var(--fg);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 520px; margin: 0 auto; background: var(--card); border: 1px solid var(--line);
+         border-radius: 12px; padding: 20px; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  h2 { font-size: 16px; margin: 20px 0 4px; }
+  p { margin: 8px 0; }
+  .muted { color: var(--muted); font-size: 13px; }
+  .bad { color: var(--bad); }
+  input, button { font: inherit; }
+  label { display: block; margin-top: 10px; }
+  input[type=text], input[type=password] { width: 100%; box-sizing: border-box; padding: 8px; margin-top: 4px;
+                     border: 1px solid var(--line); border-radius: 8px; background: transparent; color: inherit; }
+  label.check { display: flex; gap: 8px; align-items: flex-start; font-size: 14px; }
+  label.check input { margin-top: 4px; }
+  button { margin-top: 12px; padding: 8px 14px; border: 0; border-radius: 8px; background: var(--accent);
+           color: #fff; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  progress { width: 100%; margin-top: 12px; }
+  .parts { overflow-x: auto; }
+  table { border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+  td, th { padding: 2px 10px 2px 0; text-align: left; font-variant-numeric: tabular-nums; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Elixcon Light Hub updater</h1>
+  <p id="msg">Connecting…</p>
+  <p class="muted" id="versions"></p>
+
+  <form id="signin" hidden>
+    <p>This coordinator is secured. Enter a key to upload firmware.</p>
+    <input type="text" id="key" autocomplete="off" autocapitalize="characters" placeholder="K7M2Q-9XH4T-R3WZP-6NBVA">
+    <button type="submit">Sign in</button>
+  </form>
+
+  <form id="upload" hidden>
+    <p>Choose the application image - <code>build/elixcon_light_hub.bin</code>, the file ESPHome would call firmware.ota.bin.</p>
+    <input type="file" id="file" accept=".bin">
+    <button type="submit" id="send">Install</button>
+    <progress id="bar" value="0" max="1" hidden></progress>
+  </form>
+
+  <section id="convert" hidden>
+    <h2>Convert this device</h2>
+    <p class="muted" id="cv-device"></p>
+    <div class="parts"><table id="cv-parts"></table></div>
+    <p id="cv-why"></p>
+    <form id="cv-form">
+      <p>The converted device joins this Wi-Fi network and comes back as the updater at
+         <code>http://zigbee.local</code>, ready for the coordinator firmware. Leave it empty to set Wi-Fi from its setup hotspot instead.</p>
+      <label>Wi-Fi network <input type="text" id="cv-ssid" maxlength="32" autocomplete="off"></label>
+      <label>Password <input type="password" id="cv-pass" maxlength="64" autocomplete="off"></label>
+      <label class="check"><input type="checkbox" id="cv-ack">
+        <span>I understand that the bootloader and the partition table are rewritten, and that a power cut during
+        those few seconds leaves the device unable to start until it is flashed over a serial cable. The firmware on it now is erased.</span></label>
+      <button type="submit" id="cv-go" disabled>Convert</button>
+    </form>
+  </section>
+
+  <p id="note"></p>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const note = (text, bad) => { $("note").textContent = text; $("note").className = bad ? "bad" : "muted"; };
+const hex = (n) => "0x" + n.toString(16).padStart(6, "0");
+const PHASES = {
+  moving: "Moving the updater out of the way…",
+  moved: "The updater moved itself to make room and is restarting. Rejoin its hotspot if your device dropped it, reload this page and press Convert again.",
+  updater: "Step 1 of 5: copying the updater…",
+  data: "Step 2 of 5: erasing data partitions…",
+  bootloader: "Step 3 of 5: writing the bootloader. Do not cut the power.",
+  table: "Step 4 of 5: writing the partition table. Do not cut the power.",
+  settings: "Step 5 of 5: preparing the new layout…",
+  done: "Converted. The device restarts and joins the network you gave; open http://zigbee.local (or its address from your router) to upload the coordinator firmware.",
+};
+
+async function show() {
+  try {
+    const r = await fetch("/api/status", { cache: "no-store" });
+    const s = await r.json();
+    $("msg").textContent = s.message;
+    $("versions").textContent = "Updater " + s.version + (s.convert ? "" : " · coordinator " + (s.app_version || "not installed"));
+    $("signin").hidden = s.authorized;
+    $("upload").hidden = !s.authorized || s.convert;
+    $("convert").hidden = !s.authorized || !s.convert;
+    if (s.authorized && s.convert) showConvert();
+  } catch (e) {
+    $("msg").textContent = "The device is not answering - retrying.";
+    setTimeout(show, 3000);
+  }
+}
+
+async function showConvert() {
+  const c = await (await fetch("/api/convert", { cache: "no-store" })).json();
+  $("cv-device").textContent = `${c.flash_mb} MB flash · running from ${c.running} at ${hex(c.running_address)} · bootloader ${c.bootloader_idf || "unknown"}`;
+  $("cv-parts").innerHTML = "<tr><th>partition</th><th>at</th><th>size</th></tr>" + c.partitions.map((p) =>
+    `<tr><td>${p.label.replace(/[<&]/g, "?")}</td><td>${hex(p.address)}</td><td>${Math.round(p.size / 1024)} KiB</td></tr>`).join("");
+  $("cv-why").textContent = c.why || "";
+  $("cv-why").className = c.verdict === "blocked" ? "bad" : "muted";
+  $("cv-form").hidden = c.verdict === "blocked";
+  if (c.phase !== "idle") track(c);
+}
+
+function track(c) {
+  const busy = !["idle", "failed"].includes(c.phase);
+  $("cv-go").disabled = busy || !$("cv-ack").checked;
+  if (c.phase === "failed") note(c.error || "The conversion failed.", true);
+  else if (PHASES[c.phase]) note(PHASES[c.phase], false);
+}
+
+/* A move ends in a restart, and the restarted updater reports "idle" - it has
+ * no memory of the move. So "idle" after "moving" is the move having worked, and
+ * the form (still filled in, since the page was not reloaded) is ready again. */
+let moving = false;
+async function poll() {
+  try {
+    const c = await (await fetch("/api/convert", { cache: "no-store" })).json();
+    if (c.phase === "moving" || c.phase === "moved") moving = true;
+    if (c.phase === "idle" && moving) {
+      moving = false;
+      note("The updater has moved out of the way and restarted. Press Convert again to continue.", false);
+      showConvert();
+      $("cv-go").disabled = !$("cv-ack").checked;
+      return;
+    }
+    track(c);
+    if (c.phase === "failed" || c.phase === "done") return;
+  } catch (e) {
+    note(moving ? "The updater is restarting after moving itself…" : "The device is restarting…", false);
+  }
+  setTimeout(poll, 1000);
+}
+
+$("cv-ack").onchange = () => { $("cv-go").disabled = !$("cv-ack").checked; };
+
+$("cv-form").onsubmit = async (ev) => {
+  ev.preventDefault();
+  $("cv-go").disabled = true;
+  let r;
+  try {
+    r = await fetch("/api/convert", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ssid: $("cv-ssid").value, password: $("cv-pass").value, confirm: "CONVERT" }),
+    });
+  } catch (e) {
+    note("The request did not reach the device. Check you are still on its hotspot and try again.", true);
+    $("cv-go").disabled = !$("cv-ack").checked;
+    return;
+  }
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({}));
+    note(e.error || "The device refused to start the conversion.", true);
+    $("cv-go").disabled = !$("cv-ack").checked;
+    return;
+  }
+  poll();
+};
+
+$("signin").onsubmit = async (ev) => {
+  ev.preventDefault();
+  const r = await fetch("/api/auth/session", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ key: $("key").value }),
+  });
+  if (r.ok) { note(""); show(); } else { note("That key is not known here.", true); }
+};
+
+/* Back to the coordinator's own page once it answers instead of this one. */
+function waitForCoordinator() {
+  setTimeout(async () => {
+    try {
+      const r = await fetch("/api/status", { cache: "no-store" });
+      const s = await r.json();
+      if (!s.updater) { location.replace("/"); return; }
+    } catch (e) { /* restarting */ }
+    waitForCoordinator();
+  }, 3000);
+}
+
+$("upload").onsubmit = (ev) => {
+  ev.preventDefault();
+  const file = $("file").files[0];
+  if (!file) { note("Choose a file first.", true); return; }
+  $("send").disabled = true;
+  $("bar").hidden = false;
+  const xhr = new XMLHttpRequest();
+  xhr.open("POST", "/update");
+  xhr.upload.onprogress = (e) => { if (e.lengthComputable) { $("bar").value = e.loaded / e.total; note("Uploading… " + Math.round(100 * e.loaded / e.total) + " %"); } };
+  xhr.onload = () => {
+    if (xhr.status === 200 && xhr.responseText.startsWith("Update Successful")) {
+      $("bar").removeAttribute("value");
+      note("Installed - starting the coordinator. This page moves on by itself.");
+      waitForCoordinator();
+      return;
+    }
+    $("send").disabled = false;
+    note(xhr.getResponseHeader("X-Ota-Error") || "The updater rejected that file.", true);
+    show();
+  };
+  xhr.onerror = () => { $("send").disabled = false; note("The connection dropped during the upload.", true); show(); };
+  const form = new FormData();
+  form.append("file", file, file.name);
+  xhr.send(form);
+};
+
+show();
+</script>
+</body>
+</html>

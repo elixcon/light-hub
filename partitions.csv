@@ -1,0 +1,39 @@
+# Name,     Type, SubType,  Offset,   Size,     Flags
+# One application partition and a small updater, instead of two equal slots.
+#
+# Two equal slots on 4 MB would cap the coordinator at 1.94 MiB; `app` has
+# 2.37 MiB. The price: a running app cannot overwrite itself, so an update
+# restarts into `updater` (the factory app), which writes `app` and restarts
+# into it - and an image that never confirms is rolled back to the updater, not
+# to the firmware it replaced. The box stays reachable and takes another upload,
+# but the lights are off until it gets one.
+#
+# The data partitions keep the offsets and sizes of the earlier two-slot table
+# and must never move, so a USB flash of this table keeps the paired devices,
+# their names, the groups, curves, buttons, access keys, the Wi-Fi credentials,
+# the Zigbee network and the Matter fabrics. nvs_matter and zb_fct sit between
+# otadata and the first app partition.
+#
+# Offsets are explicit because the coordinator is built against a copy of this
+# table with the updater row removed (components/partition_layout); that copy
+# must still put `app` at 0x120000.
+#
+# `zb_ota` holds one firmware image for a Zigbee device, which the Zigbee stack
+# serves by pointer from a flash mapping (main/zb_ota.c). It takes the end of
+# what the previous table gave `app` (up to 0x400000); a box on that table gets
+# it without a cable: its updater recognises the table as this one with `app`
+# shorter and rewrites 0x8000 once (updater/main/convert.c, cv_relayout_check).
+#
+# Its type is 0x40, application-defined, and deliberately not `data`: converting
+# an ESPHome device erases every data partition of this table first, and one at
+# 0x380000 lies in ESPHome's second app slot, where the updater is running. Its
+# content does not need erasing anyway - it is only believed when the length and
+# CRC stored in NVS match it.
+nvs,        data, nvs,      0x9000,   0x9000,
+phy_init,   data, phy,      0x12000,  0x1000,
+otadata,    data, ota,      0x13000,  0x2000,
+nvs_matter, data, nvs,      0x15000,  0xA000,
+zb_fct,     data, fat,      0x1F000,  1K,
+updater,    app,  factory,  0x20000,  0x100000,
+app,        app,  ota_0,    0x120000, 0x260000,
+zb_ota,     0x40, 0x00,     0x380000, 0x80000,

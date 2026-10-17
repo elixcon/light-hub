@@ -1,0 +1,227 @@
+menu "Elixcon Light Hub"
+
+    config ZBC_ZIGBEE_CHANNEL
+        int "Zigbee channel used to form the network"
+        range 11 26
+        default 20
+        help
+            IEEE 802.15.4 channel the coordinator forms its network on. Keep it far
+            away from the 2.4 GHz Wi-Fi channel your router uses, because the C6
+            time-shares a single radio between Wi-Fi and Zigbee:
+            Wi-Fi ch 1 -> Zigbee 25/26, Wi-Fi 6 -> Zigbee 15/26, Wi-Fi 11 -> Zigbee 15.
+            Only the default for the first network formed. Settings -> Zigbee network
+            moves a formed network to another channel without re-pairing, and a new
+            network is formed on the channel it was last moved to.
+
+    config ZBC_MAX_DEVICES
+        int "Maximum number of paired devices"
+        range 1 128
+        default 32
+
+    config ZBC_MAX_ENDPOINTS_PER_DEVICE
+        int "Maximum controllable endpoints stored per device"
+        range 1 16
+        default 4
+
+    config ZBC_MAX_GROUPS
+        int "Maximum number of light groups"
+        range 1 32
+        default 8
+
+    config ZBC_MAX_GROUP_MEMBERS
+        int "Maximum number of lights in one group"
+        range 1 64
+        default 16
+
+    config ZBC_MAX_CURVES
+        int "Maximum number of lights with a stored response curve"
+        range 1 64
+        default 16
+        help
+            Only lights that have been given a curve take a slot; the rest pass
+            their brightness through unchanged.
+
+    config ZBC_MAX_BUTTONS
+        int "Maximum number of buttons, counting every button of every remote"
+        range 1 16
+        default 16
+
+    config ZBC_MAX_LIGHTS
+        int "Maximum number of lights wired to a pin"
+        range 1 16
+        default 8
+        help
+            Changing it changes nothing stored: the table is kept by count. Each
+            wired light can be a group member like any Zigbee lamp.
+
+    config ZBC_MAX_MATTER_LIGHTS
+        int "Maximum number of Matter lamps"
+        range 1 32
+        default 16
+        help
+            Each light endpoint of a paired Matter device is one - a hub such as a
+            Hue Bridge brings one per lamp behind it. Changing it changes nothing
+            stored: the table is kept by count.
+
+    config ZBC_MAX_MATTER_NODES
+        int "Maximum number of paired Matter devices"
+        range 1 16
+        default 8
+        help
+            A Matter device - a lamp, or a hub with lamps behind it - holds one
+            secure session and one subscription for as long as it is paired, which
+            costs heap. A hub counts once, however many lamps it has.
+
+    config ZBC_BUTTON_RULES
+        int "Rules on one button, all its gestures together"
+        range 12 32
+        default 12
+        help
+            Each gesture is a short list of "when this, do that" rules, tried in
+            order until one matches, and a rule can bring others along with "and".
+            The gestures of one button share this many, so a wall switch with one
+            gesture can use them all. Not below 12: that is what a button stored
+            before the pool held (four gestures of three), and converting one must
+            not lose a rule.
+            Changing it changes the size of a stored button and discards the
+            stored buttons unless BUTTON_BLOB_VERSION in button_db.c is bumped
+            with it.
+
+    config ZBC_MAX_AUTH_KEYS
+        int "Maximum number of access keys"
+        range 1 32
+        default 8
+        help
+            Browser cookies and API keys share this table. It is stored by count,
+            so changing the limit discards nothing.
+
+    config ZBC_UNLOCK_GPIO
+        int "Pin always watched for the failsafe unlock (-1 = none)"
+        range -1 30
+        default 9
+        help
+            Pressing a button 5 times, each press 0.5-2.5 s after the last, opens
+            the web UI to everyone for ZBC_UNLOCK_WINDOW_S. Every configured button
+            counts, GPIO and Zigbee alike; this pin counts even when nobody made a
+            button of it, so a bare board can always be let back into. GPIO 9 is
+            the BOOT button on the ESP32-C6 dev boards. Expected wired to GND; the
+            internal pull-up is enabled.
+
+    config ZBC_UNLOCK_WINDOW_S
+        int "How long the failsafe keeps the web UI open, in seconds"
+        range 30 900
+        default 120
+        help
+            The window also closes as soon as a browser is issued a key, so it is
+            open for as short a time as the person standing at the board needs.
+
+    config ZBC_SETUP_HOTSPOT_S
+        int "How long a button-started setup hotspot waits before going back, in seconds"
+        range 120 3600
+        default 600
+        help
+            Pressing a button 10 times in the failsafe rhythm restarts the
+            coordinator into its setup hotspot while keeping the stored Wi-Fi.
+            If no new network is saved in that time it restarts back onto the
+            stored one. While a device is still connected to the hotspot it
+            waits a minute at a time, up to three times this long in total.
+
+    config ZBC_AP_PASSWORD
+        string "SoftAP password used during provisioning (empty = open network)"
+        default ""
+        help
+            Leave empty for an open provisioning AP. If set, must be at least 8
+            characters.
+
+    config ZBC_CONFIG_BACKUP
+        bool "Configuration backup and restore"
+        default y
+        help
+            GET /api/backup downloads the settings and tables as a file - device
+            names, rooms, curves, buttons, wired lights, Matter lamps, Adaptive
+            Lighting, and on request the Wi-Fi password and the access keys'
+            hashes - and POST /api/restore gives one back, applied at the next
+            boot. Settings shows it as the Backup card. Never the Zigbee network
+            or the Matter fabrics. Off, neither route exists, the page has no
+            Backup card, and the boot does not look for a staged restore. Costs
+            about 10 KB of flash.
+
+    config ZBC_HEAP_WATCH
+        bool "Record how far each web request takes the heap down"
+        default n
+        help
+            Brackets every HTTP request with the heap's local-minimum monitor and
+            adds `routes`, `lows_between_requests` and `marks` to `heap` in
+            /api/status: each route's shallowest, mean and deepest drop below the
+            free heap at its start, new boot-wide lows (between requests looked
+            for once a second, inside one named with its route; each kept with
+            the events just before it),
+            and timed Zigbee, Matter, Adaptive Lighting and Wi-Fi events to match
+            those against. A diagnostic: it costs about 2.5 KB of RAM, a small
+            allocation per request and about 3 KB of status JSON. Off, `heap`
+            carries only free, min_free and largest.
+
+    config ZBC_HEAP_WATCH_TASKS
+        bool "Also count the heap each task holds"
+        depends on ZBC_HEAP_WATCH
+        select HEAP_TASK_TRACKING
+        default n
+        help
+            Adds `tasks` to `heap` in /api/status - per task, the bytes in blocks
+            it allocated that are not freed yet, its peak, and what it held ten
+            minutes after boot - to each low the three tasks whose holding rose
+            most in the second before it (in the request, for a low inside one),
+            and to each mark
+            what the task leaving it held. A task that keeps growing is a leak;
+            the one that rose is what took the heap down.
+
+            It turns on HEAP_TASK_TRACKING for the 4-byte owner that option puts
+            in every block, and replaces that option's own bookkeeping, which
+            keeps a list entry per allocation (about 24 bytes each) and walks it
+            on every free. What is left costs 4 bytes per block and about 2 KB.
+
+    config ZBC_CRASH_TEST
+        bool "Crash on request, to test the crash record"
+        default n
+        help
+            Lets POST /api/restart take {"crash": "abort"} or {"crash": "fault"}:
+            half a second later a task of its own calls abort() or reads an
+            unmapped address, and the next boot shows what crash_log.c recorded
+            as `last_crash` in /api/status. Refused while the image is on trial,
+            which a crash would roll back. For a test build only.
+
+    config ZBC_WLED
+        bool "WLED interface: stream to Hue colour lamps"
+        default y
+        help
+            Lets Hyperion.ng, HyperHDR, LedFx and other WLED clients drive one
+            room's Hue colour lamps as a WLED strip, through Philips'
+            entertainment frames (cluster 0xFC01): DDP on UDP 4048, WLED's own
+            UDP protocols on 21324, WLED's /json API and the _wled._tcp mDNS
+            service. Settings shows it as the WLED interface card, off until
+            somebody switches it on there. Off, none of it is built: no ports,
+            no /json routes, no card, no `wled` in /api/settings and /api/status
+            and no `ent` in `zigbee`. The interface's settings stay in NVS and in
+            a backup, so a build with it finds them again. Costs about 16 KB of
+            flash and 1 KB of RAM.
+
+    config ZBC_WLED_WS
+        bool "WLED apps: WLED's WebSocket /ws"
+        depends on ZBC_WLED
+        default n
+        select HTTPD_WS_SUPPORT
+        select HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT
+        help
+            The WLED apps (iOS, Android) show a device online only while its
+            WebSocket /ws is open. With this, the WLED interface serves one: the
+            state as it opens, and after each command the app sends there. The
+            apps can then switch the WLED interface's room. Hyperion, HyperHDR
+            and LedFx do not need it. Costs about 7.4 KB of flash, the HTTP
+            server's WebSocket support included.
+
+            Switching it off again in an existing sdkconfig leaves
+            HTTPD_WS_SUPPORT and HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT on: an
+            sdkconfig keeps what a select once set. Turn those two off by hand,
+            or the image keeps 7 KB of WebSocket code with no route using it.
+
+endmenu

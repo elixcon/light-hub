@@ -1,0 +1,241 @@
+@import "tailwindcss";
+
+/* shadcn's variable names, so the generated components work unmodified. Theme
+ * follows the OS: there is no route for a toggle to be worth storing.
+ *
+ * The palette is Elixcon's: teal for the interface, magenta for what is
+ * destructive, marine for focus, warm sand and ink for surfaces and text.
+ * Amber is kept for light itself - `--on` for a lit lamp, `--curve` for the
+ * response editors - because there it means something. */
+:root {
+  color-scheme: light dark;
+  --background: #fbf7f0;           /* sand-50 */
+  --foreground: #1c1b17;           /* ink-900 */
+  --card: #ffffff;
+  --card-foreground: #1c1b17;
+  --popover: #ffffff;
+  --popover-foreground: #1c1b17;
+  --primary: #007f79;              /* teal-600 */
+  --primary-foreground: #ffffff;
+  --secondary: #f3eada;            /* sand-100 */
+  --secondary-foreground: #1c1b17;
+  --muted: #f3eada;
+  --muted-foreground: #6e695d;     /* ink-500 */
+  --accent: #f3eada;
+  --accent-foreground: #1c1b17;
+  --destructive: #98005f;          /* magenta-600 */
+  /* Dividers, outlines and grid lines: ink, translucent, so a line reads
+   * the same on the white top of a card and its sand foot.
+   * On white it is ink-100, as it was. */
+  --border: rgb(28 27 23 / .09);
+  --edge: rgb(28 27 23 / .10);     /* a card's outline: ink-900 at 10 % */
+  --input: #d8d5cc;                /* ink-200 */
+  --ring: #2498ae;                 /* marine-400 */
+  --hover: #007eb1;                /* sky-600: what the pointer is over, in the menu */
+  --on: #f5b301;
+  --curve: #f59e0b;
+  --level-fill: linear-gradient(to right, #f59e0b, #ffd27a);  /* a brightness slider's range */
+  --radius: 0.875rem;
+  --menu-c1: #c9e8e6;              /* teal-100 */
+  --menu-c2: #007f79;
+  --menu-panel: #fbf7f0;           /* sand-50: the page is dimmed behind it */
+
+  /* Soft and warm: a brown tint rather than grey, so a shadow on sand reads
+   * as depth instead of dirt. */
+  --elev-1: 0 1px 2px rgb(110 80 40 / .08);
+  --elev-2: 0 1px 2px rgb(110 80 40 / .07), 0 3px 10px -2px rgb(110 80 40 / .13);
+  --elev-3: 0 2px 4px -1px rgb(110 80 40 / .08), 0 14px 32px -8px rgb(110 80 40 / .22);
+
+  /* A card falls from white into sand, and the page has a teal wash at the
+   * top. A lit lamp's card is filled with its light's colour (`.lamp`,
+   * lib/glow.ts); `--glow` is the amber a pressed remote button's card holds. */
+  --card-from: #f5ecdd;
+  --card-to: #ffffff;
+  --glow: #ffeccb;
+  --page-tint: rgb(0 127 121 / .05);
+  --page-wash: transparent;        /* sand stays sand; the teal is the dark theme's */
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #111110;         /* ink-950 */
+    --foreground: #f6f5f2;         /* ink-50 */
+    --card: #1c1b17;               /* ink-900 */
+    --card-foreground: #f6f5f2;
+    --popover: #2e2c26;            /* ink-800 */
+    --popover-foreground: #f6f5f2;
+    --primary: #5fbab4;            /* teal-300: teal-600 on ink reads about 2:1 */
+    --primary-foreground: #111110;
+    --secondary: #2e2c26;
+    --secondary-foreground: #f6f5f2;
+    --muted: #2e2c26;
+    --muted-foreground: #bcc7c6;
+    --accent: #2e2c26;
+    --accent-foreground: #f6f5f2;
+    --destructive: #e25fa1;        /* magenta-300 */
+    /* ink-800 was the card's own colour, and the chart's: dividers and the
+     * curve grid did not show. */
+    --border: rgb(246 245 242 / .12);
+    /* At 10 % the outline was the shade of the card's own top and vanished
+     * into it; it has to be lighter than both the page and the card. */
+    --edge: rgb(246 245 242 / .18);
+    --input: #423f37;              /* ink-700 */
+    --ring: #57b4c6;               /* marine-300 */
+    --hover: #59b1dc;              /* sky-300 */
+    --menu-c1: #00504c;            /* teal-800 */
+    --menu-c2: #5fbab4;
+    --menu-panel: #25231f;         /* between ink-900 and ink-800: the page is ink-950, and dimming it barely shows */
+
+    /* On near-black a warm tint is invisible; depth comes from the lighter
+     * surfaces, and the shadow only has to settle the edge. */
+    --elev-1: 0 1px 2px rgb(0 0 0 / .35);
+    --elev-2: 0 1px 2px rgb(0 0 0 / .35), 0 4px 12px -2px rgb(0 0 0 / .4);
+    --elev-3: 0 2px 4px -1px rgb(0 0 0 / .4), 0 16px 36px -8px rgb(0 0 0 / .55);
+
+    --card-from: #25312d;
+    --card-to: #151c1a;
+    --glow: #342300;
+    --page-tint: rgb(95 186 180 / .05);
+    /* A dark teal that fades into ink down the first screen: teal-800 at
+     * 26 %, which with `--page-tint` over it leaves grey text 4.57:1 at the
+     * top. At 30 % the two together fell to 4.45. */
+    --page-wash: rgb(0 80 76 / .26);
+  }
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-edge: var(--edge);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-on: var(--on);
+  --color-curve: var(--curve);
+  --shadow-xs: var(--elev-1);
+  --shadow-sm: var(--elev-2);
+  --shadow-md: var(--elev-2);
+  --shadow-lg: var(--elev-3);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --font-sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+}
+
+@layer base {
+  * { @apply border-border outline-ring/50; }
+  html { -webkit-tap-highlight-color: transparent; }
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    min-height: 100dvh;
+    /* Not `background-attachment: fixed`: iOS Safari repaints it badly. Both
+     * layers are one screen tall, so a long page does not stretch them. */
+    background-image:
+      radial-gradient(120% 60% at 50% -10%, var(--page-tint), transparent 70%),
+      linear-gradient(to bottom, var(--page-wash), transparent);
+    background-size: 100% 100svh;
+    background-repeat: no-repeat;
+  }
+}
+
+/* Registered so a lamp card's colour can transition: a gradient does not. Not
+ * inherited, and set only on the card's ::before from the card's plain
+ * `--lamp-top` / `--lamp-bottom`: the frames of a colour change restyle that
+ * one layer, not every element on the card. */
+@property --lamp-a { syntax: "<color>"; inherits: false; initial-value: transparent; }
+@property --lamp-b { syntax: "<color>"; inherits: false; initial-value: transparent; }
+
+@layer components {
+  .surface {
+    background-color: var(--card);
+    background-image: linear-gradient(160deg, var(--card-from), var(--card-to));
+  }
+  /* What a lit card holds is a pseudo-element faded in over the surface,
+   * because a gradient does not animate and an opacity does. Only `data-lit`
+   * shows it, so a lamp whose state is unknown stays plain. */
+  :is(.glow, .lamp) { position: relative; isolation: isolate; }
+  :is(.glow, .lamp)::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    opacity: 0;
+  }
+  :is(.glow, .lamp)[data-lit]::before { opacity: 1; }
+
+  /* A pressed remote button's card: a glow of amber in its corner. */
+  .glow::before {
+    background: radial-gradient(130% 150% at 0% 0%, var(--glow) 15%, transparent 75%);
+    transition: opacity .4s ease;
+  }
+
+  /* A lit lamp's card is filled with the light's colour, `--lamp-top` to
+   * `--lamp-bottom` from lib/glow.ts (`lampAttrs`). The card's own colours are
+   * redefined for what sits on the colour - text, its grey, the slider's track
+   * and fill, the switch, outlines, focus, a badge - in black or white ink by
+   * `data-ink`; lib/glow.ts has chosen the ink and moved the colour so that
+   * the grey reads at 4.5:1. The two inks and the grey's opacity are INK and
+   * MUTED there. */
+  .lamp::before {
+    --lamp-a: var(--lamp-top);
+    --lamp-b: var(--lamp-bottom);
+    background: linear-gradient(to bottom, var(--lamp-a), var(--lamp-b));
+    transition: opacity .4s ease, --lamp-a .4s ease, --lamp-b .4s ease;
+  }
+  /* The ink changes halfway through the fade, not at once: switched on, black
+   * text would sit on the dark card while the colour fades in; switched off,
+   * on a colour fading out. Unregistered custom properties animate discretely,
+   * flipping at the midpoint, given allow-discrete. On the card's content,
+   * which reads them, because the card itself redefines them at once. */
+  .lamp > * {
+    color: var(--card-foreground);
+    transition-property: --foreground, --card-foreground, --muted-foreground, --primary, --primary-foreground,
+      --muted, --border, --on, --ring, --level-fill;
+    transition-duration: .4s;
+    transition-behavior: allow-discrete;
+  }
+  .lamp[data-lit] { --level-fill: rgb(255 255 255 / .55); }
+  .lamp[data-lit][data-ink="dark"] {
+    --foreground: #1c1b17;
+    --card-foreground: #1c1b17;
+    --muted-foreground: rgb(28 27 23 / .72);
+    --primary: #1c1b17;
+    --primary-foreground: #ffffff;
+    --muted: rgb(0 0 0 / .16);        /* the slider's track, a ghost button's hover */
+    --border: rgb(0 0 0 / .14);
+    --on: rgb(0 0 0 / .28);           /* the switch's track */
+    --ring: #1c1b17;
+  }
+  .lamp[data-lit][data-ink="light"] {
+    --foreground: #ffffff;
+    --card-foreground: #ffffff;
+    --muted-foreground: rgb(255 255 255 / .8);
+    --primary: #ffffff;
+    --primary-foreground: #1c1b17;
+    --muted: rgb(255 255 255 / .2);
+    --border: rgb(255 255 255 / .25);
+    --on: rgb(255 255 255 / .35);
+    --ring: #ffffff;
+  }
+  @media (hover: hover) {
+    .lift { transition: box-shadow .15s ease; }
+    .lift:hover { box-shadow: var(--elev-3); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .glow::before, .lamp::before, .lamp > *, .lift { transition: none; }
+  }
+}

@@ -1,0 +1,8 @@
+# Extracted from the source at build time - never checked in.
+*.inc
+
+# Test binaries and the debug bundles cc leaves beside them. Listed as a pattern
+# so a new test is covered without anyone having to remember this file.
+test_*
+!test_*.c
+*.dSYM/

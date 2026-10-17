@@ -1,0 +1,54 @@
+# The updater - see main/updater.c. Wi-Fi, a web server and the flash writer.
+
+# The coordinator's build passes its own target down; this is for
+# `idf.py -C updater build`, which would otherwise build for the plain ESP32.
+CONFIG_IDF_TARGET="esp32c6"
+
+# The real table, not the coordinator's derived one: it is what the size check
+# compares this image with, and the updater fits both app partitions.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="../partitions.csv"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+
+# Must match the coordinator. It decides whether esp_ota_set_boot_partition()
+# puts a new image on trial - without it a coordinator that cannot get back onto
+# the network would never be rolled back to here. (The bootloader enforcing it
+# is the one the coordinator's build flashes.)
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# The partition is 1 MiB and fixed for the life of every box already shipped.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_SILENT=y
+
+# Wi-Fi the updater provably never uses. wifi_manager.c joins with an SSID and a
+# passphrase (never 802.1X), opens its setup hotspot open or WPA2, and keeps the
+# credentials in its own NVS namespace with the driver's storage set to RAM.
+# WPA3-SAE and OWE for joining stay on: the updater has to be able to join any
+# network the coordinator can, or a failed update would strand the box.
+CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT=n
+CONFIG_ESP_WIFI_SOFTAP_SAE_SUPPORT=n
+CONFIG_ESP_WIFI_NVS_ENABLED=n
+# Nothing here speaks IPv6; the coordinator only needs it for Matter.
+CONFIG_LWIP_IPV6=n
+
+# Coexistence, although the updater never uses 802.15.4. Without it, Wi-Fi on
+# this board hears nothing after a hardware reset: every join ends in "no AP
+# found" and a scan sees zero networks. See esp_coex_wifi_i154_enable() in
+# main/updater.c and CLAUDE.md.
+CONFIG_IEEE802154_ENABLED=y
+CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
+
+# Converting another firmware's device writes the bootloader and the partition
+# table, which ESP-IDF otherwise refuses (convert.c). Only the updater has this.
+CONFIG_SPI_FLASH_DANGEROUS_WRITE_ALLOWED=y
+
+# The same hardware invariants the coordinator needs, for the same reasons - see
+# "sdkconfig invariants" in CLAUDE.md.
+CONFIG_ESP_PHY_RF_CAL_FULL=y
+CONFIG_LWIP_DHCP_DOES_NOT_CHECK_OFFERED_IP=y
+CONFIG_LWIP_LOCAL_HOSTNAME="zigbee"
+
+# Cookies and a multipart Content-Type do not fit the default header limit.
+CONFIG_HTTPD_MAX_URI_LEN=256
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
