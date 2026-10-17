@@ -78,7 +78,8 @@ the first stack entry name `esp_vApplicationTickHook` and `__assert_func`, which
 riscv32-esp-elf-addr2line -pfiaC -e elixcon_light_hub.elf 0x40806ac2 0x42023315 0x40806a85 0x4080ea57 0x42023317
 ```
 
-So keep `build/elixcon_light_hub.elf` of every image that goes onto a box. `build` matches the
+So keep `build/elixcon_light_hub.elf` of every image that goes onto a box; a release has it as
+`elixcon_light_hub-<version>.elf`, the `version` in the record. `build` matches the
 "ELF file SHA256" `idf.py build` prints. To test the record, build with `CONFIG_ZBC_CRASH_TEST`. Then
 `POST /api/restart` takes `{"crash": "abort"}` or `{"crash": "fault"}` and crashes half a second
 later.

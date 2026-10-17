@@ -58,11 +58,12 @@ Scenes and effects are not supported.
 
 ### From a release
 
-Each tagged release on GitHub has the images attached. For a new board, download
-`elixcon_light_hub-factory.bin` and write it with [esptool](https://github.com/espressif/esptool):
+Each tagged release on GitHub has the images attached, with the version in their names. For a new
+board, download `elixcon_light_hub-<version>-factory.bin` and write it with
+[esptool](https://github.com/espressif/esptool):
 
 ```sh
-esptool.py --chip esp32c6 -p <port> write_flash 0x0 elixcon_light_hub-factory.bin
+esptool.py --chip esp32c6 -p <port> write_flash 0x0 elixcon_light_hub-<version>-factory.bin
 ```
 
 The factory image is for a blank board only. It covers the storage areas too, so writing it to a

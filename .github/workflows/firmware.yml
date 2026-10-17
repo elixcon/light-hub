@@ -92,12 +92,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           base="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME"
-          sed "s|@BASE@|$base|g" > notes.md <<'EOF'
-          - `elixcon_light_hub-factory.bin`: a blank board. It erases everything stored.
-          - `elixcon_light_hub-<version>-usb.zip`: a board already in use, over USB. It keeps everything stored.
-          - `elixcon_light_hub.bin`: an update over the network.
-          - `elixcon_light_hub_updater.bin`: converting an ESPHome device, or replacing the updater.
-          - `elixcon_light_hub.elf`: decodes a crash record from this build.
+          sed -e "s|@BASE@|$base|g" -e "s|@VERSION@|$GITHUB_REF_NAME|g" > notes.md <<'EOF'
+          - `elixcon_light_hub-@VERSION@-factory.bin`: a blank board. It erases everything stored.
+          - `elixcon_light_hub-@VERSION@-usb.zip`: a board already in use, over USB. It keeps everything stored.
+          - `elixcon_light_hub-@VERSION@.bin`: an update over the network.
+          - `elixcon_light_hub_updater-@VERSION@.bin`: converting an ESPHome device, or replacing the updater.
+          - `elixcon_light_hub-@VERSION@.elf`: decodes a crash record from this build.
 
           How to write each one: [Installing](@BASE@/README.md#installing), [Firmware updates](@BASE@/docs/updates.md), [Converting](@BASE@/docs/converting.md), [After a crash](@BASE@/docs/development.md#after-a-crash).
           EOF

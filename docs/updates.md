@@ -13,8 +13,8 @@ curl -H 'Expect:' --retry 6 --retry-delay 5 --retry-all-errors \
 The upload is the one ESPHome's `web_server` OTA platform uses, so the file and the request have the
 same shape as for any ESPHome device.
 
-The file is a plain application image: `elixcon_light_hub.bin` from a release or from `build/`, what
-ESPHome calls `firmware.ota.bin`. A merged `*-factory.bin` (bootloader first) is refused, with
+The file is a plain application image: `elixcon_light_hub-<version>.bin` from a release or
+`elixcon_light_hub.bin` from `build/`, what ESPHome calls `firmware.ota.bin`. A merged `*-factory.bin` (bootloader first) is refused, with
 `X-Ota-Error` saying why. Both start with the same `0xE9` magic byte, and only the app descriptor
 tells them apart.
 
