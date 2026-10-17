@@ -6,9 +6,7 @@ Home, Home Assistant or Alexa, over Matter. The board runs its own Zigbee networ
 with the same chip, and serves the web page you set it up with. Everything runs on the board.
 
 <p align="center">
-  <img src="docs/images/rooms.jpg" width="260" alt="The Rooms page: a switch and a brightness slider for each room">
-  <img src="docs/images/curve-colour.jpg" width="260" alt="A lamp's warmth and colour path across the room slider">
-  <img src="docs/images/remotes.jpg" width="260" alt="The Remotes page: Zigbee remotes and a wired button with their rules">
+  <img src="docs/images/overview.svg" width="100%" alt="What controls the hub (the web page, a WLED stream as an alpha feature, home apps over Matter, Zigbee remotes, wired switches) and what it drives (Zigbee lamps, plugs and relays; Matter lamps; relays and LED strips wired to the board). Each room is one light.">
 </p>
 
 In these documents the board running the firmware is called the coordinator, the Zigbee name for the
@@ -33,6 +31,12 @@ device that runs a network.
 - **Independent.** Wired switches and Zigbee remotes are handled on the board, so they keep working
   when Home Assistant, a controller, the internet or the router is down. The exception: a board
   that starts without Wi-Fi turns Zigbee off after about two minutes, until the network is back.
+
+<p align="center">
+  <img src="docs/images/rooms.jpg" width="260" alt="The Rooms page: a switch and a brightness slider for each room">
+  <img src="docs/images/curve-colour.jpg" width="260" alt="A lamp's warmth and colour path across the room slider">
+  <img src="docs/images/remotes.jpg" width="260" alt="The Remotes page: Zigbee remotes and a wired button with their rules">
+</p>
 
 ## What it does
 
