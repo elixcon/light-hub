@@ -180,25 +180,26 @@ function mergeDay(b, zone) {
   const win = (w, was) => w === undefined ? was : w === null ? { earliest: null, latest: null } : { ...was, ...w };
   const next = { ...adaptive, ...b, sunrise: win(b.sunrise, adaptive.sunrise), sunset: win(b.sunset, adaptive.sunset) };
   const limits = [next.sunrise.earliest, next.sunrise.latest, next.sunset.earliest, next.sunset.latest].some((v) => v !== null);
-  if (limits && !zone) return "sunrise and sunset limits are local clock times: send time_zone with them";
+  if (limits && !zone) return "sunrise and sunset limits are local clock times: send time_zone to /api/settings first";
   adaptive = next;
   return null;
 }
-const settings = () => ({ backup: true, transition_ms: 800, transition_max_ms: 10000, name: "Living Room Hub", hostname: "living-room-hub",
-  name_max_len: 31, thermal: thermalCfg, zigbee_channel: zbChannel, location, adaptive: dayOut(), ...adaptiveNow() });
+const settings = () => { const a = adaptiveNow(); return { backup: true, transition_ms: 800, transition_max_ms: 10000, name: "Living Room Hub",
+  hostname: "living-room-hub", name_max_len: 31, thermal: thermalCfg, zigbee_channel: zbChannel, location, time_utc: a.time_utc,
+  sun: a.sun, time_zone: a.time_zone }; };
 
 const json = (res, code, body) => { res.writeHead(code, { "Content-Type": "application/json", "Cache-Control": "no-store" }); res.end(JSON.stringify(body)); };
 const body = (req) => new Promise((r) => { let s = ""; req.on("data", (c) => (s += c)); req.on("end", () => { try { r(JSON.parse(s || "{}")); } catch { r({}); } }); });
 const findEp = (ieee, ep) => { const d = devices.find((x) => x.ieee === ieee); return d && d.endpoints.find((e) => e.ep === Number(ep)); };
-const syncGroup = (g) => { for (const m of g.members) { const e = findEp(m.ieee, m.ep); if (e) { m.on = e.on; m.brightness_pct = e.brightness_pct; } } g.on = g.members.some((m) => m.on) ? true : g.members.every((m) => m.on === null) ? null : false;
-  if (g.adaptive.expose !== "off") { const s = adaptiveNow().adaptive_now; g.adaptive.pct = Math.round(s.pct); g.adaptive.offset_k = Math.round(s.offset_k); } };
-/* Changed by hand: Adaptive Lighting stops. */
+const syncGroup = (g, s) => { for (const m of g.members) { const e = findEp(m.ieee, m.ep); if (e) { m.on = e.on; m.brightness_pct = e.brightness_pct; } } g.on = g.members.some((m) => m.on) ? true : g.members.every((m) => m.on === null) ? null : false;
+  g.adaptive.pct = Math.round(s.pct); g.adaptive.offset_k = Math.round(s.offset_k); };
+/* Switched off or dimmed by hand: Adaptive Lighting stops. */
 const endAdaptive = (g) => { if (g.adaptive.active) g.adaptive = { ...g.adaptive, active: false, reason: "off" }; };
 
 http.createServer(async (req, res) => {
   const u = new URL(req.url, "http://x"); const p = u.pathname.split("/").filter(Boolean); const m = req.method;
   await new Promise((r) => setTimeout(r, 40));
-  if (u.pathname === "/api/state") { groups.forEach(syncGroup); return json(res, 200, { status: status(), devices, groups, buttons, remotes, auth }); }
+  if (u.pathname === "/api/state") { const s = adaptiveNow().adaptive_now; groups.forEach((g) => syncGroup(g, s)); return json(res, 200, { status: status(), devices, groups, buttons, remotes, auth }); }
   if (u.pathname === "/api/status") return json(res, 200, status());
   if (u.pathname === "/api/auth") return json(res, 200, auth);
   if (u.pathname === "/api/auth/keys" && m === "GET") return json(res, 200, { keys: [{ id: 1, kind: "browser", name: "Chrome on macOS", last_used_s_ago: 3, current: true }, { id: 2, kind: "api", name: "Home Assistant", last_used_s_ago: -1, current: false }], max: 8 });
@@ -210,10 +211,6 @@ http.createServer(async (req, res) => {
       const st = moveNow().state;
       if (st === "announced" || st === "moving" || (zbSurvey && Date.now() - zbSurvey < 12000)) return json(res, 409, { error: "a channel move or survey is in progress" });
       if (b.zigbee_channel !== zbChannel) zbMove = { at: Date.now(), from: zbChannel, to: b.zigbee_channel };
-    }
-    if (b.adaptive) {
-      const err = mergeDay(b.adaptive, b.time_zone !== undefined ? b.time_zone : timeZone);
-      if (err) return json(res, 400, { error: err });
     }
     if (b.time_zone !== undefined) timeZone = b.time_zone;
     if (b.location !== undefined) location = b.location;
@@ -271,14 +268,16 @@ http.createServer(async (req, res) => {
     if (m === "DELETE") { const i = devices.findIndex((x) => x.ieee === ieee); if (i >= 0) devices.splice(i, 1); return json(res, 200, { ok: true }); }
   }
   if (p[0] === "api" && p[1] === "groups") {
-    if (!p[2] && m === "POST") { const g = { id: groups.length + 1, name: (await body(req)).name, members: [], on: null, brightness_pct: null, turn_on: "last", adaptive: alOff() }; groups.push(g); return json(res, 201, { id: g.id }); }
+    if (!p[2] && m === "POST") { const g = { id: Math.max(0, ...groups.map((x) => x.id)) + 1, name: (await body(req)).name, members: [], on: null, brightness_pct: null, turn_on: "last", adaptive: alOff() }; groups.push(g); return json(res, 201, { id: g.id }); }
     const g = groups.find((x) => x.id === Number(p[2])); if (!g) return json(res, 404, { error: "no such group" });
     const level = (pct) => { g.brightness_pct = pct; for (const mm of g.members) { const e = findEp(mm.ieee, mm.ep); if (e && mm.brightness) { e.on = true; e.brightness_pct = pct; e.input_pct = pct; } } };
-    if (p[3] === "onoff") { const b = await body(req); endAdaptive(g); for (const mm of g.members) { const e = findEp(mm.ieee, mm.ep); if (e) e.on = b.state === "on"; } return json(res, 202, { ok: true }); }
+    if (p[3] === "onoff") { const b = await body(req); if (b.state !== "on") endAdaptive(g); for (const mm of g.members) { const e = findEp(mm.ieee, mm.ep); if (e) e.on = b.state === "on"; } return json(res, 202, { ok: true }); }
     if (p[3] === "level") { endAdaptive(g); level((await body(req)).pct); return json(res, 202, { ok: true }); }
     if (p[3] === "adaptive") {
-      if ((await body(req)).state !== "on") endAdaptive(g);
-      else if (g.adaptive.expose !== "off") { g.adaptive = { ...g.adaptive, active: true, reason: "on" }; level(Math.round(adaptiveNow().adaptive_now.pct)); }
+      /* On when "state" is absent: the page's button sends {}. */
+      if ((await body(req)).state === "off") { endAdaptive(g); return json(res, 202, { ok: true }); }
+      if (g.adaptive.expose === "off") return json(res, 409, { error: "Adaptive Lighting is off for this room" });
+      g.adaptive = { ...g.adaptive, active: true, reason: "on" }; level(Math.round(adaptiveNow().adaptive_now.pct));
       return json(res, 202, { ok: true });
     }
     if (p[3] === "day") {
