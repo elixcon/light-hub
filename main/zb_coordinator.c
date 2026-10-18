@@ -5237,6 +5237,10 @@ static bool app_signal_handler(const ezb_app_signal_t *app_signal)
                      s_net.pan_id, ext_pan_id.u64, s_net.channel, s_net.short_addr);
             join_remote_groups();
             ota_attach_locked();
+            /* As on a restored network: the neighbour scans, the retried binds and
+             * interrogations and the colour re-reads all run off this timer, and
+             * the devices paired in the first boot after forming need them most. */
+            esp_timer_start_once(s_refresh_timer, 5 * 1000000ULL);
         } else {
             ESP_LOGW(TAG, "Failed to form network with status(0x%02x), retrying", status);
             s_formation_failed = true;
