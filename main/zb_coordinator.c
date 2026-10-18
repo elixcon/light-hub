@@ -504,12 +504,20 @@ static void simple_desc_result(const ezb_zdo_simple_desc_req_result_t *result, v
      * so they are read only when missing. Bindings are redone every time: a
      * factory-reset lamp loses them. */
     zbc_device_t known;
-    bool have_model = false, have_color = false;
+    bool     have_model = false, have_color = false;
+    uint16_t recorded   = features;
     if (device_db_get(ieee, &known)) {
         have_model = known.model[0] != '\0';
         for (int i = 0; i < known.ep_count; i++) {
             if (known.eps[i].ep == desc->ep_id) {
                 have_color = known.eps[i].ct_min_mireds != ZBC_UNKNOWN;
+                /* A colour-only lamp whose ColorCapabilities already said so keeps
+                 * that answer: the provisional colour-temperature bit the cluster
+                 * list implies is not put back on every announce. */
+                const uint16_t f = known.eps[i].features;
+                if ((f & ZBC_FEAT_ANY_COLOR) && !(f & ZBC_FEAT_COLOR_TEMP)) {
+                    recorded &= (uint16_t)~ZBC_FEAT_COLOR_TEMP;
+                }
                 break;
             }
         }
@@ -519,7 +527,7 @@ static void simple_desc_result(const ezb_zdo_simple_desc_req_result_t *result, v
              saddr, desc->ep_id,
              is_light && is_switch ? "light and a switch" : (is_light ? "light" : "switch"),
              desc->app_device_id, features);
-    device_db_add_endpoint(ieee, desc->ep_id, desc->app_device_id, features);
+    device_db_add_endpoint(ieee, desc->ep_id, desc->app_device_id, recorded);
     if (is_switch && !is_light) {
         /* device_db_add_endpoint only adds bits, so clear them first: the simple
          * descriptor is the authority on what an endpoint is. The colour bits,
@@ -2892,6 +2900,13 @@ static void handle_attribute(uint16_t src_addr, uint8_t src_ep, uint16_t cluster
                 features |= ZBC_FEAT_COLOR_TEMP;
             }
             device_db_add_features(ieee, src_ep, features);
+            /* The provisional bit the cluster list set goes when the lamp says it
+             * has no colour temperature - a colour-only lamp is not tunable white.
+             * Only on an answer that names something: a lamp reporting no
+             * capability at all is believed less than its cluster list. */
+            if (u16 != 0 && !(features & ZBC_FEAT_COLOR_TEMP)) {
+                device_db_clear_features(ieee, src_ep, ZBC_FEAT_COLOR_TEMP);
+            }
             ESP_LOGI(TAG, "Device 0x%04x ep %d colour capabilities 0x%04x", src_addr, src_ep, u16);
             return;
         }
