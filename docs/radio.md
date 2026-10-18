@@ -138,4 +138,6 @@ which makes an access point on channel 12 or 13 invisible: every join attempt wo
 found".
 
 While the setup hotspot runs, Zigbee is stopped. Getting onto the network is the only thing that
-matters then, and there are no lights to serve yet.
+matters then, and there are no lights to serve yet. A factory reset is refused there, and erases
+nothing, until the coordinator is back on its Wi-Fi, because leaving the Zigbee network needs the
+stack.

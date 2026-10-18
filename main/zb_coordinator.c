@@ -6622,6 +6622,11 @@ void zb_get_netinfo(zb_netinfo_t *out)
 
 esp_err_t zb_factory_reset(void)
 {
+    /* In the setup hotspot the stack was never initialised (or has been stopped
+     * for the fallback AP), and the lock below asserts - see zb_remove_device. */
+    if (!s_stack_started) {
+        return ESP_ERR_INVALID_STATE;
+    }
     device_db_erase();
     esp_zigbee_lock_acquire(portMAX_DELAY);
     esp_zigbee_factory_reset();  /* leaves the network and reboots the chip */

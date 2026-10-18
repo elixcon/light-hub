@@ -2354,7 +2354,10 @@ static esp_err_t button_patch(httpd_req_t *req, uint16_t id)
 /* POST /api/buttons/{id}/test  {"event": "short"|"long"|"double"|"triple"} */
 static esp_err_t button_test_post(httpd_req_t *req, uint16_t id)
 {
-    cJSON *json = req->content_len > 0 ? read_json_body(req) : NULL;
+    cJSON *json = NULL;
+    if (req->content_len > 0 && !(json = read_json_body(req))) {
+        return ESP_FAIL;                   /* answered already; nothing is fired */
+    }
     int ev = ZBC_EV_SHORT, hold_ms = 0;
     if (json) {
         ev = name_index(EVENT_NAMES, ZBC_EV_COUNT, cJSON_GetObjectItem(json, "event"));
@@ -4245,7 +4248,10 @@ static esp_err_t restart_post(httpd_req_t *req)
     /* {"crash": "abort" | "fault"}: restart by crashing, to test crash_log.c. A
      * crash does not pass through confirm_on_restart, so an image on trial is
      * refused even once the station has joined. */
-    cJSON *json = req->content_len > 0 ? read_json_body(req) : NULL;
+    cJSON *json = NULL;
+    if (req->content_len > 0 && !(json = read_json_body(req))) {
+        return ESP_FAIL;                   /* answered already */
+    }
     if (json) {
         const cJSON *crash = cJSON_GetObjectItem(json, "crash");
         const bool   want_abort = cJSON_IsString(crash) && strcmp(crash->valuestring, "abort") == 0;
@@ -4276,11 +4282,30 @@ static esp_err_t restart_post(httpd_req_t *req)
 static esp_err_t factory_reset_post(httpd_req_t *req)
 {
     bool   zigbee_only = false;
-    cJSON *json        = req->content_len > 0 ? read_json_body(req) : NULL;
+    cJSON *json        = NULL;
+    /* A body that could not be read has been answered, and must not fall through
+     * to the default - which is the reset that erases everything. */
+    if (req->content_len > 0 && !(json = read_json_body(req))) {
+        return ESP_FAIL;
+    }
     if (json) {
-        cJSON *scope = cJSON_GetObjectItem(json, "scope");
-        zigbee_only  = cJSON_IsString(scope) && strcmp(scope->valuestring, "zigbee") == 0;
+        cJSON     *scope = cJSON_GetObjectItem(json, "scope");
+        const bool known = !scope || (cJSON_IsString(scope) && (strcmp(scope->valuestring, "all") == 0 ||
+                                                                strcmp(scope->valuestring, "zigbee") == 0));
+        zigbee_only      = known && scope && strcmp(scope->valuestring, "zigbee") == 0;
         cJSON_Delete(json);
+        /* A scope this build does not know is not read as "everything". */
+        if (!known) {
+            return send_error(req, "400 Bad Request", "scope must be all or zigbee");
+        }
+    }
+    /* Leaving the network needs the stack, which the setup hotspot never starts
+     * (and the fallback AP stops): refused before anything is erased, rather than
+     * half a reset and then a crash on the stack's lock. */
+    if (!zb_is_running()) {
+        return send_error(req, "409 Conflict",
+                          "the Zigbee network is not running in the setup hotspot - reset it once the "
+                          "coordinator is back on its Wi-Fi");
     }
 
     ESP_LOGW(TAG, "%s reset requested over HTTP", zigbee_only ? "Zigbee network" : "Factory");
