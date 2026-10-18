@@ -41,7 +41,8 @@ typedef int portMUX_TYPE;
 
 static struct { uint32_t gate_timeouts, slots_short; } s_radio;
 static const char *TAG = "test";
-#define ESP_LOGW(tag, ...) ((void)(tag))
+/* Prints nothing, but keeps its arguments used, as the real one does. */
+#define ESP_LOGW(tag, ...) do { (void)(tag); if (0) { printf(__VA_ARGS__); } } while (0)
 #define ZBC_SEND_RETRY(err_var, call) do { (err_var) = (call); } while (0)
 static esp_err_t esp_zigbee_err_to_esp(ezb_err_t e) { return e == EZB_ERR_NONE ? ESP_OK : -1; }
 

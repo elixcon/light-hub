@@ -4580,15 +4580,17 @@ static bool gate_flush_stale(void)
 {
     bool did = false;
     for (int i = 0; i < ZBC_GATE_SLOTS; i++) {
-        uint16_t addr = 0;
-        uint8_t  ep   = 0;
+        uint16_t addr    = 0;
+        uint8_t  ep      = 0;
+        uint16_t to_addr = 0;          /* a slot that timed out; never 0, a free slot's */
+        uint8_t  to_ep   = 0;
 
         portENTER_CRITICAL(&s_gate_mux);
         if (s_gate[i].short_addr && s_gate[i].busy &&
             esp_timer_get_time() - s_gate[i].sent_at_us >= ZBC_GATE_TIMEOUT_US) {
             s_radio.gate_timeouts++;
-            ESP_LOGW(TAG, "No confirmation for 0x%04x ep %d; letting the next command out",
-                     s_gate[i].short_addr, s_gate[i].ep);
+            to_addr                 = s_gate[i].short_addr;
+            to_ep                   = s_gate[i].ep;
             s_gate[i].busy          = false;
             s_gate[i].inflight.kind = ZBC_CMD_NONE;
         }
@@ -4598,6 +4600,11 @@ static bool gate_flush_stale(void)
         }
         portEXIT_CRITICAL(&s_gate_mux);
 
+        /* Outside the spinlock, as gate_admit logs: nothing that can block may
+         * run with interrupts off. */
+        if (to_addr) {
+            ESP_LOGW(TAG, "No confirmation for 0x%04x ep %d; letting the next command out", to_addr, to_ep);
+        }
         if (addr) {
             /* Opens the gate properly and sends whatever was waiting. */
             did = gate_advance(addr, ep) || did;
