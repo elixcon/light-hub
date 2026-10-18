@@ -13,5 +13,8 @@ sdkconfig.old
 # The web UI's dependencies. Its build output, main/www/index.html, is committed.
 node_modules/
 
+# clangd's index, written by the editor.
+/.cache/
+
 .DS_Store
 .claude/settings.local.json
