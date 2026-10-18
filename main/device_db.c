@@ -259,6 +259,18 @@ esp_err_t device_db_upsert(const uint8_t ieee[ZBC_IEEE_LEN], uint16_t short_addr
     dev->short_addr   = short_addr;
     dev->online       = true;
     dev->last_seen_us = esp_timer_get_time();
+    /* An address belongs to one device. A row still holding it from before - a
+     * device that rejoined elsewhere, or left, without our hearing - would be
+     * found first by find_by_short and take this device's frames as its own. It
+     * gets its address back when it next announces. */
+    if (moved && zbc_short_known(short_addr)) {
+        for (int i = 0; i < CONFIG_ZBC_MAX_DEVICES; i++) {
+            if (&s_devices[i] != dev && s_devices[i].in_use && s_devices[i].short_addr == short_addr) {
+                s_devices[i].short_addr = ZBC_SHORT_NONE;
+                s_devices[i].online     = false;
+            }
+        }
+    }
 
     if ((created && *created) || moved) {
         err = db_save_locked();
