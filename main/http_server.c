@@ -5259,8 +5259,14 @@ static esp_err_t wled_ws_handler(httpd_req_t *req)
     }
     httpd_ws_frame_t f = { 0 };
     esp_err_t err = httpd_ws_recv_frame(req, &f, 0);
-    if (err != ESP_OK || f.type != HTTPD_WS_TYPE_TEXT || f.len == 0 || f.len > MAX_BODY_LEN) {
+    if (err != ESP_OK || f.len == 0) {
         return err;
+    }
+    /* Only the frame's header has been read. A payload left on the socket would
+     * be parsed as the next frame's header, so a frame this does not take ends
+     * the connection rather than leaving the stream out of step. */
+    if (f.type != HTTPD_WS_TYPE_TEXT || f.len > MAX_BODY_LEN) {
+        return ESP_FAIL;
     }
     char *buf = malloc(f.len + 1);
     if (!buf) {
