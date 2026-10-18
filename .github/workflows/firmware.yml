@@ -70,6 +70,13 @@ jobs:
           . "$IDF_PATH/export.sh"
           idf.py build
           tools/make-release.sh build dist
+          # The release notes name the files after the tag, but make-release.sh
+          # names them after git describe, which differs with two tags on one
+          # commit or a modified tree. A release is the tag's version or nothing.
+          if [[ "$GITHUB_REF" == refs/tags/v* && ! -e "dist/elixcon_light_hub-$GITHUB_REF_NAME.bin" ]]; then
+            echo "::error::the firmware's version (git describe) is not $GITHUB_REF_NAME"
+            exit 1
+          fi
       - uses: actions/upload-artifact@v7
         with:
           name: firmware
