@@ -3867,6 +3867,14 @@ static esp_err_t settings_post(httpd_req_t *req)
         cJSON_Delete(json);
         return send_error(req, "400 Bad Request", "name must be a string");
     }
+    /* Here, with the rest, and not only when it is stored below: by then the
+     * location, the zone and the overheat settings have been written, and a
+     * refused name would leave them changed behind a 400. */
+    if (name && !settings_name_ok(name->valuestring)) {
+        cJSON_Delete(json);
+        return send_error(req, "400 Bad Request",
+                          "the name needs at least one letter or digit, and at most 31 characters");
+    }
 
     /* Adaptive Lighting's location and day, both checked in full before either is
      * stored - and before the rename below, which restarts the box. null forgets

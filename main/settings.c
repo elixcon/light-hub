@@ -387,6 +387,15 @@ const char *settings_hostname(void)
     return s_host;
 }
 
+/* What settings_set_name stores: empty (the default), or at most
+ * ZBC_COORD_NAME_LEN - 1 bytes with a letter or digit to make a hostname of. */
+bool settings_name_ok(const char *name)
+{
+    char host[ZBC_COORD_NAME_LEN];
+    return !name || name[0] == '\0' ||
+           (strlen(name) < ZBC_COORD_NAME_LEN && slugify(name, host, sizeof(host)));
+}
+
 /* An empty name means "back to the default", and it is the only way to get
  * there: once anything is stored, the default *pair* above stops applying, and
  * typing "Elixcon Light Hub" would give the hostname elixcon-light-hub rather
@@ -396,8 +405,11 @@ esp_err_t settings_set_name(const char *name)
 {
     bool clear = !name || name[0] == '\0';
     char host[ZBC_COORD_NAME_LEN];
-    if (!clear && (strlen(name) >= ZBC_COORD_NAME_LEN || !slugify(name, host, sizeof(host)))) {
+    if (!settings_name_ok(name)) {
         return ESP_ERR_INVALID_ARG;
+    }
+    if (!clear) {
+        slugify(name, host, sizeof(host));
     }
 
     nvs_handle_t nvs;

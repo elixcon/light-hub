@@ -89,6 +89,8 @@ const char *settings_hostname(void);   /* derived: "living-room-hub", for .local
 /* An empty or NULL name restores the defaults above - the only way back to
  * zigbee.local once a name has been set. */
 esp_err_t   settings_set_name(const char *name);
+/* The test settings_set_name applies to a name it is to store. */
+bool        settings_name_ok(const char *name);
 
 /* The time zone, as a POSIX TZ rule (tz.h) and the name it was made from, for
  * Adaptive Lighting's sunrise and sunset limits (al_db.h) and nothing else. Both
