@@ -682,12 +682,13 @@ static void neighbour_table_result(const ezb_zdo_nwk_mgmt_lqi_req_result_t *resu
         }
     }
 
-    /* The table can span several responses. */
-    uint8_t next = result->rsp->start_index + result->rsp->neighbor_table_list_count;
-    if (next < result->rsp->neighbor_table_entries) {
+    /* The table can span several responses. An empty page asks nothing more,
+     * as in router_table_result: asking again from the same index would loop. */
+    const unsigned next = (unsigned)result->rsp->start_index + result->rsp->neighbor_table_list_count;
+    if (result->rsp->neighbor_table_list_count > 0 && next < result->rsp->neighbor_table_entries) {
         ezb_zdo_nwk_mgmt_lqi_req_t req = {
             .dst_nwk_addr = 0x0000,
-            .field        = { .start_index = next },
+            .field        = { .start_index = (uint8_t)next },
             .cb           = neighbour_table_result,
         };
         ezb_zdo_nwk_mgmt_lqi_req(&req);
