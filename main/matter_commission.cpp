@@ -854,19 +854,17 @@ constexpr int kMaxLamps = CONFIG_ZBC_MAX_MATTER_LIGHTS;
 
 void copy_span(char *out, size_t cap, const CharSpan & in)
 {
-    const size_t n = in.size() < cap - 1 ? in.size() : cap - 1;
+    size_t n = in.size() < cap - 1 ? in.size() : cap - 1;
+    /* A cut inside a UTF-8 character would leave half of it behind, so a cut
+     * backs off to the start of the character it falls in - as mctl_disc_copy
+     * does. A name that fits is copied whole: "Café" keeps its é. */
+    if (n < in.size()) {
+        while (n > 0 && ((unsigned char)in.data()[n] & 0xC0) == 0x80) {
+            n--;
+        }
+    }
     memcpy(out, in.data(), n);
     out[n] = '\0';
-    /* A cut inside a UTF-8 character would leave half of it behind. */
-    size_t len = n;
-    while (len > 0 && ((unsigned char)out[len - 1] & 0x80)) {
-        const unsigned char c = (unsigned char)out[len - 1];
-        if ((c & 0xC0) == 0xC0) {     /* a lead byte with its tail cut off */
-            out[len - 1] = '\0';
-            break;
-        }
-        len--;
-    }
 }
 
 class Discoverer : public ReadClient::Callback
