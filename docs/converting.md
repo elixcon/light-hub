@@ -48,8 +48,9 @@ address it needs to be at, so nothing is copied.
 5. It has no stored Wi-Fi, so it opens the hotspot `elixcon-XXXX`. Join it, open
    http://192.168.4.1/, and under *Convert this device* enter your network and press *Convert*. It
    says *go*, writes our partition table and bootloader, erases what is left of the Shelly firmware
-   and comes back on your network as the updater. Upload `elixcon_light_hub.bin` to it as usual
-   ([Firmware updates](updates.md)), then set up the relay, the wall switch and overheat protection
+   and comes back on your network as the updater. Upload the coordinator,
+   `elixcon_light_hub-<version>.bin` from a release, to it as usual ([Firmware updates](updates.md)),
+   then set up the relay, the wall switch and overheat protection
    ([A converted Shelly](wired-lights.md#a-converted-shelly)).
 
 Watch the unit's own log while it installs. First point Shelly's debug log at a machine on your
@@ -66,7 +67,8 @@ stock package from step 2, and so is the way out of a conversion interrupted by 
 An ESP32-C6 with 4 MB of flash or more that runs ESPHome can be converted without opening it, as
 long as its `web_server` accepts OTA uploads.
 
-1. Upload the updater image through ESPHome, the same way as any firmware: `curl -H 'Expect:' -F
+1. Upload the updater image (`elixcon_light_hub_updater-<version>.bin` from a release) through
+   ESPHome, the same way as any firmware: `curl -H 'Expect:' -F
    'file=@build/updater/elixcon_light_hub_updater.bin' http://<device>/update`. ESPHome restarts
    into it. Nothing is erased yet, and until step 3 a power cut brings ESPHome back.
 2. The updater does not know your Wi-Fi, so it opens the open hotspot `elixcon-XXXX`. Join it and
@@ -75,8 +77,8 @@ long as its `web_server` accepts OTA uploads.
    network and password, tick the box and press *Convert*. If the updater first has to move out of
    the way, it says so and restarts. Press *Convert* again.
 4. The device rewrites its bootloader and partition table, joins your network and comes back as the
-   updater, ready for the coordinator. Upload `elixcon_light_hub.bin` to it as usual ([Firmware
-   updates](updates.md)).
+   updater, ready for the coordinator. Upload `elixcon_light_hub-<version>.bin` to it as usual
+   ([Firmware updates](updates.md)).
 
 This erases ESPHome for good. For a few seconds in step 3 the bootloader and partition table are
 being rewritten, and a power cut then leaves the device unable to start until it is flashed over a
