@@ -1147,10 +1147,13 @@ static cJSON *device_to_json(const zbc_device_t *dev, int64_t now)
                 cJSON *c = cJSON_CreateObject();
                 cJSON_AddStringToObject(c, "cluster", rs.c[r].cluster);
                 cJSON_AddBoolToObject(c, "bound", rs.c[r].bound);
+                cJSON_AddBoolToObject(c, "bind_refused", rs.c[r].bind_refused);
                 if (rs.c[r].wants_config) {
                     cJSON_AddBoolToObject(c, "configured", rs.c[r].configured);
+                    cJSON_AddBoolToObject(c, "config_refused", rs.c[r].config_refused);
                 } else {
                     cJSON_AddNullToObject(c, "configured");
+                    cJSON_AddNullToObject(c, "config_refused");
                 }
                 cJSON_AddItemToArray(reporting, c);
             }

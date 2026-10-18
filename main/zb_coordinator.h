@@ -397,9 +397,12 @@ void      zb_get_ent_stats(zb_ent_stats_t *out);
  * Configure Reporting - two separate answers, either of which can be lost or
  * refused. A lamp that answered neither is only ever known when asked, which is
  * a different fault from a bad link and wants a different fix (re-pairing
- * rather than a channel change). `configured` is absent for a cluster that is
- * only bound - a remote's On/Off, where the binding is what makes it speak and
- * there is no attribute to report. */
+ * rather than a channel change). `bound` and `configured` say the device
+ * accepted; `bind_refused` and `config_refused` that it answered no, which is
+ * final for this boot - neither of a pair set means no answer yet. The
+ * configured pair is absent for a cluster that is only bound - a remote's
+ * On/Off, where the binding is what makes it speak and there is no attribute to
+ * report. */
 #define ZB_REPORT_MAX_CLUSTERS 3
 
 typedef struct {
@@ -407,7 +410,9 @@ typedef struct {
     struct {
         const char *cluster;      /* "onoff", "level", "switch" */
         bool        bound;
+        bool        bind_refused;
         bool        configured;
+        bool        config_refused;
         bool        wants_config;
     } c[ZB_REPORT_MAX_CLUSTERS];
 } zb_report_state_t;

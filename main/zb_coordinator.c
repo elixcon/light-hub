@@ -973,9 +973,11 @@ static uint32_t bind_cluster_index(uint16_t cluster_id)
  * successful bind leaves the lamp bound but silent, and must be asked again.
  *
  * Keyed by IEEE, which survives a rejoin; a short address can pass to another
- * device. */
+ * device. `refused` keeps which answer it was, for the API: a refusal stops the
+ * asking just the same. */
 typedef struct {
     bool     used;
+    bool     refused;
     uint8_t  ieee[ZBC_IEEE_LEN];
     uint8_t  ep;
     uint16_t cluster_id;
@@ -1010,7 +1012,17 @@ static bool done_has(const zbc_done_t *t, uint16_t short_addr, uint8_t ep, uint1
     return ieee_of(short_addr, ieee) && done_has_ieee(t, ieee, ep, cluster_id);
 }
 
-static void done_mark(zbc_done_t *t, uint16_t short_addr, uint8_t ep, uint16_t cluster_id)
+/* Whether the answer recorded for this endpoint and cluster was a refusal;
+ * false while there is none. */
+static bool done_refused_ieee(const zbc_done_t *t, const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep,
+                              uint16_t cluster_id)
+{
+    const int i = done_find(t, ieee, ep, cluster_id);
+    return i >= 0 && t[i].refused;
+}
+
+static void done_mark(zbc_done_t *t, uint16_t short_addr, uint8_t ep, uint16_t cluster_id,
+                      bool refused)
 {
     uint8_t ieee[ZBC_IEEE_LEN];
     if (done_has(t, short_addr, ep, cluster_id) || !ieee_of(short_addr, ieee)) {
@@ -1018,10 +1030,11 @@ static void done_mark(zbc_done_t *t, uint16_t short_addr, uint8_t ep, uint16_t c
     }
     for (size_t i = 0; i < ZBC_DONE_ENTRIES; i++) {
         if (!t[i].used) {
-            t[i].used       = true;
+            t[i].refused    = refused;
             memcpy(t[i].ieee, ieee, ZBC_IEEE_LEN);
             t[i].ep         = ep;
             t[i].cluster_id = cluster_id;
+            t[i].used       = true;      /* last: zb_report_state reads without a lock */
             return;
         }
     }
@@ -1043,9 +1056,9 @@ static bool bind_done(uint16_t short_addr, uint8_t ep, uint16_t cluster_id)
     return done_has(s_bound, short_addr, ep, cluster_id);
 }
 
-static void mark_bound(uint16_t short_addr, uint8_t ep, uint16_t cluster_id)
+static void mark_bound(uint16_t short_addr, uint8_t ep, uint16_t cluster_id, bool refused)
 {
-    done_mark(s_bound, short_addr, ep, cluster_id);
+    done_mark(s_bound, short_addr, ep, cluster_id, refused);
 }
 
 static bool config_done(uint16_t short_addr, uint8_t ep, uint16_t cluster_id)
@@ -1053,9 +1066,9 @@ static bool config_done(uint16_t short_addr, uint8_t ep, uint16_t cluster_id)
     return done_has(s_configured, short_addr, ep, cluster_id);
 }
 
-static void mark_configured(uint16_t short_addr, uint8_t ep, uint16_t cluster_id)
+static void mark_configured(uint16_t short_addr, uint8_t ep, uint16_t cluster_id, bool refused)
 {
-    done_mark(s_configured, short_addr, ep, cluster_id);
+    done_mark(s_configured, short_addr, ep, cluster_id, refused);
 }
 
 /* Short address, endpoint and cluster packed into the ZDO callback's user_ctx,
@@ -1131,10 +1144,10 @@ static void bind_result_cb(const ezb_zdp_bind_req_result_t *result, void *user_c
             result->rsp->status == EZB_ZDP_STATUS_BINDING_TABLE_FULL) {
             dump_binding_table(short_addr);
         }
-        mark_bound(short_addr, ep, cluster_id);
+        mark_bound(short_addr, ep, cluster_id, true);
         return;
     }
-    mark_bound(short_addr, ep, cluster_id);
+    mark_bound(short_addr, ep, cluster_id, false);
     ESP_LOGI(TAG, "Bound 0x%04x ep %d cluster 0x%04x for reporting", short_addr, ep, cluster_id);
 }
 
@@ -3065,7 +3078,9 @@ static void zcl_core_action_handler(ezb_zcl_core_action_callback_id_t callback_i
         ezb_zcl_cmd_config_report_rsp_message_t *rsp = message;
         uint16_t caddr = src_short_addr(rsp->in.header);
         uint8_t  cep   = rsp->in.header ? rsp->in.header->src_ep : 0;
+        bool     refused = false;
         for (ezb_zcl_config_report_rsp_variable_t *v = rsp->in.variables; v; v = v->next) {
+            refused = refused || v->status != EZB_ZCL_STATUS_SUCCESS;
             if (v->status == EZB_ZCL_STATUS_SUCCESS) {
                 ESP_LOGI(TAG, "Device 0x%04x ep %d accepted the reporting configuration for cluster 0x%04x",
                          caddr, cep, rsp->info.cluster_id);
@@ -3077,7 +3092,7 @@ static void zcl_core_action_handler(ezb_zcl_core_action_callback_id_t callback_i
         }
         /* Answered either way, so it is not asked again this boot; silence is. */
         if (caddr != 0xFFFF) {
-            mark_configured(caddr, cep, rsp->info.cluster_id);
+            mark_configured(caddr, cep, rsp->info.cluster_id, refused);
         }
         break;
     }
@@ -3123,6 +3138,18 @@ static void zcl_core_action_handler(ezb_zcl_core_action_callback_id_t callback_i
         ESP_LOGW(TAG, "Device 0x%04x ep %d rejected command 0x%02x on cluster 0x%04x"
                       " with status 0x%02x", daddr, dep, rsp->in.rsp_to_cmd,
                  rsp->info.cluster_id, rsp->in.status_code);
+
+        /* A lamp without attribute reporting refuses Configure Reporting here, not
+         * with a Configure Reporting Response: a Hue LCT010 answers 0x82 on On/Off
+         * and Level. It is an answer all the same, and asking again every scan
+         * gets the same one. 0x06 is also Level's StepWithOnOff, which nothing
+         * sends to a lamp. */
+        if (rsp->in.rsp_to_cmd == EZB_ZCL_CMD_CONFIGURE_REPORTING && daddr != 0xFFFF &&
+            !config_done(daddr, dep, rsp->info.cluster_id)) {
+            ESP_LOGW(TAG, "Device 0x%04x ep %d has no reporting for cluster 0x%04x - its state"
+                          " will only be known when we ask", daddr, dep, rsp->info.cluster_id);
+            mark_configured(daddr, dep, rsp->info.cluster_id, true);
+        }
 
         /* A refused OffWithEffect leaves the lamp on. The command is optional, and the
          * off path relies on it as the only ZCL command that fades and switches
@@ -3354,7 +3381,8 @@ static void hue_bind_cb(const ezb_zdp_bind_req_result_t *result, void *user_ctx)
         return;
     }
     s_hue.bind_status = result->rsp->status;
-    mark_bound(addr, HUE_DIMMER_NOTIFY_EP, ZB_REMOTE_CL_HUE);    /* answered, either way */
+    mark_bound(addr, HUE_DIMMER_NOTIFY_EP, ZB_REMOTE_CL_HUE,     /* answered, either way */
+               result->rsp->status != EZB_ZDP_STATUS_SUCCESS);
     ESP_LOGI(TAG, "Hue dimmer 0x%04x: button cluster bind answered 0x%02x", addr, result->rsp->status);
 }
 
@@ -6490,11 +6518,14 @@ void zb_report_state(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, uint16_t feat
      * from the HTTP task while the mainloop runs. */
     out->count = n < ZB_REPORT_MAX_CLUSTERS ? n : ZB_REPORT_MAX_CLUSTERS;
     for (int i = 0; i < out->count; i++) {
-        out->c[i].cluster      = want[i].name;
-        out->c[i].bound        = done_has_ieee(s_bound, ieee, ep, want[i].cluster_id);
-        out->c[i].wants_config = want[i].configure;
-        out->c[i].configured   = want[i].configure &&
-                                 done_has_ieee(s_configured, ieee, ep, want[i].cluster_id);
+        const uint16_t cl          = want[i].cluster_id;
+        out->c[i].cluster          = want[i].name;
+        out->c[i].bind_refused     = done_refused_ieee(s_bound, ieee, ep, cl);
+        out->c[i].bound            = done_has_ieee(s_bound, ieee, ep, cl) && !out->c[i].bind_refused;
+        out->c[i].wants_config     = want[i].configure;
+        out->c[i].config_refused   = want[i].configure && done_refused_ieee(s_configured, ieee, ep, cl);
+        out->c[i].configured       = want[i].configure && done_has_ieee(s_configured, ieee, ep, cl) &&
+                                     !out->c[i].config_refused;
     }
 }
 
