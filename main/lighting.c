@@ -416,7 +416,12 @@ static struct {
     int64_t sent_us;      /* when we last told this endpoint anything */
     bool    sent_off;     /* ...and whether what we told it was an off */
 } s_restore[CONFIG_ZBC_MAX_DEVICES * CONFIG_ZBC_MAX_ENDPOINTS_PER_DEVICE + CONFIG_ZBC_MAX_MATTER_LIGHTS];
+/* Read and written from every task that switches a light - the HTTP server, the
+ * buttons, the Matter bridge, Adaptive Lighting, the WLED interface - so a slot
+ * is claimed, filled and read under this. A few assignments each: a spinlock. */
+static portMUX_TYPE s_restore_mux = portMUX_INITIALIZER_UNLOCKED;
 
+/* Caller holds s_restore_mux. */
 static int restore_slot(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, bool create)
 {
     int spare = -1;
@@ -440,19 +445,23 @@ static int restore_slot(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, bool creat
 
 void lighting_forget_device(const uint8_t ieee[ZBC_IEEE_LEN])
 {
+    portENTER_CRITICAL(&s_restore_mux);
     for (size_t i = 0; i < sizeof(s_restore) / sizeof(s_restore[0]); i++) {
         if (s_restore[i].used && memcmp(s_restore[i].ieee, ieee, ZBC_IEEE_LEN) == 0) {
             memset(&s_restore[i], 0, sizeof(s_restore[i]));
         }
     }
+    portEXIT_CRITICAL(&s_restore_mux);
 }
 
 static void remember_level(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, int pct)
 {
+    portENTER_CRITICAL(&s_restore_mux);
     const int i = restore_slot(ieee, ep, true);
     if (i >= 0) {
         s_restore[i].pct = (uint8_t)pct;
     }
+    portEXIT_CRITICAL(&s_restore_mux);
 }
 
 static int recall_level(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep)
@@ -461,8 +470,11 @@ static int recall_level(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep)
      * belief, and leaves pct at 0, which read as a level would switch the lamp
      * on at level 1. Nothing remembers 0: a curve output of 0 is an off and
      * returns before remember_level. */
-    const int i = restore_slot(ieee, ep, false);
-    return i >= 0 && s_restore[i].pct > 0 ? s_restore[i].pct : -1;
+    portENTER_CRITICAL(&s_restore_mux);
+    const int i   = restore_slot(ieee, ep, false);
+    const int pct = i >= 0 && s_restore[i].pct > 0 ? s_restore[i].pct : -1;
+    portEXIT_CRITICAL(&s_restore_mux);
+    return pct;
 }
 
 /* What we last told this endpoint to do. Called from the out_* transports
@@ -470,11 +482,25 @@ static int recall_level(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep)
  * and so a command path added later cannot forget to record it. */
 static void note_sent(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, bool lit)
 {
+    const int64_t now = esp_timer_get_time();
+    portENTER_CRITICAL(&s_restore_mux);
     const int i = restore_slot(ieee, ep, true);
     if (i >= 0) {
-        s_restore[i].sent_us  = esp_timer_get_time();
+        s_restore[i].sent_us  = now;
         s_restore[i].sent_off = !lit;
     }
+    portEXIT_CRITICAL(&s_restore_mux);
+}
+
+/* What note_sent recorded for this endpoint: nothing (false, at time 0) when it
+ * has never been told anything. */
+static void sent_belief(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, bool *sent_off, int64_t *sent_us)
+{
+    portENTER_CRITICAL(&s_restore_mux);
+    const int i = restore_slot(ieee, ep, false);
+    *sent_off   = i >= 0 && s_restore[i].sent_off;
+    *sent_us    = i >= 0 ? s_restore[i].sent_us : 0;
+    portEXIT_CRITICAL(&s_restore_mux);
 }
 
 /* >>> host-test region: fadein <<< */
@@ -554,10 +580,10 @@ static int zbc_believed_on(int reported_on, bool sent_off, int64_t sent_us, int6
 static bool endpoint_is_dark(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep,
                              const zbc_endpoint_t *e, uint16_t transition_ds)
 {
-    const int i = restore_slot(ieee, ep, false);
-    return zbc_should_fade_in(transition_ds > 0, e->on_off, e->level,
-                              i >= 0 && s_restore[i].sent_off,
-                              i >= 0 ? s_restore[i].sent_us : 0,
+    bool    sent_off;
+    int64_t sent_us;
+    sent_belief(ieee, ep, &sent_off, &sent_us);
+    return zbc_should_fade_in(transition_ds > 0, e->on_off, e->level, sent_off, sent_us,
                               esp_timer_get_time());
 }
 
@@ -565,9 +591,10 @@ static bool endpoint_is_dark(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep,
  * goes through the same rule because its commands are recorded the same way. */
 static int endpoint_lit(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, const zbc_endpoint_t *e)
 {
-    const int i = restore_slot(ieee, ep, false);
-    return zbc_believed_on(e->on_off, i >= 0 && s_restore[i].sent_off,
-                           i >= 0 ? s_restore[i].sent_us : 0, esp_timer_get_time());
+    bool    sent_off;
+    int64_t sent_us;
+    sent_belief(ieee, ep, &sent_off, &sent_us);
+    return zbc_believed_on(e->on_off, sent_off, sent_us, esp_timer_get_time());
 }
 
 /* >>> host-test region: levels <<< */
