@@ -110,6 +110,9 @@ bool      light_db_pin_taken(int gpio, uint16_t except_id);
  * differs from what is stored. */
 bool      light_db_load_state(uint16_t id, zbc_light_state_t *out);
 void      light_db_save_state(uint16_t id, const zbc_light_state_t *st);
+/* Whether an NVS key is one of those states, of any light: "lstate12", or the
+ * older "light12" - never "lights", the table itself. */
+bool      light_db_is_state_key(const char *key);
 
 esp_err_t light_db_erase(void);
 

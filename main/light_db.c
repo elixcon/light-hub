@@ -358,7 +358,7 @@ static void erase_state_keys(nvs_handle_t nvs, uint16_t id)
 }
 
 /* lstate<id> or the older light<id>, of any light. */
-static bool is_state_key(const char *key)
+bool light_db_is_state_key(const char *key)
 {
     const char *digits = strncmp(key, "lstate", 6) == 0 ? key + 6
                          : strncmp(key, "light", 5) == 0 ? key + 5 : NULL;
@@ -393,7 +393,7 @@ static void forget_stored_lights(void)
         found = false;
         while (err == ESP_OK && !found) {
             nvs_entry_info_t info;
-            if (nvs_entry_info(it, &info) == ESP_OK && is_state_key(info.key)) {
+            if (nvs_entry_info(it, &info) == ESP_OK && light_db_is_state_key(info.key)) {
                 strlcpy(key, info.key, sizeof(key));
                 found = true;
             } else {

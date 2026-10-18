@@ -836,24 +836,6 @@ static esp_err_t copy_entry(nvs_handle_t from, nvs_handle_t to, const cb_entry_t
     return err == ESP_OK ? set_scalar(to, e, v) : err;
 }
 
-/* "light12" or "lstate12": a wired light's saved state, by id. Not "lights",
- * the table itself. */
-static bool is_light_state_key(const char *key)
-{
-    const char *digits = strncmp(key, "lstate", 6) == 0 ? key + 6
-                       : strncmp(key, "light", 5) == 0  ? key + 5
-                                                        : NULL;
-    if (!digits || !*digits) {
-        return false;
-    }
-    for (; *digits; digits++) {
-        if (*digits < '0' || *digits > '9') {
-            return false;
-        }
-    }
-    return true;
-}
-
 /* The ids in a restored table are the file's: a saved state, or a running
  * Adaptive Lighting set, would now describe some other light or room. */
 static void forget_runtime_keys(nvs_handle_t live)
@@ -866,7 +848,7 @@ static void forget_runtime_keys(nvs_handle_t live)
          res == ESP_OK && n < sizeof(keys) / sizeof(keys[0]); res = nvs_entry_next(&it)) {
         nvs_entry_info_t info;
         nvs_entry_info(it, &info);
-        if (is_light_state_key(info.key)) {
+        if (light_db_is_state_key(info.key)) {   /* not "lights", the table itself */
             strlcpy(keys[n++], info.key, sizeof(keys[0]));
         }
     }

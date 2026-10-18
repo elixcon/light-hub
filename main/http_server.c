@@ -2463,17 +2463,6 @@ static esp_err_t lights_post(httpd_req_t *req)
     return send_json(req, root, "201 Created");
 }
 
-/* The index of a string among `names`, or -1. */
-static int light_name_index(const cJSON *item, const char *const names[], int count)
-{
-    for (int i = 0; cJSON_IsString(item) && i < count; i++) {
-        if (strcmp(item->valuestring, names[i]) == 0) {
-            return i;
-        }
-    }
-    return -1;
-}
-
 /* Why the chip could not run every PWM light once `cand` is stored for light
  * `id`, or NULL. The same plan local_lights_reload runs, so nothing is accepted
  * here that would then sit dark. */
@@ -2543,7 +2532,7 @@ static const char *light_from_json(const cJSON *json, zbc_light_t *out, uint16_t
 
     const cJSON *boot = cJSON_GetObjectItem(json, "power_on");
     if (boot) {
-        const int i = light_name_index(boot, LIGHT_BOOT_NAMES, ZBC_LIGHT_BOOT_COUNT);
+        const int i = name_index(LIGHT_BOOT_NAMES, ZBC_LIGHT_BOOT_COUNT, boot);
         if (i < 0) {
             return "power_on must be off, on or last";
         }
@@ -2552,7 +2541,7 @@ static const char *light_from_json(const cJSON *json, zbc_light_t *out, uint16_t
 
     const cJSON *kind = cJSON_GetObjectItem(json, "kind");
     if (kind) {
-        const int i = light_name_index(kind, LIGHT_KIND_NAMES, ZBC_LIGHT_KIND_COUNT);
+        const int i = name_index(LIGHT_KIND_NAMES, ZBC_LIGHT_KIND_COUNT, kind);
         if (i < 0) {
             return "kind must be onoff, dim, cwww or cwnwww";
         }
@@ -2613,7 +2602,7 @@ static const char *light_from_json(const cJSON *json, zbc_light_t *out, uint16_t
 
     const cJSON *mix = cJSON_GetObjectItem(json, "mix");
     if (mix) {
-        const int i = light_name_index(mix, LIGHT_MIX_NAMES, ZBC_MIX_COUNT);
+        const int i = name_index(LIGHT_MIX_NAMES, ZBC_MIX_COUNT, mix);
         if (i < 0) {
             return "mix must be constant, full or custom";
         }
