@@ -1461,10 +1461,14 @@ static bool send_curve_color(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep,
 
     case ZBC_OUT_HS:
         if (e->features & ZBC_FEAT_ANY_COLOR) {
-            int dh = !mode_changed && cs->sent_hue != ZBC_UNKNOWN
-                         ? abs(t->hue - (int)cs->sent_hue) : 999;
-            if (dh > 180) {
-                dh = 360 - dh;                        /* hue is a circle */
+            /* 999 is "nothing to compare with": past every deadband, and kept out
+             * of the circle fold, which would turn it into -639. */
+            int dh = 999;
+            if (!mode_changed && cs->sent_hue != ZBC_UNKNOWN) {
+                dh = abs(t->hue - (int)cs->sent_hue);
+                if (dh > 180) {
+                    dh = 360 - dh;                    /* hue is a circle */
+                }
             }
             int ds_ = !mode_changed && cs->sent_sat != ZBC_UNKNOWN
                           ? abs(t->sat - (int)cs->sent_sat) : 999;
