@@ -31,8 +31,9 @@ The pairing window is open for 15 minutes after a boot while nothing has been ad
 pairing* opens it again. Rooms made or deleted later appear and disappear in the controllers by
 themselves.
 
-Each room also decides what a controller's "turn on" does when the room is dark: go back to the last
-brightness, start [Adaptive Lighting](lighting.md#adaptive-lighting), or go to full. How the
+Each room also decides what a controller's "turn on" does: go back to the last brightness, start
+[Adaptive Lighting](lighting.md#adaptive-lighting), or go to full. The last two apply to a room that
+is already on as well, so "turn on" brings a room dimmed to 10 % to full or into the mode. How the
 controllers see Adaptive Lighting is set on the room's page too.
 
 *Reset Matter* forgets every controller and leaves Zigbee lamps, wired lights, rooms and buttons

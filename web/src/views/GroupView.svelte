@@ -95,9 +95,9 @@
 	const turnOnHelp = $derived.by(() => {
 		if (turnOn === "adaptive" && expose === "off") return "Adaptive Lighting is off for this room, so it comes back as it was.";
 		switch (turnOn) {
-			case "adaptive": return "A dark room starts Adaptive Lighting.";
-			case "full": return "A dark room comes on at full brightness.";
-			default: return "A dark room comes back at the brightness it last had.";
+			case "adaptive": return "The room starts Adaptive Lighting, also when it is already on.";
+			case "full": return "The room goes to full brightness, also when it is already on.";
+			default: return "A dark room comes back at the brightness it last had; a lit one stays as it is.";
 		}
 	});
 	const alLine = $derived.by(() => {
@@ -165,7 +165,7 @@
 					<option value="adaptive" disabled={expose === "off" && turnOn !== "adaptive"}>Adaptive Lighting</option>
 					<option value="full">Full brightness</option>
 				</select>
-				<div class="text-muted-foreground mt-2 text-xs">{turnOnHelp} A room that is already on stays as it is. The buttons and this page are not affected.</div>
+				<div class="text-muted-foreground mt-2 text-xs">{turnOnHelp} The buttons and this page are not affected.</div>
 			</div>
 			<div class="flex items-center justify-between gap-2">
 				<Button variant="destructive" onclick={remove}><Trash /> Delete room</Button>

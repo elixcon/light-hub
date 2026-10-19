@@ -280,30 +280,24 @@ static void test_a_transition_of_0_gets_the_fade_setting(void)
 }
 
 /* "Alexa, turn on the basement": what it does is the room's setting - back as
- * it was, Adaptive Lighting, or full - but only to a dark room. The stored
- * values are the enum's, so 0 has to stay "as it was": every record written
- * before the setting existed holds 0. */
+ * it was, Adaptive Lighting, or full - whether the room is dark or dimmed. The
+ * stored values are the enum's, so 0 has to stay "as it was": every record
+ * written before the setting existed holds 0. */
 static void test_turn_on_follows_the_room_setting(void)
 {
     ok(MB_ON_AS_WAS == 0, "a record from before the setting reads as the old On");
-    ok(mb_turn_on(MB_ON_AS_WAS, false, true) == MB_ON_AS_WAS, "as it was: the last brightness");
-    ok(mb_turn_on(MB_ON_ADAPTIVE, false, true) == MB_ON_ADAPTIVE, "adaptive: starts the mode");
-    ok(mb_turn_on(MB_ON_FULL, false, true) == MB_ON_FULL, "full: full brightness");
-    ok(mb_turn_on(MB_ON_FULL, false, false) == MB_ON_FULL,
-       "full does not need the room to offer Adaptive Lighting");
-
-    /* A lit room is left as it is, whatever the setting: an On for what is
-     * already so must not jump it to full or start a mode. */
-    ok(mb_turn_on(MB_ON_ADAPTIVE, true, true) == MB_ON_AS_WAS, "a lit room does not start the mode");
-    ok(mb_turn_on(MB_ON_FULL, true, true) == MB_ON_AS_WAS, "a lit room does not jump to full");
+    ok(mb_turn_on(MB_ON_AS_WAS, true) == MB_ON_AS_WAS, "as it was: the last brightness");
+    ok(mb_turn_on(MB_ON_ADAPTIVE, true) == MB_ON_ADAPTIVE, "adaptive: starts the mode");
+    ok(mb_turn_on(MB_ON_FULL, true) == MB_ON_FULL, "full: full brightness");
+    ok(mb_turn_on(MB_ON_FULL, false) == MB_ON_FULL, "full does not need the room to offer Adaptive Lighting");
 
     /* Adaptive Lighting where the room does not offer it - switched off after
      * the choice was made - is the plain On, never nothing. */
-    ok(mb_turn_on(MB_ON_ADAPTIVE, false, false) == MB_ON_AS_WAS,
+    ok(mb_turn_on(MB_ON_ADAPTIVE, false) == MB_ON_AS_WAS,
        "adaptive in a room that does not offer it switches on as it was");
 
     /* A value this build does not know, from a newer one, is the old On. */
-    ok(mb_turn_on(7, false, true) == MB_ON_AS_WAS, "an unknown setting is the old On");
+    ok(mb_turn_on(7, true) == MB_ON_AS_WAS, "an unknown setting is the old On");
 }
 
 int main(void)

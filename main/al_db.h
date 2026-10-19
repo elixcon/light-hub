@@ -73,7 +73,7 @@ typedef enum {
     ZBC_AL_EXPOSE_COUNT,
 } zbc_al_expose_t;
 
-/* What a Matter controller's "turn on" does to a dark group - Alexa's "turn on
+/* What a Matter controller's "turn on" does to a group, dark or lit - Alexa's "turn on
  * the basement", a tap in Apple Home. Only Matter's On: the web page and the
  * buttons say what they want with their own actions. Stored, so the values are
  * fixed; LAST is 0, which is what every record written before this existed holds. */

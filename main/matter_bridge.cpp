@@ -162,22 +162,19 @@ static bool mb_stays_dark(bool if_on, bool matter_on, bool lamps_on)
  * the group dark. The values are zbc_turn_on_t's, the group's stored choice
  * (asserted below this region).
  *
- * Only from dark. "Turn on the basement" said to a lit basement changes nothing
- * today, and a group that jumped to full - or out of the brightness somebody
- * had just set - because a voice assistant was asked for what is already so
- * would be a light that does something nobody asked it to. Adaptive Lighting
- * only where the group offers it; elsewhere the On is the plain one. */
+ * Lit or dark: "turn on the basement" said to a basement dimmed to 10 % asks for
+ * the room's turn-on as much as it does from dark. An On that only comes with a
+ * brightness - Alexa's "set to 30 %" - does not get here, because the brightness
+ * replaces it while it is held (mb_on_hold_take). Adaptive Lighting only where
+ * the group offers it; elsewhere the On is the plain one. */
 typedef enum {
     MB_ON_AS_WAS = 0,     /* the group's last brightness, as an On always was */
     MB_ON_ADAPTIVE,
     MB_ON_FULL,
 } mb_on_t;
 
-static mb_on_t mb_turn_on(uint8_t choice, bool lit, bool al_offered)
+static mb_on_t mb_turn_on(uint8_t choice, bool al_offered)
 {
-    if (lit) {
-        return MB_ON_AS_WAS;
-    }
     if (choice == MB_ON_ADAPTIVE) {
         return al_offered ? MB_ON_ADAPTIVE : MB_ON_AS_WAS;
     }
@@ -190,8 +187,9 @@ static mb_on_t mb_turn_on(uint8_t choice, bool lit, bool al_offered)
  * curve is dark at 30 % but lit at the last brightness came on and went off
  * again, and the rest rose towards the old level and turned back. Held, the On is
  * replaced by the brightness, which switches the group on at 30 % in one go.
- * Every On waits, lit group or not: on a lit group an On changes nothing anybody
- * can see, so the wait only ever shows as a dark group coming on that much later. */
+ * Every On waits, lit group or not: a lit group's On takes the room's turn-on as
+ * well, and a brightness that follows it has to replace it just the same. The
+ * wait only ever shows as the room changing that much later. */
 #define MB_ON_HOLD_US (500 * 1000)
 
 typedef struct {
@@ -751,13 +749,11 @@ static void move_tick(mb_slot_t *slot, int64_t now_us)
 }
 
 /* A "turn on", as the group's setting asks - see mb_turn_on. Adaptive Lighting
- * that will not start still switches the group on: that is what was asked.
- * `lit` is "not known to be dark" (lighting_group_known_off), so a room nobody
- * has heard from yet is left as it was. */
-static esp_err_t turn_on(const mb_intent_t &in, bool lit)
+ * that will not start still switches the group on: that is what was asked. */
+static esp_err_t turn_on(const mb_intent_t &in)
 {
     const uint8_t choice = al_db_turn_on(in.group_id);
-    switch (mb_turn_on(choice, lit, al_db_expose(in.group_id) != ZBC_AL_EXPOSE_OFF)) {
+    switch (mb_turn_on(choice, al_db_expose(in.group_id) != ZBC_AL_EXPOSE_OFF)) {
     case MB_ON_ADAPTIVE: {
         const esp_err_t err = lighting_group_start_adaptive(in.group_id, in.transition_ds);
         if (err == ESP_OK) {
@@ -771,7 +767,7 @@ static esp_err_t turn_on(const mb_intent_t &in, bool lit)
         /* A switch-on: a member that can only switch comes on too. */
         return lighting_group_switch_on_to(in.group_id, 100, in.transition_ds);
     default:
-        if (!lit && choice == ZBC_TURN_ON_ADAPTIVE) {
+        if (choice == ZBC_TURN_ON_ADAPTIVE) {
             ESP_LOGI(TAG, "Group %u: turn on means Adaptive Lighting, which this room does not offer",
                      in.group_id);
         }
@@ -805,23 +801,17 @@ static void carry_out(const mb_intent_t &in)
     esp_err_t err = ESP_OK;
     switch (in.kind) {
     case MB_ON:
-        /* Only a room known to be dark gets the setting: one whose members have
-         * not said yet (after a restart, or lamps that do not report) may well be
-         * lit, and must not be jumped to full or into a mode. */
-        err = turn_on(in, !lighting_group_known_off(in.group_id));
+        err = turn_on(in);
         break;
     case MB_OFF:
         err = lighting_group_set_onoff(in.group_id, ZB_ONOFF_OFF, in.transition_ds);
         break;
     case MB_TOGGLE: {
         /* Resolved here rather than by lighting_group_set_onoff, by the same
-         * rule (any member lit), so that a toggle switching on is a turn on -
-         * which, as for an On, takes the setting only where the room is known
-         * to be dark. */
+         * rule (any member lit), so that a toggle switching on is a turn on. */
         bool lit = false;
         lighting_group_state(in.group_id, &lit, nullptr);
-        err = lit ? lighting_group_set_onoff(in.group_id, ZB_ONOFF_OFF, in.transition_ds)
-                  : turn_on(in, !lighting_group_known_off(in.group_id));
+        err = lit ? lighting_group_set_onoff(in.group_id, ZB_ONOFF_OFF, in.transition_ds) : turn_on(in);
         break;
     }
     case MB_LEVEL:

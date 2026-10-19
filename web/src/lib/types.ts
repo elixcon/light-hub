@@ -161,7 +161,7 @@ export type AdaptiveReason = "off" | "on" | "no_clock" | "no_location";
  * light, or as a second on/off light for Apple Home. */
 export type AdaptiveExpose = "off" | "mode_select" | "endpoint";
 
-/* What a Matter controller's "turn on" does to a dark room: back as it was, start
+/* What a Matter controller's "turn on" does to a room, dark or lit: back as it was, start
  * Adaptive Lighting (where the room offers it), or full brightness. */
 export type TurnOn = "last" | "adaptive" | "full";
 

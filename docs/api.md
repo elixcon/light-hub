@@ -97,7 +97,7 @@ Rooms are called groups in the API.
 |---|---|---|
 | `GET` | `/api/groups` | every group, its lights and their state |
 | `POST` | `/api/groups` | `{"name":"Living room"}` creates one, answers with its id |
-| `PATCH` | `/api/groups/{id}` | `{"name":"Kitchen"}` and/or `{"adaptive":"off"\|"mode_select"\|"endpoint"}` (how Matter sees Adaptive Lighting; answers `restart_needed` when that takes a restart) and/or `{"turn_on":"last"\|"adaptive"\|"full"}` (what a Matter controller's "turn on" does to the dark room) |
+| `PATCH` | `/api/groups/{id}` | `{"name":"Kitchen"}` and/or `{"adaptive":"off"\|"mode_select"\|"endpoint"}` (how Matter sees Adaptive Lighting; answers `restart_needed` when that takes a restart) and/or `{"turn_on":"last"\|"adaptive"\|"full"}` (what a Matter controller's "turn on" does to the room, dark or lit) |
 | `DELETE` | `/api/groups/{id}` | deletes the group; the lights stay paired |
 | `POST` | `/api/groups/{id}/members` | `{"ieee":"0x…","ep":1}` adds a light |
 | `DELETE` | `/api/groups/{id}/members/{ieee}/{ep}` | removes a light |
