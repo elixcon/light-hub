@@ -1568,6 +1568,47 @@ static int wheel_slot(uint16_t short_addr, uint8_t ep, bool create)
     return i;
 }
 
+/* When each Tuya scene switch last sent its own count of a gesture, for
+ * remote_is_echo. Zigbee task only, so no lock; a slot taken over from an idle
+ * remote costs it nothing but one echo, decoded as a press. */
+static struct {
+    uint16_t short_addr;
+    uint8_t  ep;
+    uint8_t  used;
+    int64_t  at_us;
+} s_tuya_actions[4];
+
+static void tuya_action_note(uint16_t short_addr, uint8_t ep, int64_t now)
+{
+    int pick = 0;
+    for (int i = 0; i < (int)(sizeof(s_tuya_actions) / sizeof(s_tuya_actions[0])); i++) {
+        if (s_tuya_actions[i].used && s_tuya_actions[i].short_addr == short_addr &&
+            s_tuya_actions[i].ep == ep) {
+            pick = i;
+            break;
+        }
+        if (s_tuya_actions[i].at_us < s_tuya_actions[pick].at_us) {
+            pick = i;   /* unused slots are 0, so they go first */
+        }
+    }
+    s_tuya_actions[pick].used       = 1;
+    s_tuya_actions[pick].short_addr = short_addr;
+    s_tuya_actions[pick].ep         = ep;
+    s_tuya_actions[pick].at_us      = now;
+}
+
+/* How long ago, or -1 for not heard. */
+static int64_t tuya_action_age(uint16_t short_addr, uint8_t ep, int64_t now)
+{
+    for (int i = 0; i < (int)(sizeof(s_tuya_actions) / sizeof(s_tuya_actions[0])); i++) {
+        if (s_tuya_actions[i].used && s_tuya_actions[i].short_addr == short_addr &&
+            s_tuya_actions[i].ep == ep) {
+            return now - s_tuya_actions[i].at_us;
+        }
+    }
+    return -1;
+}
+
 /* --------------------------------------------- what the radio hears from each device */
 
 /* >>> host-test region: linkgap <<< */
@@ -2556,6 +2597,12 @@ static bool zcl_raw_frame_handler(const ezb_zcl_raw_frame_t *raw)
 
     zb_remote_ev_t ev = remote_decode_cmd(model, h->cluster_id, h->cmd_id,
                                           raw->payload, raw->payload_length, &key);
+    if (h->cluster_id == EZB_ZCL_CLUSTER_ID_ON_OFF && h->cmd_id == ZB_REMOTE_CMD_TUYA_ACTION &&
+        ev != ZB_REMOTE_NONE) {
+        tuya_action_note(saddr, h->src_ep, now);
+    } else if (remote_is_echo(h->cluster_id, h->cmd_id, tuya_action_age(saddr, h->src_ep, now))) {
+        ev = ZB_REMOTE_IGNORED;   /* the same gesture again, as a lamp command */
+    }
     if (ev == ZB_REMOTE_IGNORED) {
         /* Half of a press counted from another frame (the Hue dimmer's press
          * edge). It names no key, so it must not reach the capture ring, where

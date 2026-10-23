@@ -8,7 +8,7 @@ room or a light.
 
 Battery remotes pair from *Remotes → Pair a remote*, and each one then has a card on that page. For
 a remote the coordinator knows (IKEA BILRESA and SYMFONISK, Hue dimmer switch and Smart Button,
-Aqara mini switch), *Set up* asks for a room and creates all of its buttons with ready-made actions.
+Aqara mini switch, Tuya ZG-101ZL smart button), *Set up* asks for a room and creates all of its buttons with ready-made actions.
 For any other remote, use *Add a button* and press the button on the remote that you mean.
 
 <img src="images/remotes.jpg" width="320" alt="The Remotes page: a set-up Hue Smart Button, two remotes not set up yet, and the board's BOOT button with its rules">
@@ -70,10 +70,24 @@ wheel does. Its channel button sends nothing the coordinator can see, so all thr
 the same buttons. It also ignores bindings and always sends to Zigbee groups 21658-21660, which the
 coordinator joins at startup for that reason.
 
+## Tuya smart button
+
+The ZG-101ZL (HOBEIAN, also sold as Loginovo and Moes) counts its own gestures. Each one arrives as
+Tuya's command `0xFD` on the On/Off cluster, 0 for a click, 1 for a double click and 2 for a hold,
+followed about 200 ms later by the command it would send a bound lamp: `Toggle`, `On` or `Off`. The
+coordinator drops that second command when it follows the first within 500 ms, so each gesture
+fires once. If the first frame is lost, the second still counts as a click.
+
+Its hold is a single frame, sent about a second into the hold. Nothing follows while it is held or
+when it is let go, so a dimming rule on its long press moves one step per hold rather than sweeping.
+*Set up* puts `toggle` on the click, 100 % on the double click and `dim_down` on the hold. A triple
+click switches the button's operating mode, and holding it for about ten seconds resets it and
+takes it off the network.
+
 ## Double presses
 
 Whether a remote can send a double press depends on the remote. One that counts its own presses (an
-Aqara WXKG11LM, both IKEA remotes) reports them directly. One that sends two ordinary presses has
+Aqara WXKG11LM, both IKEA remotes, the Tuya ZG-101ZL) reports them directly. One that sends two ordinary presses has
 them paired up by the coordinator. A Hue Smart Button can do neither: it merges a quick second tap
 and sends one command per pair of taps, so the gesture never reaches the network.
 

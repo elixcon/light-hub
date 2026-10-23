@@ -350,6 +350,37 @@ static void test_a_wheel_click_is_not_a_turn(void)
              "a click too late to be the zero's leaves the zero a turn");
 }
 
+/* A ZG-101ZL. Each gesture is a tuyaAction saying what it was, then about 200 ms
+ * later the command a bound lamp would get: Toggle, On or Off. Its hold has no
+ * release, so it is a tick that silence ends. The trailing command is an echo
+ * when it follows the action; alone, it is a whole gesture already counted. */
+static void test_the_tuya_button(void)
+{
+    s_model = ZB_REMOTE_MODEL_TUYA_BUTTON;
+    const uint8_t single[] = { 0 }, dbl[] = { 1 }, hold[] = { 2 }, other[] = { 3 };
+    cmd_is(0x0006, 0xfd, single, 1, ZB_REMOTE_SINGLE,    0, "tuyaAction 0 is a single press");
+    cmd_is(0x0006, 0xfd, dbl,    1, ZB_REMOTE_DOUBLE,    0, "1 is a double");
+    cmd_is(0x0006, 0xfd, hold,   1, ZB_REMOTE_HOLD_TICK, 0, "2 is a hold with no release");
+    cmd_is(0x0006, 0xfd, other,  1, ZB_REMOTE_NONE,      0, "3 is nothing it sends");
+    cmd_is(0x0006, 0xfd, NULL,   0, ZB_REMOTE_NONE,      0, "nor is an empty one");
+    cmd_is(0x0006, 0x02, NULL,   0, ZB_REMOTE_SINGLE,    0, "a Toggle on its own is final");
+    cmd_is(0x0006, 0x00, NULL,   0, ZB_REMOTE_SINGLE,    0, "and so is an Off");
+
+    /* The gaps measured on one: 190-200 ms. */
+    ok(remote_is_echo(0x0006, 0x02, 195 * 1000), "Toggle after a single is its echo");
+    ok(remote_is_echo(0x0006, 0x01, 195 * 1000), "On after a double");
+    ok(remote_is_echo(0x0006, 0x00, 195 * 1000), "Off after a hold");
+    ok(remote_is_echo(0x0006, 0x02, 0), "however soon");
+    ok(!remote_is_echo(0x0006, 0x02, 2000 * 1000), "not seconds later: a press whose action was lost");
+    ok(!remote_is_echo(0x0006, 0x02, -1), "nor from a remote that never sent one");
+    ok(!remote_is_echo(0x0006, 0xfd, 195 * 1000), "an action is never an echo");
+    ok(!remote_is_echo(0x0008, 0x02, 195 * 1000), "nor is a Level Step");
+
+    /* Every Tuya scene switch sends it the same way, whatever its model. */
+    s_model = ZB_REMOTE_MODEL_OTHER;
+    cmd_is(0x0006, 0xfd, dbl, 1, ZB_REMOTE_DOUBLE, 0, "tuyaAction from any model");
+}
+
 /* Anything else has to decode to nothing, or a lamp answering a read would read
  * as somebody pressing something. */
 static void test_everything_else_is_not_a_press(void)
@@ -381,6 +412,7 @@ static void test_models(void)
     ok(remote_model("ROM001") == ZB_REMOTE_MODEL_OTHER, "a Hue button is decoded by command");
     ok(remote_model("RWL021") == ZB_REMOTE_MODEL_HUE_DIMMER, "the Hue dimmer");
     ok(remote_model("RWL020") == ZB_REMOTE_MODEL_HUE_DIMMER, "and its US twin");
+    ok(remote_model("ZG-101ZL") == ZB_REMOTE_MODEL_TUYA_BUTTON, "the HOBEIAN button");
     ok(remote_model("") == ZB_REMOTE_MODEL_OTHER, "an empty model - not interrogated yet");
     ok(remote_model(NULL) == ZB_REMOTE_MODEL_OTHER, "and none at all");
 }
@@ -399,6 +431,7 @@ int main(void)
     test_the_wheel_turns();
     test_the_wheel_reaches_the_bottom();
     test_a_wheel_click_is_not_a_turn();
+    test_the_tuya_button();
     test_everything_else_is_not_a_press();
     test_a_null_key_is_allowed();
     printf("all %d checks passed\n", s_checks);

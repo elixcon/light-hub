@@ -96,6 +96,18 @@ export const KNOWN_REMOTES: KnownRemote[] = [
     ],
   },
   {
+    /* It counts its own gestures (Tuya's 0xFD on On/Off). Its hold is one frame
+     * about a second in, with nothing on release, so a hold is one dimming step,
+     * not a sweep. A triple click switches its operating mode and ten seconds held
+     * resets it, so neither is offered. */
+    title: "Tuya smart button", models: ["ZG-101ZL"],
+    note: "A click switches, a double click sets full brightness, and each hold dims one step: the button says nothing when it is let go. Holding it for ten seconds resets it.",
+    keys: [
+      { key: 0, label: "Button", does: { short: ["toggle", 0], double: ["set", 100], long: ["dim_down", 8] },
+        gestures: { short: "Click", double: "Double click", long: "Hold (one step)" } },
+    ],
+  },
+  {
     title: "Aqara wireless mini switch", models: ["lumi.sensor_switch.aq2", "lumi.remote.b1acn01"],
     note: "A hold dims, reversing each time, and a double press sets 40 %.",
     keys: [

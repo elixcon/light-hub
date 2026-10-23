@@ -65,6 +65,11 @@ typedef enum {
      * bound, it also says press / hold / release per button on Philips' own
      * cluster (ZB_REMOTE_CL_HUE), which is the richer of its two languages. */
     ZB_REMOTE_MODEL_HUE_DIMMER,
+    /* Tuya's one-button scene switch, ZG-101ZL (sold as HOBEIAN, Loginovo, Moes).
+     * Each gesture is ZB_REMOTE_CMD_TUYA_ACTION, the device's own count, and then
+     * the command it would send a bound lamp - see remote_is_echo(). That command
+     * is a press of its own only when the first frame was lost. */
+    ZB_REMOTE_MODEL_TUYA_BUTTON,
 } zb_remote_model_t;
 
 /* From the Basic cluster's ModelIdentifier, as device_db stores it. NULL and
@@ -82,6 +87,10 @@ zb_remote_model_t remote_model(const char *model_id);
  * then 0 press, 1 hold (repeated while held), 2 short release, 3 long release. */
 #define ZB_REMOTE_CL_HUE   0xFC00
 
+/* Tuya's command on the standard On/Off cluster ("tuyaAction" in zigbee-herdsman):
+ * one byte, the device's own count - 0 single, 1 double, 2 hold. */
+#define ZB_REMOTE_CMD_TUYA_ACTION  0xFD
+
 /* A ZCL Stop carries no direction, so it ends whichever key this endpoint has
  * holding. Nothing else uses it. */
 #define ZB_REMOTE_KEY_ANY  0xFF
@@ -97,6 +106,12 @@ zb_remote_ev_t remote_decode_attr(zb_remote_model_t model, uint16_t cluster_id, 
  * of reporting. `payload` may be NULL when `len` is 0. */
 zb_remote_ev_t remote_decode_cmd(zb_remote_model_t model, uint16_t cluster_id, uint8_t cmd_id,
                                  const uint8_t *payload, uint16_t len, uint8_t *key);
+
+/* True when this command repeats a gesture the same endpoint has just sent as
+ * ZB_REMOTE_CMD_TUYA_ACTION, `since_action_us` ago (negative for never). A ZG-101ZL
+ * follows each one about 200 ms later with Toggle (single), On (double) or Off
+ * (hold); decoded too, a double would switch off and straight back on. */
+bool remote_is_echo(uint16_t cluster_id, uint8_t cmd_id, int64_t since_action_us);
 
 /* A scroll wheel that sends absolute levels rather than presses - the IKEA
  * BILRESA (E2490) in Zigbee mode, one MoveToLevel every 310-330 ms while it

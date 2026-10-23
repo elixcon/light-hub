@@ -69,18 +69,23 @@ zb_remote_model_t remote_model(const char *model_id)
     if (strcmp(model_id, "RWL020") == 0 || strcmp(model_id, "RWL021") == 0) {
         return ZB_REMOTE_MODEL_HUE_DIMMER;
     }
+    if (strcmp(model_id, "ZG-101ZL") == 0) {
+        return ZB_REMOTE_MODEL_TUYA_BUTTON;
+    }
     return ZB_REMOTE_MODEL_OTHER;
 }
 
 /* A press from a remote that counts its own is final; from any other it is a
- * click that a second one may pair into a double. A Hue dimmer counts nothing. */
+ * click that a second one may pair into a double. A Hue dimmer counts nothing.
+ * A ZG-101ZL's On, Off or Toggle is a whole gesture already counted. */
 static zb_remote_ev_t press(zb_remote_model_t model)
 {
     switch (model) {
     case ZB_REMOTE_MODEL_E1744:
     case ZB_REMOTE_MODEL_E2490:
-    case ZB_REMOTE_MODEL_AQARA: return ZB_REMOTE_SINGLE;
-    default:                    return ZB_REMOTE_CLICK;
+    case ZB_REMOTE_MODEL_AQARA:
+    case ZB_REMOTE_MODEL_TUYA_BUTTON: return ZB_REMOTE_SINGLE;
+    default:                          return ZB_REMOTE_CLICK;
     }
 }
 
@@ -163,6 +168,21 @@ zb_remote_ev_t remote_decode_cmd(zb_remote_model_t model, uint16_t cluster_id, u
                        cmd_id != CMD_ON_OFF_TOGGLE ? KEY_OFF : KEY_ONOFF;
             }
             return press(model);
+        /* A Tuya scene switch, counting for itself. A ZG-101ZL's hold is one frame
+         * about a second in, not repeated however long it is held, and nothing
+         * follows on release (Zigbee2MQTT has only "hold"). So it is a tick:
+         * silence ends it, where as a HOLD waiting for a Stop that never comes it
+         * would sweep the lights until ZBTN_HOLD_MAX_US. A dimming rule moves one
+         * step per hold. */
+        case ZB_REMOTE_CMD_TUYA_ACTION:
+            if (len < 1 || !payload || payload[0] > 2) {
+                return ZB_REMOTE_NONE;
+            }
+            if (key) {
+                *key = KEY_ONOFF;
+            }
+            return payload[0] == 0 ? ZB_REMOTE_SINGLE
+                 : payload[0] == 1 ? ZB_REMOTE_DOUBLE : ZB_REMOTE_HOLD_TICK;
         default:
             return ZB_REMOTE_NONE;
         }
@@ -262,6 +282,18 @@ zb_remote_ev_t remote_decode_cmd(zb_remote_model_t model, uint16_t cluster_id, u
     }
 
     return ZB_REMOTE_NONE;
+}
+
+/* How long after its Tuya action a command is that action's echo: measured
+ * 190-200 ms on a ZG-101ZL, and well short of a second gesture, which starts
+ * with an action of its own and so moves the window on. */
+#define TUYA_ECHO_US  (500LL * 1000)
+
+bool remote_is_echo(uint16_t cluster_id, uint8_t cmd_id, int64_t since_action_us)
+{
+    return cluster_id == CL_ON_OFF &&
+           (cmd_id == CMD_ON_OFF_OFF || cmd_id == CMD_ON_OFF_ON || cmd_id == CMD_ON_OFF_TOGGLE) &&
+           since_action_us >= 0 && since_action_us <= TUYA_ECHO_US;
 }
 
 /* How close the On/Off follows a level-0 frame when that zero is the click's and
