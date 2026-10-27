@@ -1,5 +1,6 @@
 /* The pins behind the wired lights in light_db: a plain output for an on/off
- * light, one LEDC PWM channel for a dimmable one, two for a tunable white one.
+ * light, one PWM channel (LEDC or MCPWM) for a dimmable one, two or three for a
+ * tunable white one.
  *
  * Nothing here touches Zigbee or takes the stack lock, so any task may command a
  * wired light - the HTTP handlers, the buttons task and the Matter bridge all

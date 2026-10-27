@@ -131,8 +131,8 @@ static void check_one_crossing(uint32_t max, uint32_t shift, uint32_t other)
 }
 
 /* Channel counts: every light tunable white, or every light dimmable. */
-static const uint8_t CW[8]  = { 2, 2, 2, 2, 2, 2, 2, 2 };
-static const uint8_t DIM[8] = { 1, 1, 1, 1, 1, 1, 1, 1 };
+static const uint8_t CW[16]  = { 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2 };
+static const uint8_t DIM[16] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
 
 /* The size of harmonic m of the light that n identical lights at the phases
  * zbc_pwm_plan gives put out together, in counts: tunable white at dc and dw,
@@ -163,11 +163,42 @@ static double ripple(uint32_t dc, uint32_t dw, uint32_t max, int n, int m)
     return ripple_of(false, dc, dw, max, n, m);
 }
 
-/* Every light the plan accepts gets channels of its own, a dimmable one exactly
- * one, and no two pulses on one timer are put in the same place. */
+/* An MCPWM output at tick t of a period of 2 * peak ticks, counted from its
+ * timer's zero, as local_lights.c sets the generator up: the compare value
+ * counting up sets the level it has at the peak and counting down the level it
+ * has at the zero, and the zero and the peak set those levels again. */
+static bool mc_high_at(const zbc_mcpwm_out_t *o, uint32_t peak, bool at_peak, uint32_t t)
+{
+    if (o->force >= 0) {
+        return o->force == 1;
+    }
+    const bool     up = t < peak;
+    const uint32_t c  = up ? t : 2 * peak - t;
+    const bool     z  = up ? c < o->cmp : c <= o->cmp;  /* in the pulse around the zero */
+    const bool     p  = up ? c >= o->cmp : c > o->cmp;  /* in the pulse around the peak */
+    return at_peak ? p : z;
+}
+
+static bool mc_light(const zbc_pwm_slot_t *s)
+{
+    return s->timer >= ZBC_PWM_LEDC_TIMERS;
+}
+
+static int mc_unit(int ch)
+{
+    return (ch - ZBC_PWM_LEDC_CHANNELS) / 2;
+}
+
+/* Every light the plan accepts gets channels of its own on one of the two
+ * peripherals, as many as it has, on timers at its frequency. On LEDC no two
+ * pulses on one timer are put in the same place. On MCPWM a tunable white
+ * light's pair is half a period apart and a third channel where its first is,
+ * every unit gets one phase from every channel on it, and without three-channel
+ * lights no two pulses at one frequency are put in the same place. A set LEDC
+ * alone can run stays on LEDC. */
 static void check_plan(const uint16_t hz[], const uint8_t chans[], size_t n)
 {
-    zbc_pwm_slot_t s[8];
+    zbc_pwm_slot_t s[16];
     uint16_t       th[ZBC_PWM_TIMERS];
     if (zbc_pwm_plan(hz, chans, n, s, th) != NULL) {
         return;
@@ -175,43 +206,152 @@ static void check_plan(const uint16_t hz[], const uint8_t chans[], size_t n)
     bool     used[ZBC_PWM_CHANNELS] = { 0 };
     uint16_t at[ZBC_PWM_TIMERS][ZBC_PWM_CHANNELS];
     int      count[ZBC_PWM_TIMERS] = { 0 };
+    int      unit_deg[ZBC_PWM_MCPWM_UNITS] = { -1, -1, -1 };
+    int      total_ch = 0, freqs = 0;
+    bool     on_mc = false, three_on_mc = false;
     for (size_t i = 0; i < n; i++) {
+        bool seen = !hz[i];
+        for (size_t j = 0; j < i && !seen; j++) {
+            seen = hz[j] == hz[i];
+        }
+        freqs += !seen;
         if (!hz[i]) {
             EXPECT(s[i].timer < 0, "light %zu takes no PWM and was given a timer", i);
             continue;
         }
-        const int c = s[i].ch[0], w = s[i].ch[1], t = s[i].timer;
+        total_ch += chans[i];
+        const bool mc = mc_light(&s[i]);
+        const int  t  = s[i].timer;
+        on_mc       |= mc;
+        three_on_mc |= mc && chans[i] == 3;
         EXPECT(t >= 0 && t < ZBC_PWM_TIMERS && th[t] == hz[i], "light %zu: timer %d at the wrong frequency", i, t);
-        EXPECT(c >= 0 && c < ZBC_PWM_CHANNELS && !used[c], "light %zu: channel %d reused", i, c);
-        used[c] = true;
-        if (chans[i] == 1) {
-            EXPECT(w == -1, "a dimmable light was given a second channel");
-        } else {
-            EXPECT(w >= 0 && w < ZBC_PWM_CHANNELS && !used[w], "light %zu: channel %d reused", i, w);
-            used[w] = true;
+        for (int k = 0; k < ZBC_PWM_MAX_LIGHT_CH; k++) {
+            const int c = s[i].ch[k];
+            if (k >= chans[i]) {
+                EXPECT(c == -1, "light %zu with %u channels was given a channel %d", i, chans[i], k);
+                continue;
+            }
+            EXPECT(c >= 0 && c < ZBC_PWM_CHANNELS && !used[c], "light %zu: channel %d reused", i, c);
+            if (c < 0 || c >= ZBC_PWM_CHANNELS) {
+                continue;
+            }
+            used[c] = true;
+            EXPECT(mc == (c >= ZBC_PWM_LEDC_CHANNELS), "light %zu: channel %d on the other peripheral", i, c);
+            if (!mc) {
+                continue;
+            }
+            const int u = mc_unit(c);
+            EXPECT(th[ZBC_PWM_LEDC_TIMERS + u] == hz[i], "light %zu: channel %d on a unit at %u Hz", i, c,
+                   th[ZBC_PWM_LEDC_TIMERS + u]);
+            const int d = zbc_mcpwm_unit_deg(&s[i], k);
+            EXPECT(unit_deg[u] < 0 || unit_deg[u] == d, "unit %d asked for %d and %d degrees", u, unit_deg[u], d);
+            unit_deg[u] = d;
         }
-        const int third = s[i].ch[2];
+        EXPECT(s[i].phase_deg < 360, "light %zu: phase %u out of range", i, s[i].phase_deg);
+        if (!mc) {
+            EXPECT(s[i].peak == 0, "light %zu on LEDC has MCPWM centres", i);
+            if (chans[i] == 3) {
+                EXPECT(s[i].ch[1] == s[i].ch[0] + 1 && s[i].ch[2] == s[i].ch[0] + 2,
+                       "light %zu: channels %d %d %d not in a row", i, s[i].ch[0], s[i].ch[1], s[i].ch[2]);
+            }
+            EXPECT(chans[i] == 1 || s[i].phase_deg < 180, "light %zu: phase %u out of range", i, s[i].phase_deg);
+            at[t][count[t]++] = s[i].phase_deg;
+            if (chans[i] >= 2) {      /* a three-channel light shows two pulses in a constant mix */
+                at[t][count[t]++] = (uint16_t)((s[i].phase_deg + 180) % 360);
+            }
+            continue;
+        }
+        EXPECT(mc_unit(s[i].ch[0]) == t - ZBC_PWM_LEDC_TIMERS, "light %zu: timer %d is not its first unit", i, t);
+        if (chans[i] >= 2) {
+            EXPECT(mc_unit(s[i].ch[1]) == mc_unit(s[i].ch[0]), "light %zu: its pair is on two units", i);
+            EXPECT(((s[i].peak >> 0) & 1) != ((s[i].peak >> 1) & 1), "light %zu: its pair is not half a period apart", i);
+        }
         if (chans[i] == 3) {
-            EXPECT(third >= 0 && third < ZBC_PWM_CHANNELS && !used[third], "light %zu: channel %d reused", i, third);
-            EXPECT(w == c + 1 && third == c + 2, "light %zu: channels %d %d %d not in a row", i, c, w, third);
-            used[third] = true;
-        } else {
-            EXPECT(third == -1, "light %zu with %u channels was given a third", i, chans[i]);
-        }
-        EXPECT(s[i].phase_deg < 360 && (chans[i] == 1 || s[i].phase_deg < 180),
-               "light %zu: phase %u out of range", i, s[i].phase_deg);
-        at[t][count[t]++] = s[i].phase_deg;
-        if (chans[i] >= 2) {      /* a three-channel light shows two pulses in a constant mix */
-            at[t][count[t]++] = (uint16_t)((s[i].phase_deg + 180) % 360);
+            EXPECT(((s[i].peak >> 2) & 1) == 0 && (s[i].peak & 1) == 0,
+                   "light %zu: its third channel is not where its first is", i);
         }
     }
-    for (int t = 0; t < ZBC_PWM_TIMERS; t++) {
+    for (int t = 0; t < ZBC_PWM_LEDC_TIMERS; t++) {
         for (int a = 0; a < count[t]; a++) {
             for (int b = a + 1; b < count[t]; b++) {
                 EXPECT(at[t][a] != at[t][b], "timer %d: two pulses at %u degrees", t, at[t][a]);
             }
         }
     }
+    /* Pulses at one frequency on MCPWM, from the units' phases and centres. */
+    for (size_t i = 0; i < n && !three_on_mc; i++) {
+        if (!hz[i] || !mc_light(&s[i])) {
+            continue;
+        }
+        for (size_t j = i; j < n; j++) {
+            if (hz[j] != hz[i] || !mc_light(&s[j])) {
+                continue;
+            }
+            for (int a = 0; a < chans[i]; a++) {
+                for (int b = 0; b < chans[j]; b++) {
+                    if (j == i && b <= a) {
+                        continue;
+                    }
+                    const int ca = (unit_deg[mc_unit(s[i].ch[a])] + ((s[i].peak >> a) & 1) * 180) % 360;
+                    const int cb = (unit_deg[mc_unit(s[j].ch[b])] + ((s[j].peak >> b) & 1) * 180) % 360;
+                    EXPECT(ca != cb, "lights %zu and %zu: two MCPWM pulses at %d degrees", i, j, ca);
+                }
+            }
+        }
+    }
+    EXPECT(!on_mc || total_ch > ZBC_PWM_LEDC_CHANNELS || freqs > ZBC_PWM_LEDC_TIMERS,
+           "%zu lights on %d channels at %d frequencies went to MCPWM", n, total_ch, freqs);
+}
+
+/* The size of harmonic m of the light the MCPWM lights of a plan put out
+ * together, channel k of light i at d[i][k] counts of `peak`, every unit at the
+ * phase the plan asks for, over a period of 2 * peak ticks. */
+static double mc_ripple(const zbc_pwm_slot_t s[], const uint8_t chans[], size_t n, const uint32_t d[][3],
+                        uint32_t peak, int m)
+{
+    const uint32_t period = 2 * peak;
+    double         re = 0, im = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (!mc_light(&s[i])) {
+            continue;
+        }
+        for (int k = 0; k < chans[i]; k++) {
+            const bool            at_peak = (s[i].peak >> k) & 1;
+            const zbc_mcpwm_out_t o       = zbc_mcpwm_out(d[i][k], peak, at_peak);
+            const uint32_t        zero    = (uint32_t)((uint64_t)period * zbc_mcpwm_unit_deg(&s[i], k) / 360);
+            for (uint32_t t = 0; t < period; t++) {
+                if (mc_high_at(&o, peak, at_peak, (t + period - zero) % period)) {
+                    const double a = 2.0 * M_PI * m * t / period;
+                    re += cos(a);
+                    im -= sin(a);
+                }
+            }
+        }
+    }
+    return sqrt(re * re + im * im);
+}
+
+/* Every sequence of lights of one to three channels, at most `left` channels
+ * more after the n in ch[], planned at one frequency: all must fit. Returns how
+ * many it planned. */
+static int every_mix(unsigned left, uint8_t ch[12], size_t n)
+{
+    int tried = 0;
+    if (n > 0) {
+        const uint16_t hz[12] = { 2441, 2441, 2441, 2441, 2441, 2441, 2441, 2441, 2441, 2441, 2441, 2441 };
+        zbc_pwm_slot_t s[12];
+        uint16_t       th[ZBC_PWM_TIMERS];
+        const char    *why = zbc_pwm_plan(hz, ch, n, s, th);
+        EXPECT(why == NULL, "%zu lights on %u channels at one frequency were refused (%s)", n,
+               ZBC_PWM_CHANNELS - left, why ? why : "");
+        check_plan(hz, ch, n);
+        tried++;
+    }
+    for (uint8_t c = 1; c <= 3 && c <= left && n < 12; c++) {
+        ch[n] = c;
+        tried += every_mix(left - c, ch, n + 1);
+    }
+    return tried;
 }
 
 /* The phases zbc_pwm_plan gives n lights at one frequency, against `want`. */
@@ -557,9 +697,103 @@ int main(void)
         }
     }
 
+    /* ---- MCPWM's counts and outputs ---- */
+    {
+        const struct { uint32_t hz, div, peak; } at[] = {
+            { 19531, 1, 4096 }, { 4882, 1, 16387 }, { 1221, 1, 65520 }, { 1220, 2, 32787 }, { 100, 13, 61538 },
+        };
+        for (size_t i = 0; i < sizeof(at) / sizeof(at[0]); i++) {
+            uint32_t       div;
+            const uint32_t peak = zbc_mcpwm_peak(at[i].hz, &div);
+            EXPECT(peak == at[i].peak && div == at[i].div, "%u Hz on MCPWM: %u counts at a divider of %u, not %u at %u",
+                   at[i].hz, peak, div, at[i].peak, at[i].div);
+        }
+        EXPECT(zbc_mcpwm_peak(0, NULL) == 0, "0 Hz has MCPWM counts");
+        for (uint32_t hz = ZBC_PWM_HZ_MIN; hz <= ZBC_PWM_HZ_MAX; hz++) {
+            uint32_t       div;
+            const uint32_t peak  = zbc_mcpwm_peak(hz, &div);
+            const double   tick  = (double)(ZBC_PWM_MCPWM_CLK_HZ / div);
+            const double   error = fabs(tick / (2.0 * peak) - hz) / hz;
+            const bool     finer = div == 1 || (ZBC_PWM_MCPWM_CLK_HZ / (div - 1) + hz) / (2 * hz) > ZBC_PWM_MCPWM_PEAK_MAX;
+            const bool     ledc  = hz < 1221 ? peak > 32768 : peak >= (1u << zbc_pwm_resolution(hz));
+            if (peak > ZBC_PWM_MCPWM_PEAK_MAX || div < 1 || div > 256 || error > 0.5 / peak + 1e-12 || !finer || !ledc) {
+                EXPECT(false, "%u Hz on MCPWM: %u counts at a divider of %u, %.5f %% off", hz, peak, div, 100 * error);
+                break;
+            }
+        }
+
+        /* Rebuilt tick by tick: 2d ticks high, around the zero or the peak; dark
+         * and full forced. */
+        const uint32_t peaks[] = { 2, 3, 64, 4096, 16387, 65535 };
+        for (size_t p = 0; p < sizeof(peaks) / sizeof(peaks[0]); p++) {
+            const uint32_t peak = peaks[p];
+            for (int r = 0; r < 400; r++) {
+                const uint32_t d = peak <= 64 ? (uint32_t)r % (peak + 1) : (r < 2 ? (uint32_t)r * peak : rnd() % peak);
+                for (int at_peak = 0; at_peak < 2; at_peak++) {
+                    const zbc_mcpwm_out_t o = zbc_mcpwm_out(d, peak, at_peak);
+                    EXPECT(d == 0 ? o.force == 0 : d >= peak ? o.force == 1 : o.force == -1 && o.cmp > 0 && o.cmp < peak,
+                           "peak %u d %u: forced %d, compare %u", peak, d, o.force, o.cmp);
+                    for (uint32_t t = 0; t < 2 * peak; t++) {
+                        const bool want = at_peak ? t + d >= peak && t < peak + d : t < d || t >= 2 * peak - d;
+                        if (mc_high_at(&o, peak, at_peak, t) != want) {
+                            EXPECT(false, "peak %u d %u %s: tick %u is %s", peak, d, at_peak ? "on the peak" : "on the zero",
+                                   t, want ? "low" : "high");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        /* Lights on MCPWM cancel each other's ripple as they do on LEDC: two
+         * tunable white lights at 0 and 90 degrees the second harmonic, three
+         * at 0, 60 and 120 the second and fourth, two dimmable lights on one
+         * unit the first. A peak that 60 degrees divides into whole ticks. */
+        const uint16_t f[12]  = { 4882, 4882, 4882, 4882, 4882, 4882, 4882, 4882, 4882, 4882, 4882, 4882 };
+        const uint32_t peak   = 4320;
+        zbc_pwm_slot_t s[12];
+        uint16_t       th[ZBC_PWM_TIMERS];
+        uint32_t       d[12][3];
+        const uint32_t pairs_mc[][2] = { { 700, 700 }, { 1500, 300 }, { 200, 2900 }, { 3000, 600 } };
+        for (size_t i = 0; i < sizeof(pairs_mc) / sizeof(pairs_mc[0]); i++) {
+            for (int l = 0; l < 6; l++) {
+                d[l][0] = pairs_mc[i][0], d[l][1] = pairs_mc[i][1], d[l][2] = 0;
+            }
+            zbc_pwm_plan(f, CW, 4, s, th);
+            const double one2 = mc_ripple(s, CW, 4, d, peak, 2), one4 = mc_ripple(s, CW, 4, d, peak, 4);
+            EXPECT(one2 > 50, "dc %u dw %u: one light on MCPWM has no second harmonic (%.1f)", d[0][0], d[0][1], one2);
+            zbc_pwm_plan(f, CW, 5, s, th);
+            EXPECT(mc_ripple(s, CW, 5, d, peak, 2) < 1e-6 * peak, "dc %u dw %u: two lights on MCPWM keep %.2f of %.2f",
+                   d[0][0], d[0][1], mc_ripple(s, CW, 5, d, peak, 2), one2);
+            zbc_pwm_plan(f, CW, 6, s, th);
+            EXPECT(mc_ripple(s, CW, 6, d, peak, 2) < 1e-6 * peak && mc_ripple(s, CW, 6, d, peak, 4) < 1e-6 * peak + 0.02 * one4,
+                   "dc %u dw %u: three lights on MCPWM keep the second or fourth harmonic", d[0][0], d[0][1]);
+        }
+        for (uint32_t duty = 300; duty < peak - 1000; duty += 1000) {
+            for (int l = 0; l < 8; l++) {
+                d[l][0] = duty, d[l][1] = d[l][2] = 0;
+            }
+            zbc_pwm_plan(f, DIM, 7, s, th);
+            const double one = mc_ripple(s, DIM, 7, d, peak, 1);
+            zbc_pwm_plan(f, DIM, 8, s, th);
+            EXPECT(one > 50 && mc_ripple(s, DIM, 8, d, peak, 1) < 1e-6 * peak,
+                   "duty %u: two dimmable lights on one unit keep %.2f of %.2f", duty, mc_ripple(s, DIM, 8, d, peak, 1), one);
+        }
+        /* A three-channel light on MCPWM: either pair a constant mix lights is
+         * half a period apart, so equal halves cancel the first harmonic. */
+        const uint8_t c3[] = { 3, 3, 3 };
+        zbc_pwm_plan(f, c3, 3, s, th);
+        EXPECT(mc_light(&s[2]), "the third three-channel light is not on MCPWM");
+        for (int lit = 0; lit < 2; lit++) {
+            d[2][0] = lit ? 0 : 1200, d[2][1] = 1200, d[2][2] = lit ? 1200 : 0;
+            EXPECT(mc_ripple(s, c3, 3, d, peak, 1) < 1e-6 * peak, "a three-channel light on MCPWM lit on %s keeps %.2f",
+                   lit ? "neutral and warm" : "cold and neutral", mc_ripple(s, c3, 3, d, peak, 1));
+        }
+    }
+
     /* ---- sharing out timers and channels ---- */
     {
-        zbc_pwm_slot_t s[8];
+        zbc_pwm_slot_t s[16];
         uint16_t       th[ZBC_PWM_TIMERS];
         const uint16_t same[] = { 4000, 0, 4000, 4000 };
         EXPECT(zbc_pwm_plan(same, CW, 4, s, th) == NULL, "three lights at one frequency were refused");
@@ -600,9 +834,22 @@ int main(void)
                "phases %u, %u, %u: only lights sharing a timer are spread", s[0].phase_deg, s[1].phase_deg,
                s[2].phase_deg);
 
-        const uint16_t four[] = { 1000, 1000, 1000, 1000 };
-        const char    *why  = zbc_pwm_plan(four, CW, 4, s, th);
-        EXPECT(why && strstr(why, "no PWM channel"), "a fourth tunable white light was accepted");
+        /* Tunable white lights: three on LEDC, then a unit each on MCPWM, its
+         * first channel on the unit's zero and its second on the peak - so six
+         * fit and a seventh does not. */
+        const uint16_t f7[] = { 1000, 1000, 1000, 1000, 1000, 1000, 1000 };
+        const char    *why  = zbc_pwm_plan(f7, CW, 4, s, th);
+        EXPECT(why == NULL && !mc_light(&s[2]) && mc_light(&s[3]), "a fourth tunable white light did not go to MCPWM");
+        EXPECT(s[3].timer == ZBC_PWM_LEDC_TIMERS && s[3].ch[0] == 6 && s[3].ch[1] == 7 && s[3].phase_deg == 0 &&
+               s[3].peak == 2, "the fourth tunable white light is not unit 0's pair");
+        EXPECT(th[ZBC_PWM_LEDC_TIMERS] == 1000 && th[ZBC_PWM_LEDC_TIMERS + 1] == 0, "MCPWM timers at %u and %u Hz",
+               th[ZBC_PWM_LEDC_TIMERS], th[ZBC_PWM_LEDC_TIMERS + 1]);
+        EXPECT(zbc_pwm_plan(f7, CW, 6, s, th) == NULL, "six tunable white lights were refused");
+        EXPECT(s[3].phase_deg == 0 && s[4].phase_deg == 60 && s[5].phase_deg == 120,
+               "three tunable white lights on MCPWM at %u, %u, %u degrees", s[3].phase_deg, s[4].phase_deg,
+               s[5].phase_deg);
+        why = zbc_pwm_plan(f7, CW, 7, s, th);
+        EXPECT(why && strstr(why, "no PWM channel"), "a seventh tunable white light was accepted");
 
         const uint16_t top[] = { 19531, 100 };
         EXPECT(zbc_pwm_plan(top, CW, 2, s, th) == NULL, "the highest and lowest frequencies were refused");
@@ -615,19 +862,49 @@ int main(void)
         why = zbc_pwm_plan(low, CW, 1, s, th);
         EXPECT(why && strstr(why, "100-19531"), "99 Hz was accepted");
 
-        /* Dimmable lights: one channel each, so six fit and a seventh does not,
-         * and a tunable white light with four of them fills the chip. */
-        const uint16_t seven[] = { 4882, 4882, 4882, 4882, 4882, 4882, 4882 };
-        EXPECT(zbc_pwm_plan(seven, DIM, 6, s, th) == NULL, "six dimmable lights were refused");
-        why = zbc_pwm_plan(seven, DIM, 7, s, th);
-        EXPECT(why && strstr(why, "no PWM channel"), "a seventh dimmable light was accepted");
-        const uint8_t cw_dims[] = { 2, 1, 1, 1, 1, 1 };
-        EXPECT(zbc_pwm_plan(seven, cw_dims, 5, s, th) == NULL, "tunable white and four dimmable were refused");
-        why = zbc_pwm_plan(seven, cw_dims, 6, s, th);
-        EXPECT(why && strstr(why, "no PWM channel"), "seven channels were accepted");
-        const uint8_t cw3_dim[] = { 2, 2, 2, 1 };
-        why = zbc_pwm_plan(seven, cw3_dim, 4, s, th);
-        EXPECT(why && strstr(why, "no PWM channel"), "three tunable white and a dimmable light were accepted");
+        /* Dimmable lights: one channel each, so twelve fit at one frequency -
+         * six on LEDC, two to a unit on MCPWM, half a period apart - and a
+         * thirteenth does not; a tunable white light with ten of them fills the
+         * chip. */
+        const uint16_t thirteen[13] = { 4882, 4882, 4882, 4882, 4882, 4882, 4882, 4882, 4882, 4882, 4882, 4882, 4882 };
+        EXPECT(zbc_pwm_plan(thirteen, DIM, 6, s, th) == NULL && !mc_light(&s[5]), "six dimmable lights left LEDC");
+        EXPECT(zbc_pwm_plan(thirteen, DIM, 12, s, th) == NULL, "twelve dimmable lights were refused");
+        const uint16_t dim_deg[6] = { 0, 180, 60, 240, 120, 300 };
+        for (int i = 0; i < 6; i++) {
+            EXPECT(s[6 + i].ch[0] == 6 + i && s[6 + i].phase_deg == dim_deg[i],
+                   "dimmable light %d on channel %d at %u degrees, not %d at %u", 6 + i, s[6 + i].ch[0],
+                   s[6 + i].phase_deg, 6 + i, dim_deg[i]);
+        }
+        why = zbc_pwm_plan(thirteen, DIM, 13, s, th);
+        EXPECT(why && strstr(why, "no PWM channel"), "a thirteenth dimmable light was accepted");
+        const uint8_t cw_dims[12] = { 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
+        EXPECT(zbc_pwm_plan(thirteen, cw_dims, 11, s, th) == NULL, "tunable white and ten dimmable were refused");
+        why = zbc_pwm_plan(thirteen, cw_dims, 12, s, th);
+        EXPECT(why && strstr(why, "no PWM channel"), "thirteen channels were accepted");
+
+        /* Frequencies: four on LEDC, and one per unit on MCPWM. */
+        const uint16_t eight[] = { 200, 300, 400, 500, 600, 700, 800, 900 };
+        EXPECT(zbc_pwm_plan(eight, DIM, 7, s, th) == NULL, "seven frequencies were refused");
+        why = zbc_pwm_plan(eight, DIM, 8, s, th);
+        EXPECT(why && strstr(why, "no PWM timer"), "an eighth frequency was accepted");
+        /* Two dimmable lights at one frequency share a unit, at two they do not. */
+        const uint16_t shared[] = { 200, 300, 400, 500, 600, 600, 700, 800 };
+        EXPECT(zbc_pwm_plan(shared, DIM, 8, s, th) == NULL, "eight dimmable lights at seven frequencies were refused");
+        EXPECT(mc_unit(s[4].ch[0]) == mc_unit(s[5].ch[0]), "two dimmable lights at one frequency took two units");
+        /* Two three-channel lights fill LEDC; two more fit MCPWM only at one
+         * frequency, whichever lights those are. */
+        const uint8_t  c3[] = { 3, 3, 3, 3 };
+        const uint16_t last_pair[] = { 1000, 2000, 3000, 3000 };
+        EXPECT(zbc_pwm_plan(last_pair, c3, 4, s, th) == NULL && !mc_light(&s[1]) && mc_light(&s[2]) &&
+                   mc_light(&s[3]), "four three-channel lights, the last two at one frequency, were refused");
+        const uint16_t first_pair[] = { 3000, 1000, 3000, 2000 };
+        EXPECT(zbc_pwm_plan(first_pair, c3, 4, s, th) == NULL && mc_light(&s[0]) && !mc_light(&s[1]) &&
+                   mc_light(&s[2]) && !mc_light(&s[3]),
+               "four three-channel lights, the first and third at one frequency, were refused");
+        const uint16_t no_pair[] = { 1000, 2000, 3000, 4000 };
+        why = zbc_pwm_plan(no_pair, c3, 4, s, th);
+        EXPECT(why && strstr(why, "no PWM channel left at these frequencies"),
+               "four three-channel lights at four frequencies were accepted");
     }
 
     /* ---- where the lights on one timer are put ---- */
@@ -667,10 +944,28 @@ int main(void)
             }
         }
 
-        /* Three-channel lights: three channels each, so two fit, and one fits
-         * beside a two-channel and a dimmable light but not beside two. */
-        const uint16_t f[] = { 4882, 4882, 4882, 4882 };
-        zbc_pwm_slot_t s3[4];
+        /* Every mix of lights at one frequency with no more than the chip's
+         * twelve channels fits: LEDC takes up to six, and MCPWM up to six. */
+        const int mixes = every_mix(ZBC_PWM_CHANNELS, (uint8_t[12]){ 0 }, 0);
+        EXPECT(mixes == 2030, "%d mixes at one frequency were tried, not all 2030", mixes);
+        /* And at up to four frequencies, up to twelve lights at random. */
+        const uint16_t pick_hz[] = { 4882, 1220, 9765, 305 };
+        for (int r = 0; r < 60000; r++) {
+            uint8_t  ch[12];
+            uint16_t hz[12];
+            const size_t n = 1 + rnd() % 12;
+            const int    f = 1 + rnd() % 4;
+            for (size_t i = 0; i < n; i++) {
+                ch[i] = (uint8_t)(1 + rnd() % 3);
+                hz[i] = rnd() % 8 == 0 ? 0 : pick_hz[rnd() % f];
+            }
+            check_plan(hz, ch, n);
+        }
+
+        /* Three-channel lights: three channels each, so two fill LEDC, and two
+         * more take MCPWM's three units, the unit between them locked to both. */
+        const uint16_t f[] = { 4882, 4882, 4882, 4882, 4882, 4882 };
+        zbc_pwm_slot_t s3[8];
         uint16_t       th3[ZBC_PWM_TIMERS];
         EXPECT(zbc_pwm_plan(f, (const uint8_t[]){ 3, 3 }, 2, s3, th3) == NULL, "two three-channel lights were refused");
         EXPECT(s3[0].ch[0] == 0 && s3[0].ch[2] == 2 && s3[1].ch[0] == 3 && s3[1].ch[2] == 5,
@@ -678,10 +973,23 @@ int main(void)
                s3[1].ch[2]);
         EXPECT(zbc_pwm_plan(f, (const uint8_t[]){ 3, 2, 1 }, 3, s3, th3) == NULL,
                "three, two and one channels were refused");
-        const char *why3 = zbc_pwm_plan(f, (const uint8_t[]){ 3, 3, 1 }, 3, s3, th3);
-        EXPECT(why3 && strstr(why3, "no PWM channel"), "seven channels were accepted");
-        why3 = zbc_pwm_plan(f, (const uint8_t[]){ 3, 2, 2 }, 3, s3, th3);
-        EXPECT(why3 && strstr(why3, "no PWM channel"), "three, two and two channels were accepted");
+        EXPECT(zbc_pwm_plan(f, (const uint8_t[]){ 3, 3, 1 }, 3, s3, th3) == NULL && s3[2].ch[0] == 6,
+               "a dimmable light beside two three-channel lights did not take MCPWM");
+        EXPECT(zbc_pwm_plan(f, (const uint8_t[]){ 3, 3, 3, 3 }, 4, s3, th3) == NULL,
+               "four three-channel lights were refused");
+        EXPECT(s3[2].ch[0] == 6 && s3[2].ch[1] == 7 && s3[2].ch[2] == 8 && s3[3].ch[0] == 10 && s3[3].ch[1] == 11 &&
+                   s3[3].ch[2] == 9, "two three-channel lights on MCPWM on %d %d %d and %d %d %d", s3[2].ch[0],
+               s3[2].ch[1], s3[2].ch[2], s3[3].ch[0], s3[3].ch[1], s3[3].ch[2]);
+        EXPECT(s3[2].phase_deg == 0 && s3[3].phase_deg == 0 && s3[2].peak == 2 && s3[3].peak == 2,
+               "two three-channel lights on MCPWM at %u and %u degrees", s3[2].phase_deg, s3[3].phase_deg);
+        const char *why3 = zbc_pwm_plan(f, (const uint8_t[]){ 3, 3, 3, 3, 1 }, 5, s3, th3);
+        EXPECT(why3 && strstr(why3, "no PWM channel"), "thirteen channels were accepted");
+        /* A dimmable light on the unit a three-channel light's third channel
+         * took is centred opposite it, with the second. */
+        EXPECT(zbc_pwm_plan(f, (const uint8_t[]){ 3, 3, 3, 1 }, 4, s3, th3) == NULL && s3[3].ch[0] == 9 &&
+                   s3[3].phase_deg == 180 && s3[3].peak == 1,
+               "the dimmable light beside a three-channel light on MCPWM on %d at %u degrees", s3[3].ch[0],
+               s3[3].phase_deg);
         check_phases((const uint8_t[]){ 3, 3 }, 2, (const uint16_t[]){ 0, 90 }, "two three-channel");
         check_phases((const uint8_t[]){ 3, 1 }, 2, (const uint16_t[]){ 0, 90 }, "three-channel, dimmable");
 

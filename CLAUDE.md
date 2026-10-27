@@ -80,7 +80,7 @@ The updater compiles shared modules (`wifi_manager.c`, `settings.c`, `auth.c`, `
 - `lighting.c` is policy. It turns "room to N %" into per-lamp commands through response curves
   (`curve_db.c`, monotone cubic `zbc_pchip`), fades, Warm while off, and Adaptive Lighting
   (`sun.c`, `tz.c`). It dispatches to Zigbee (`zb_coordinator.c`), wired lights (`local_lights.c`,
-  LEDC PWM, with `ntc.c`/`thermal.c` overheat hold) or Matter lamps (`matter_ctl.cpp`).
+  LEDC and MCPWM PWM, with `ntc.c`/`thermal.c` overheat hold) or Matter lamps (`matter_ctl.cpp`).
   `zb_coordinator` knows nothing of groups or curves.
 - `zb_coordinator.c` handles the stack task, network formation, device interrogation (capabilities
   from clusters and ColorCapabilities, never a model list), reporting, the command gate, settle
@@ -154,6 +154,17 @@ Each entry must follow the frames the device actually sends or its zigbee2mqtt c
 `zbc_pwm_place_n` spreads a light's channel pulses evenly over the period. A pulse that would wrap
 past the period's end is emitted as its complement with the GPIO output inverted, so LEDC is never
 given `hpoint + duty > max`.
+
+Channels 6-11 are MCPWM (numbering in `light_math.h`). An operator has two comparators for its two
+outputs, so a pulse cannot sit anywhere: timers count up and down, and each output is centred on its
+timer's zero or peak (`zbc_mcpwm_out`, `slot.peak`). One timer per operator; units at one frequency
+are synced to the first at the phase the plan gives (`zbc_mcpwm_unit_deg`). `zbc_pwm_plan` gives
+LEDC the lights while any split lets it, so a set LEDC alone can run is planned exactly as before.
+`mc_start_locked` makes and deletes a 160 MHz timer before any other: the driver's group clock
+divider is set by the first timer and shared, and without that one a later timer is refused or
+runs at a resolution its counts were not worked out for. `mc_set_timer_locked` remakes a unit's
+timer only after the old one has stopped at its zero: one remade while the old still ran keeps the
+old divider.
 
 ### Shared radio
 

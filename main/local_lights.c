@@ -7,6 +7,7 @@
 #include "freertos/task.h"
 #include "driver/gpio.h"
 #include "driver/ledc.h"
+#include "driver/mcpwm_prelude.h"
 #include "esp_log.h"
 #include "esp_rom_gpio.h"
 #include "esp_timer.h"
@@ -23,9 +24,13 @@ static const char *TAG = "local_lights";
 
 /* light_math.h plans against these numbers without knowing the chip; this is
  * where the chip is known. */
-_Static_assert(ZBC_PWM_CHANNELS <= SOC_LEDC_CHANNEL_NUM, "more PWM channels planned than the chip has");
-_Static_assert(ZBC_PWM_TIMERS <= LEDC_TIMER_MAX, "more PWM timers planned than the chip has");
+_Static_assert(ZBC_PWM_LEDC_CHANNELS <= SOC_LEDC_CHANNEL_NUM, "more LEDC channels planned than the chip has");
+_Static_assert(ZBC_PWM_LEDC_TIMERS <= LEDC_TIMER_MAX, "more LEDC timers planned than the chip has");
 _Static_assert(ZBC_PWM_RES_MAX <= SOC_LEDC_TIMER_BIT_WIDTH, "PWM resolution beyond the timer width");
+_Static_assert(ZBC_PWM_MCPWM_UNITS <= SOC_MCPWM_TIMERS_PER_GROUP && ZBC_PWM_MCPWM_UNITS <= SOC_MCPWM_OPERATORS_PER_GROUP,
+               "more MCPWM units planned than the chip has");
+_Static_assert(SOC_MCPWM_GENERATORS_PER_OPERATOR == 2 && SOC_MCPWM_COMPARATORS_PER_OPERATOR >= 2,
+               "an MCPWM unit is planned as two outputs with a comparator each");
 
 #define LEDC_MODE        LEDC_LOW_SPEED_MODE
 #define TICK_MS          10                     /* 100 Hz while something is fading */
@@ -45,6 +50,37 @@ uint8_t zbc_pwm_resolution(uint32_t hz)
         res++;
     }
     return res;
+}
+
+uint32_t zbc_mcpwm_peak(uint32_t hz, uint32_t *divider)
+{
+    uint32_t div = 0, peak = 0;
+    if (hz != 0) {
+        /* The fewest ticks a count that fit, rounded: the frequency is then the
+         * nearest the counts allow, within half a count (0.012 % at 4096). The
+         * tick is the clock divided as the driver divides it. */
+        do {
+            div++;
+            peak = (ZBC_PWM_MCPWM_CLK_HZ / div + hz) / (2 * hz);
+        } while (peak > ZBC_PWM_MCPWM_PEAK_MAX && div < 256);
+    }
+    if (divider) {
+        *divider = div;
+    }
+    return peak;
+}
+
+zbc_mcpwm_out_t zbc_mcpwm_out(uint32_t d, uint32_t peak, bool at_peak)
+{
+    if (d == 0) {
+        return (zbc_mcpwm_out_t){ .force = 0, .cmp = 0 };
+    }
+    if (d >= peak) {
+        return (zbc_mcpwm_out_t){ .force = 1, .cmp = 0 };
+    }
+    /* High for 2d ticks of the 2 * peak in a period: d either side of the zero,
+     * or of the peak. */
+    return (zbc_mcpwm_out_t){ .force = -1, .cmp = at_peak ? peak - d : d };
 }
 
 /* The light a level gives, 0-1. CIE 1931: level is lightness L* (0-100), and
@@ -240,38 +276,54 @@ void zbc_pwm_place(uint32_t dc, uint32_t dw, uint32_t max, uint32_t shift,
     *warm = o[1];
 }
 
-const char *zbc_pwm_plan(const uint16_t hz[], const uint8_t chans[], size_t n, zbc_pwm_slot_t out[],
-                         uint16_t timer_hz[ZBC_PWM_TIMERS])
+uint16_t zbc_mcpwm_unit_deg(const zbc_pwm_slot_t *s, int c)
 {
-    for (int t = 0; t < ZBC_PWM_TIMERS; t++) {
+    const unsigned centre = s->phase_deg + (c == 1 ? 180u : 0u);
+    /* Half a period back from a pulse centred on the peak is half a period on. */
+    return (uint16_t)((centre + ((s->peak >> c) & 1u ? 180u : 0u)) % 360u);
+}
+
+static int light_nch(uint8_t chans)
+{
+    return chans < 1 ? 1 : (chans > ZBC_PWM_MAX_LIGHT_CH ? ZBC_PWM_MAX_LIGHT_CH : chans);
+}
+
+/* Whether the j-th of the k PWM lights is on MCPWM in the split `mc`. The
+ * last light is the lowest bit, so counting the splits up moves the later
+ * lights first. */
+static bool on_mcpwm(uint32_t mc, int k, int j)
+{
+    return (mc >> (k - 1 - j)) & 1u;
+}
+
+/* LEDC: the lights of idx[] that `mc` leaves it, planned as zbc_pwm_plan did
+ * before there was MCPWM. False when they do not fit. */
+static bool plan_ledc(const uint16_t hz[], const uint8_t chans[], const int idx[], int k, uint32_t mc,
+                      zbc_pwm_slot_t out[], uint16_t timer_hz[ZBC_PWM_LEDC_TIMERS])
+{
+    for (int t = 0; t < ZBC_PWM_LEDC_TIMERS; t++) {
         timer_hz[t] = 0;
     }
     int channels = 0;
-    for (size_t i = 0; i < n; i++) {
-        out[i] = (zbc_pwm_slot_t){ .timer = -1, .ch = { -1, -1, -1 } };
-        if (hz[i] == 0) {
+    for (int j = 0; j < k; j++) {
+        if (on_mcpwm(mc, k, j)) {
             continue;
         }
-        if (hz[i] < ZBC_PWM_HZ_MIN || hz[i] > ZBC_PWM_HZ_MAX) {
-            return "the PWM frequency must be 100-19531 Hz";
-        }
-        int timer = -1;
-        for (int t = 0; t < ZBC_PWM_TIMERS && timer < 0; t++) {
+        const int i     = idx[j];
+        int       timer = -1;
+        for (int t = 0; t < ZBC_PWM_LEDC_TIMERS && timer < 0; t++) {
             if (timer_hz[t] == hz[i]) {
                 timer = t;
             }
         }
-        for (int t = 0; t < ZBC_PWM_TIMERS && timer < 0; t++) {
+        for (int t = 0; t < ZBC_PWM_LEDC_TIMERS && timer < 0; t++) {
             if (timer_hz[t] == 0) {
                 timer = t;
             }
         }
-        if (timer < 0) {
-            return "no PWM timer left - the chip runs at most 4 different PWM frequencies";
-        }
-        const int nch = chans[i] < 1 ? 1 : (chans[i] > ZBC_PWM_MAX_LIGHT_CH ? ZBC_PWM_MAX_LIGHT_CH : chans[i]);
-        if (channels + nch > ZBC_PWM_CHANNELS) {
-            return "no PWM channel left - the chip has 6: a tunable white light takes 2 or 3, a dimmable one 1";
+        const int nch = light_nch(chans[i]);
+        if (timer < 0 || channels + nch > ZBC_PWM_LEDC_CHANNELS) {
+            return false;
         }
         timer_hz[timer] = hz[i];
         out[i] = (zbc_pwm_slot_t){ .timer = (int8_t)timer, .ch = { -1, -1, -1 } };
@@ -290,19 +342,20 @@ const char *zbc_pwm_plan(const uint16_t hz[], const uint8_t chans[], size_t n, z
      * places left, a pair's two halves first. A three-channel light counts as a
      * pair: in a constant mix two of its channels are lit, half a period apart.
      * Light by light, in table order, so the first one is always at 0. */
-    for (int t = 0; t < ZBC_PWM_TIMERS; t++) {
+    for (int t = 0; t < ZBC_PWM_LEDC_TIMERS; t++) {
         unsigned pairs_used = 0, singles = 0;
-        for (size_t i = 0; i < n; i++) {
-            if (out[i].timer == t) {
-                pairs_used += out[i].ch[1] >= 0;
-                singles    += out[i].ch[1] < 0;
+        for (int j = 0; j < k; j++) {
+            const zbc_pwm_slot_t *s = &out[idx[j]];
+            if (!on_mcpwm(mc, k, j) && s->timer == t) {
+                pairs_used += s->ch[1] >= 0;
+                singles    += s->ch[1] < 0;
             }
         }
         if (pairs_used == 0) {
-            unsigned k = 0;
-            for (size_t i = 0; i < n; i++) {
-                if (out[i].timer == t) {
-                    out[i].phase_deg = (uint16_t)(360u * k++ / singles);
+            unsigned m = 0;
+            for (int j = 0; j < k; j++) {
+                if (!on_mcpwm(mc, k, j) && out[idx[j]].timer == t) {
+                    out[idx[j]].phase_deg = (uint16_t)(360u * m++ / singles);
                 }
             }
             continue;
@@ -310,22 +363,221 @@ const char *zbc_pwm_plan(const uint16_t hz[], const uint8_t chans[], size_t n, z
         const unsigned places = (2 * pairs_used + singles + 1) / 2 * 2;
         const unsigned half   = places / 2;
         unsigned       pair = 0, left = 0;
-        for (size_t i = 0; i < n; i++) {
-            if (out[i].timer != t) {
+        for (int j = 0; j < k; j++) {
+            zbc_pwm_slot_t *s = &out[idx[j]];
+            if (on_mcpwm(mc, k, j) || s->timer != t) {
                 continue;
             }
             unsigned place;
-            if (out[i].ch[1] >= 0) {
+            if (s->ch[1] >= 0) {
                 place = pair++;
             } else {
                 /* The places no pair took: pairs_used, its partner, the next... */
                 place = pairs_used + left / 2 + (left % 2 ? half : 0);
                 left++;
             }
-            out[i].phase_deg = (uint16_t)(360u * place / places);
+            s->phase_deg = (uint16_t)(360u * place / places);
         }
     }
-    return NULL;
+    return true;
+}
+
+/* A unit at `hz` with its second output free, not `skip`; -1 when there is
+ * none. A unit always fills its first output first. */
+static int mc_unit_half(const uint16_t unit_hz[], const int8_t owner[][2], uint16_t hz, int skip)
+{
+    for (int u = 0; u < ZBC_PWM_MCPWM_UNITS; u++) {
+        if (u != skip && unit_hz[u] == hz && owner[u][1] < 0) {
+            return u;
+        }
+    }
+    return -1;
+}
+
+/* A unit no light uses yet, not `skip`; -1 when there is none. */
+static int mc_unit_free(const uint16_t unit_hz[], int skip)
+{
+    for (int u = 0; u < ZBC_PWM_MCPWM_UNITS; u++) {
+        if (u != skip && unit_hz[u] == 0) {
+            return u;
+        }
+    }
+    return -1;
+}
+
+/* MCPWM: the lights of idx[] that `mc` gives it, in table order. A tunable
+ * white light takes a unit, its first channel centred on the unit's zero and
+ * its second on the peak. A dimmable light takes the second output of a unit
+ * at its frequency, or a unit. A three-channel light takes a unit and one more
+ * output at its frequency, centred where its first channel is, so that unit is
+ * locked to the same phase. Units locked together count as one, and those at
+ * one frequency are spread over half the period - two at 0 and 90 degrees,
+ * three at 0, 60 and 120 - as LEDC spreads tunable white lights. False when the
+ * lights do not fit. */
+static bool plan_mcpwm(const uint16_t hz[], const uint8_t chans[], const int idx[], int k, uint32_t mc,
+                       zbc_pwm_slot_t out[], uint16_t unit_hz[ZBC_PWM_MCPWM_UNITS])
+{
+    enum { UNITS = ZBC_PWM_MCPWM_UNITS };
+    int8_t  owner[UNITS][2];          /* the light (as j) on each output, -1 when free */
+    int8_t  role[UNITS][2];           /* which of its channels */
+    uint8_t lock[UNITS];              /* the lowest unit it is locked to */
+    for (int u = 0; u < UNITS; u++) {
+        unit_hz[u]  = 0;
+        owner[u][0] = owner[u][1] = -1;
+        role[u][0]  = role[u][1] = 0;
+        lock[u]     = (uint8_t)u;
+    }
+
+    for (int j = 0; j < k; j++) {
+        if (!on_mcpwm(mc, k, j)) {
+            continue;
+        }
+        const int i   = idx[j];
+        const int nch = light_nch(chans[i]);
+        int       u, v = -1;
+        if (nch == 1) {
+            u = mc_unit_half(unit_hz, owner, hz[i], -1);
+            u = u >= 0 ? u : mc_unit_free(unit_hz, -1);
+        } else {
+            u = mc_unit_free(unit_hz, -1);
+            if (u >= 0 && nch == 3) {
+                v = mc_unit_half(unit_hz, owner, hz[i], u);
+                v = v >= 0 ? v : mc_unit_free(unit_hz, u);
+                if (v < 0) {
+                    return false;
+                }
+            }
+        }
+        if (u < 0) {
+            return false;
+        }
+        out[i] = (zbc_pwm_slot_t){ .timer = (int8_t)(ZBC_PWM_LEDC_TIMERS + u), .ch = { -1, -1, -1 } };
+        unit_hz[u] = hz[i];
+        for (int c = 0; c < nch && c < 2; c++) {
+            const int o = nch == 1 && owner[u][0] >= 0 ? 1 : c;
+            owner[u][o] = (int8_t)j;
+            role[u][o]  = (int8_t)c;
+            out[i].ch[c] = (int8_t)(ZBC_PWM_LEDC_CHANNELS + 2 * u + o);
+        }
+        if (v >= 0) {
+            const int o = owner[v][0] >= 0 ? 1 : 0;
+            unit_hz[v]   = hz[i];
+            owner[v][o]  = (int8_t)j;
+            role[v][o]   = 2;
+            out[i].ch[2] = (int8_t)(ZBC_PWM_LEDC_CHANNELS + 2 * v + o);
+            const uint8_t from = lock[u] > lock[v] ? lock[u] : lock[v];
+            const uint8_t to   = lock[u] > lock[v] ? lock[v] : lock[u];
+            for (int w = 0; w < UNITS; w++) {
+                lock[w] = lock[w] == from ? to : lock[w];
+            }
+        }
+    }
+
+    /* Where each output's pulse is centred. A tunable white light's second
+     * channel on the peak, its first and third on the zero; then a dimmable
+     * light opposite the other output of its unit, or on the zero alone. */
+    bool at_peak[UNITS][2], known[UNITS][2];
+    for (int u = 0; u < UNITS; u++) {
+        for (int o = 0; o < 2; o++) {
+            const int j = owner[u][o];
+            known[u][o]   = j >= 0 && light_nch(chans[idx[j]]) > 1;
+            at_peak[u][o] = known[u][o] && role[u][o] == 1;
+        }
+    }
+    for (int u = 0; u < UNITS; u++) {
+        for (int o = 0; o < 2; o++) {
+            if (owner[u][o] >= 0 && !known[u][o]) {
+                at_peak[u][o] = known[u][1 - o] && !at_peak[u][1 - o];
+                known[u][o]   = true;
+            }
+        }
+    }
+
+    uint16_t deg[UNITS] = { 0 };
+    for (int u = 0; u < UNITS; u++) {
+        unsigned count = 0, rank = 0;
+        for (int w = 0; w < UNITS; w++) {
+            if (unit_hz[u] && unit_hz[w] == unit_hz[u] && lock[w] == w) {
+                count++;
+                rank += w < lock[u];
+            }
+        }
+        deg[u] = count ? (uint16_t)(180u * rank / count) : 0;
+    }
+    for (int u = 0; u < UNITS; u++) {
+        for (int o = 0; o < 2; o++) {
+            if (owner[u][o] < 0) {
+                continue;
+            }
+            zbc_pwm_slot_t *s = &out[idx[owner[u][o]]];
+            s->peak |= (uint8_t)(at_peak[u][o] << role[u][o]);
+            if (role[u][o] == 0) {
+                s->phase_deg = (uint16_t)((deg[u] + (at_peak[u][o] ? 180 : 0)) % 360);
+            }
+        }
+    }
+    return true;
+}
+
+const char *zbc_pwm_plan(const uint16_t hz[], const uint8_t chans[], size_t n, zbc_pwm_slot_t out[],
+                         uint16_t timer_hz[ZBC_PWM_TIMERS])
+{
+    for (int t = 0; t < ZBC_PWM_TIMERS; t++) {
+        timer_hz[t] = 0;
+    }
+    int idx[ZBC_PWM_CHANNELS];      /* the lights that take PWM; each takes a channel at least */
+    int k = 0, channels = 0;
+    for (size_t i = 0; i < n; i++) {
+        out[i] = (zbc_pwm_slot_t){ .timer = -1, .ch = { -1, -1, -1 } };
+        if (hz[i] == 0) {
+            continue;
+        }
+        if (hz[i] < ZBC_PWM_HZ_MIN || hz[i] > ZBC_PWM_HZ_MAX) {
+            return "the PWM frequency must be 100-19531 Hz";
+        }
+        channels += light_nch(chans[i]);
+        if (channels > ZBC_PWM_CHANNELS) {
+            return "no PWM channel left - the chip has 12: a three-channel light takes 3, a tunable white "
+                   "light 2, a dimmable one 1";
+        }
+        idx[k++] = (int)i;
+    }
+
+    /* Every split of the lights between the two, LEDC taking the earlier lights
+     * as long as any split lets it: at most 4096, and most cut short by the
+     * channel count. */
+    for (uint32_t mc = 0; mc < (1u << k); mc++) {
+        int on_ledc = 0, on_mc = 0;
+        for (int j = 0; j < k; j++) {
+            if (on_mcpwm(mc, k, j)) {
+                on_mc += light_nch(chans[idx[j]]);
+            } else {
+                on_ledc += light_nch(chans[idx[j]]);
+            }
+        }
+        if (on_ledc <= ZBC_PWM_LEDC_CHANNELS && on_mc <= 2 * ZBC_PWM_MCPWM_UNITS &&
+            plan_ledc(hz, chans, idx, k, mc, out, timer_hz) &&
+            plan_mcpwm(hz, chans, idx, k, mc, out, timer_hz + ZBC_PWM_LEDC_TIMERS)) {
+            return NULL;
+        }
+    }
+
+    int freqs = 0;
+    for (int j = 0; j < k; j++) {
+        bool seen = false;
+        for (int m = 0; m < j && !seen; m++) {
+            seen = hz[idx[m]] == hz[idx[j]];
+        }
+        freqs += !seen;
+        out[idx[j]] = (zbc_pwm_slot_t){ .timer = -1, .ch = { -1, -1, -1 } };
+    }
+    for (int t = 0; t < ZBC_PWM_TIMERS; t++) {
+        timer_hz[t] = 0;
+    }
+    return freqs > ZBC_PWM_TIMERS
+               ? "no PWM timer left - the chip runs at most 7 different PWM frequencies"
+               : "no PWM channel left at these frequencies - six of the 12 come in pairs that run at one "
+                 "frequency, so lights that share one fit more";
 }
 /* >>> end host-test region: cwww <<< */
 
@@ -472,13 +724,15 @@ typedef struct {
 
     /* PWM: the light's channels in the order their pulses take in the period,
      * each with the LEDs it drives (`role`, ZBC_CH_*). ch[0] < 0 on a PWM light
-     * means it could not be given channels and stays dark. */
+     * means it could not be given channels and stays dark. Numbered as in
+     * light_math.h: a timer from ZBC_PWM_LEDC_TIMERS on is MCPWM. */
     uint8_t       nch;
     int8_t        pin[ZBC_PWM_MAX_LIGHT_CH];
     uint8_t       role[ZBC_PWM_MAX_LIGHT_CH];
     int8_t        timer;
     int8_t        ch[ZBC_PWM_MAX_LIGHT_CH];
     uint16_t      phase_deg;          /* where in the timer's period it starts */
+    uint8_t       peak;               /* MCPWM: the channels centred on the peak */
     uint32_t      max;
     bool          configured;         /* channels bound to the pins */
     bool          sent_valid;
@@ -510,6 +764,22 @@ static local_lights_fade_stats_t s_fade_stats;   /* fade_task's, under s_lock */
 /* The overheat interlock - see local_lights_hold. Written under s_lock once the
  * lock exists; before that, only thermal_start() touches it. */
 static volatile bool     s_held;
+
+/* An MCPWM unit (light_math.h), under s_lock like LEDC. Its operator and
+ * comparators are made at the first light planned on MCPWM and never deleted:
+ * they hold the driver's group, and with it the clock divider mc_start_locked
+ * fixes. Its timer is made for a frequency and deleted when no light uses the
+ * unit at that frequency any more; s_timer_hz has the frequency. */
+typedef struct {
+    mcpwm_oper_handle_t  oper;
+    mcpwm_cmpr_handle_t  cmp[2];      /* one an output */
+    mcpwm_gen_handle_t   gen[2];      /* while a light's channel is bound to the output */
+    mcpwm_timer_handle_t timer;       /* NULL: not in use */
+    mcpwm_sync_handle_t  sync;        /* its zero, while another unit is locked to it */
+    uint32_t             peak;
+} mc_unit_t;
+static mc_unit_t         s_mc[ZBC_PWM_MCPWM_UNITS];
+static int8_t            s_mc_state;  /* 0 not started, 1 running, -1 refused */
 
 const char *local_light_pin_problem(int gpio)
 {
@@ -577,6 +847,27 @@ static bool pwm_ready(const zbc_light_t *c)
     return n > 0;
 }
 
+static bool is_mc_channel(int ch)
+{
+    return ch >= ZBC_PWM_LEDC_CHANNELS;
+}
+
+static mc_unit_t *mc_unit_of(int ch)
+{
+    return &s_mc[(ch - ZBC_PWM_LEDC_CHANNELS) / 2];
+}
+
+static int mc_output_of(int ch)
+{
+    return (ch - ZBC_PWM_LEDC_CHANNELS) % 2;
+}
+
+/* The timer channel k of a light runs on: an MCPWM light may span two units. */
+static int channel_timer(const live_light_t *l, int k)
+{
+    return is_mc_channel(l->ch[k]) ? ZBC_PWM_LEDC_TIMERS + (l->ch[k] - ZBC_PWM_LEDC_CHANNELS) / 2 : l->timer;
+}
+
 static live_light_t *find_locked(uint16_t id)
 {
     for (size_t i = 0; i < CONFIG_ZBC_MAX_LIGHTS; i++) {
@@ -611,6 +902,23 @@ static void set_channel_locked(int gpio, int ch, bool active_low, const zbc_pwm_
     }
 }
 
+/* One MCPWM output at d counts of `peak`. Dark and full are levels forced at
+ * once; between them the compare value takes over at the next zero, so the
+ * period where a light leaves dark or full may be wrong. */
+static void mc_set_locked(int ch, uint32_t d, uint32_t peak, bool at_peak)
+{
+    mc_unit_t            *m = mc_unit_of(ch);
+    const int             o = mc_output_of(ch);
+    const zbc_mcpwm_out_t w = zbc_mcpwm_out(d, peak, at_peak);
+    if (!m->gen[o]) {
+        return;
+    }
+    if (w.force < 0) {
+        mcpwm_comparator_set_compare_value(m->cmp[o], w.cmp);
+    }
+    mcpwm_generator_set_force_level(m->gen[o], w.force, true);
+}
+
 /* Writes the light's channels for where it is now. Only what changed goes to
  * the hardware, so an idle light costs nothing per tick. */
 static void apply_pwm_locked(live_light_t *l, int64_t now)
@@ -637,6 +945,18 @@ static void apply_pwm_locked(live_light_t *l, int64_t now)
     uint32_t d[ZBC_PWM_MAX_LIGHT_CH];
     for (int i = 0; i < l->nch; i++) {
         d[i] = by_role[l->role[i]];
+    }
+    if (l->timer >= ZBC_PWM_LEDC_TIMERS) {
+        /* Each output's pulse is centred where the plan put it: only the duty
+         * goes out. */
+        for (int i = 0; i < l->nch; i++) {
+            if (!l->sent_valid || l->sent[i].duty != d[i]) {
+                mc_set_locked(l->ch[i], d[i], l->max, (l->peak >> i) & 1);
+            }
+            l->sent[i] = (zbc_pwm_out_t){ .duty = d[i] };
+        }
+        l->sent_valid = true;
+        return;
     }
     const uint32_t shift = (uint32_t)((uint64_t)l->max * l->phase_deg / 360);
     zbc_pwm_out_t  out[ZBC_PWM_MAX_LIGHT_CH];
@@ -791,6 +1111,238 @@ static bool bind_channel(int gpio, int ch, int timer, bool active_low)
     return err == ESP_OK;
 }
 
+/* MCPWM's operators and comparators, once. The group divides its clock once
+ * for every timer in it, and the first timer made sets that divider: left at
+ * the driver's default of 2, a timer later asked for the full 160 MHz, or a
+ * third of it, is refused or runs at another resolution than its counts were
+ * worked out for. A timer made here at 160 MHz sets 1, the operators keep the
+ * group - and the divider - after it is deleted, and every timer after it is
+ * divided by its own divider alone, as zbc_mcpwm_peak counts. */
+static bool mc_start_locked(void)
+{
+    if (s_mc_state) {
+        return s_mc_state > 0;
+    }
+    esp_err_t err = ESP_OK;
+    for (int u = 0; u < ZBC_PWM_MCPWM_UNITS && err == ESP_OK; u++) {
+        const mcpwm_operator_config_t oc = { .group_id = 0 };
+        err = mcpwm_new_operator(&oc, &s_mc[u].oper);
+        for (int o = 0; o < 2 && err == ESP_OK; o++) {
+            /* A new duty from the next zero, so a pulse on the peak is never
+             * cut and one on the zero is the old half and the new one once. */
+            const mcpwm_comparator_config_t cc = { .flags.update_cmp_on_tez = true };
+            err = mcpwm_new_comparator(s_mc[u].oper, &cc, &s_mc[u].cmp[o]);
+        }
+    }
+    if (err == ESP_OK) {
+        const mcpwm_timer_config_t tc = {
+            .group_id      = 0,
+            .clk_src       = MCPWM_TIMER_CLK_SRC_PLL160M,
+            .resolution_hz = ZBC_PWM_MCPWM_CLK_HZ,
+            .count_mode    = MCPWM_TIMER_COUNT_MODE_UP_DOWN,
+            .period_ticks  = 2,
+        };
+        mcpwm_timer_handle_t t;
+        err = mcpwm_new_timer(&tc, &t);
+        if (err == ESP_OK) {
+            mcpwm_del_timer(t);
+        }
+    }
+    s_mc_state = err == ESP_OK ? 1 : -1;
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "MCPWM refused (0x%x): the lights planned on it stay dark", err);
+    }
+    return err == ESP_OK;
+}
+
+/* Unit u's timer at hz, or none for 0. The lights on it are unbound by now: a
+ * light whose unit changes frequency is not carried over. */
+static void mc_set_timer_locked(int u, uint16_t hz)
+{
+    mc_unit_t *m = &s_mc[u];
+    const int  t = ZBC_PWM_LEDC_TIMERS + u;
+    if (m->timer) {
+        /* Deleted only once it has stopped at its zero, up to a period later:
+         * the hardware timer takes a new timer's divider only from rest, and
+         * one remade while it ran on kept the old divider (on the bench a unit
+         * moved from 1000 Hz to 300 ran at 750). */
+        mcpwm_timer_start_stop(m->timer, MCPWM_TIMER_STOP_EMPTY);
+        vTaskDelay(pdMS_TO_TICKS(1000 / (s_timer_hz[t] ? s_timer_hz[t] : 100) + 2));
+        mcpwm_timer_disable(m->timer);
+        mcpwm_del_timer(m->timer);
+        m->timer = NULL;
+    }
+    s_timer_hz[t] = 0;
+    if (!hz) {
+        return;
+    }
+    uint32_t                   div;
+    const uint32_t             peak = zbc_mcpwm_peak(hz, &div);
+    const mcpwm_timer_config_t tc   = {
+        .group_id      = 0,
+        .clk_src       = MCPWM_TIMER_CLK_SRC_PLL160M,
+        .resolution_hz = ZBC_PWM_MCPWM_CLK_HZ / div,
+        .count_mode    = MCPWM_TIMER_COUNT_MODE_UP_DOWN,
+        .period_ticks  = 2 * peak,
+    };
+    mcpwm_timer_handle_t timer   = NULL;
+    bool                 enabled = false;
+    esp_err_t            err     = mcpwm_new_timer(&tc, &timer);
+    if (err == ESP_OK) {
+        err = mcpwm_operator_connect_timer(m->oper, timer);
+    }
+    if (err == ESP_OK) {
+        err     = mcpwm_timer_enable(timer);
+        enabled = err == ESP_OK;
+    }
+    if (err == ESP_OK) {
+        err = mcpwm_timer_start_stop(timer, MCPWM_TIMER_START_NO_STOP);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "PWM timer %d (MCPWM unit %d) refused %u Hz (0x%x)", t, u, (unsigned)hz, err);
+        if (enabled) {
+            mcpwm_timer_disable(timer);
+        }
+        if (timer) {
+            mcpwm_del_timer(timer);
+        }
+        return;
+    }
+    m->timer      = timer;
+    m->peak       = peak;
+    s_timer_hz[t] = hz;
+    ESP_LOGI(TAG, "PWM timer %d (MCPWM unit %d): %u Hz at %u counts", t, u, (unsigned)hz, (unsigned)peak);
+}
+
+/* Every unit's lock to another let go and its sync source deleted, before any
+ * timer is replaced. A unit let go runs on at the phase it has. */
+static void mc_unlock_locked(void)
+{
+    const mcpwm_timer_sync_phase_config_t none = { .sync_src = NULL };
+    for (int u = 0; u < ZBC_PWM_MCPWM_UNITS; u++) {
+        if (s_mc[u].timer) {
+            mcpwm_timer_set_phase_on_sync(s_mc[u].timer, &none);
+        }
+    }
+    for (int u = 0; u < ZBC_PWM_MCPWM_UNITS; u++) {
+        if (s_mc[u].sync) {
+            mcpwm_del_sync_src(s_mc[u].sync);
+            s_mc[u].sync = NULL;
+        }
+    }
+}
+
+/* Locks every unit to the first unit at its frequency, at its phase deg[u]:
+ * at the first's zero the unit is set to where it then is in its own period.
+ * A unit already in place is set to the count it has, so locking again after
+ * a reload changes nothing; a unit just made takes its place at the first
+ * zero. Same clock, same period: once placed, they stay placed. */
+static void mc_lock_locked(const uint16_t deg[ZBC_PWM_MCPWM_UNITS])
+{
+    for (int u = 0; u < ZBC_PWM_MCPWM_UNITS; u++) {
+        const uint16_t hz   = s_timer_hz[ZBC_PWM_LEDC_TIMERS + u];
+        int            lead = -1;
+        for (int v = 0; v < u && lead < 0; v++) {
+            if (hz && s_timer_hz[ZBC_PWM_LEDC_TIMERS + v] == hz) {
+                lead = v;
+            }
+        }
+        if (lead < 0) {
+            continue;
+        }
+        mc_unit_t *m = &s_mc[lead];
+        if (!m->sync) {
+            const mcpwm_timer_sync_src_config_t sc = { .timer_event = MCPWM_TIMER_EVENT_EMPTY };
+            if (mcpwm_new_timer_sync_src(m->timer, &sc, &m->sync) != ESP_OK) {
+                ESP_LOGW(TAG, "MCPWM unit %d cannot lead unit %d: their phases are left to chance", lead, u);
+                m->sync = NULL;
+                continue;
+            }
+        }
+        /* Its zero `rel` degrees after the lead's: at the lead's zero it is
+         * counting down to its own, rel/180 of its peak away - or, past half a
+         * period, up from it. */
+        const uint32_t                        rel  = (deg[u] + 360u - deg[lead]) % 360u;
+        const uint32_t                        peak = s_mc[u].peak;
+        const mcpwm_timer_sync_phase_config_t pc   = {
+            .sync_src    = m->sync,
+            .count_value = rel <= 180 ? peak * rel / 180 : peak * (360 - rel) / 180,
+            .direction   = rel > 0 && rel <= 180 ? MCPWM_TIMER_DIRECTION_DOWN : MCPWM_TIMER_DIRECTION_UP,
+        };
+        mcpwm_timer_set_phase_on_sync(s_mc[u].timer, &pc);
+    }
+}
+
+/* Binds an MCPWM output to the pin, dark, its pulse centred on its timer's
+ * zero or peak (zbc_mcpwm_out): the compare value counting up sets the level
+ * the output has at the peak, counting down the level it has at the zero, and
+ * the zero and the peak set those again. */
+static bool mc_bind_locked(int gpio, int ch, bool active_low, bool at_peak)
+{
+    mc_unit_t *m = mc_unit_of(ch);
+    const int  o = mc_output_of(ch);
+    if (!m->timer || m->gen[o]) {
+        return false;
+    }
+    const mcpwm_generator_config_t gc         = { .gen_gpio_num = gpio, .flags.invert_pwm = active_low };
+    const mcpwm_generator_action_t at_zero_is = at_peak ? MCPWM_GEN_ACTION_LOW : MCPWM_GEN_ACTION_HIGH;
+    const mcpwm_generator_action_t at_peak_is = at_peak ? MCPWM_GEN_ACTION_HIGH : MCPWM_GEN_ACTION_LOW;
+    mcpwm_gen_handle_t             g          = NULL;
+    esp_err_t                      err        = mcpwm_new_generator(m->oper, &gc, &g);
+    if (err == ESP_OK) {
+        err = mcpwm_generator_set_force_level(g, 0, true);
+    }
+    if (err == ESP_OK) {
+        err = mcpwm_generator_set_actions_on_compare_event(
+            g, MCPWM_GEN_COMPARE_EVENT_ACTION(MCPWM_TIMER_DIRECTION_UP, m->cmp[o], at_peak_is),
+            MCPWM_GEN_COMPARE_EVENT_ACTION(MCPWM_TIMER_DIRECTION_DOWN, m->cmp[o], at_zero_is),
+            MCPWM_GEN_COMPARE_EVENT_ACTION_END());
+    }
+    if (err == ESP_OK) {
+        err = mcpwm_generator_set_actions_on_timer_event(
+            g, MCPWM_GEN_TIMER_EVENT_ACTION(MCPWM_TIMER_DIRECTION_UP, MCPWM_TIMER_EVENT_EMPTY, at_zero_is),
+            MCPWM_GEN_TIMER_EVENT_ACTION(MCPWM_TIMER_DIRECTION_DOWN, MCPWM_TIMER_EVENT_FULL, at_peak_is),
+            MCPWM_GEN_TIMER_EVENT_ACTION_END());
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "PWM channel %d (MCPWM) on GPIO %d refused (0x%x)", ch, gpio, err);
+        if (g) {
+            mcpwm_del_generator(g);
+        }
+        return false;
+    }
+    m->gen[o] = g;
+    return true;
+}
+
+/* Dark, then the output let go. The driver leaves the pin floating; it is
+ * driven at the dark level instead, until a channel takes it or the reload
+ * hands it back. */
+static void mc_unbind_locked(int gpio, int ch, bool active_low)
+{
+    mc_unit_t *m = mc_unit_of(ch);
+    const int  o = mc_output_of(ch);
+    if (!m->gen[o]) {
+        return;
+    }
+    mcpwm_generator_set_force_level(m->gen[o], 0, true);
+    mcpwm_del_generator(m->gen[o]);
+    m->gen[o] = NULL;
+    drive(gpio, false, active_low);
+    gpio_set_direction(gpio, GPIO_MODE_OUTPUT);
+}
+
+/* A channel of a light as it is stopped when not carried over: at the level
+ * that leaves the LEDs dark, through whatever inversion is applied. */
+static void stop_channel_locked(const live_light_t *l, int k)
+{
+    if (is_mc_channel(l->ch[k])) {
+        mc_unbind_locked(l->pin[k], l->ch[k], l->active_low);
+    } else {
+        ledc_stop(LEDC_MODE, l->ch[k], l->sent[k].invert ? 1 : 0);
+    }
+}
+
 void local_lights_reload(void)
 {
     if (!s_lock) {
@@ -869,11 +1421,13 @@ void local_lights_reload(void)
             l->ch[k] = slot[i].ch[k];
         }
         l->phase_deg  = pwm ? slot[i].phase_deg : 0;
+        l->peak       = pwm ? slot[i].peak : 0;
+        const bool mc = l->timer >= ZBC_PWM_LEDC_TIMERS;
         if (pwm && (!old || old->timer != l->timer || old->phase_deg != l->phase_deg)) {
-            ESP_LOGI(TAG, "Wired light %u: PWM timer %d, phase %u deg", (unsigned)c->id, l->timer,
-                     (unsigned)l->phase_deg);
+            ESP_LOGI(TAG, "Wired light %u: PWM timer %d%s, phase %u deg", (unsigned)c->id, l->timer,
+                     mc ? " (MCPWM)" : "", (unsigned)l->phase_deg);
         }
-        l->max        = pwm ? (1u << zbc_pwm_resolution(c->pwm_hz)) : 0;
+        l->max        = !pwm ? 0 : mc ? zbc_mcpwm_peak(c->pwm_hz, NULL) : (1u << zbc_pwm_resolution(c->pwm_hz));
 
         const bool same_wiring = old && old->kind == c->kind && old->gpio == l->gpio &&
                                  old->nch == l->nch && memcmp(old->pin, l->pin, sizeof(l->pin)) == 0;
@@ -896,7 +1450,7 @@ void local_lights_reload(void)
         }
         if (pwm && same_wiring && old->configured && old->timer == l->timer &&
             memcmp(old->ch, l->ch, sizeof(l->ch)) == 0 && old->pwm_hz == l->pwm_hz &&
-            old->active_low == l->active_low) {
+            old->peak == l->peak && old->active_low == l->active_low) {
             l->configured = true;
             l->sent_valid = old->sent_valid;
             memcpy(l->sent, old->sent, sizeof(l->sent));
@@ -919,7 +1473,7 @@ void local_lights_reload(void)
             kept = next[i].used && next[i].configured && next[i].id == o->id;
         }
         for (int k = 0; !kept && k < o->nch; k++) {
-            ledc_stop(LEDC_MODE, o->ch[k], o->sent[k].invert ? 1 : 0);
+            stop_channel_locked(o, k);
         }
     }
     for (int pin = 0; pin < SOC_GPIO_PIN_COUNT; pin++) {
@@ -932,7 +1486,7 @@ void local_lights_reload(void)
     /* Every timer on PLL_DIV, never LEDC_AUTO_CLK: the C6's low-speed timers
      * share one clock source, and auto could pick RC_FAST for a low frequency
      * and lock every later timer out ("timer clock conflict"). */
-    for (int t = 0; t < ZBC_PWM_TIMERS; t++) {
+    for (int t = 0; t < ZBC_PWM_LEDC_TIMERS; t++) {
         if (timer_hz[t] == 0 || timer_hz[t] == s_timer_hz[t]) {
             continue;
         }
@@ -952,6 +1506,29 @@ void local_lights_reload(void)
             ESP_LOGW(TAG, "PWM timer %d refused %u Hz (0x%x)", t, (unsigned)timer_hz[t], err);
             s_timer_hz[t] = 0;
         }
+    }
+
+    /* MCPWM, started at the first light planned on it: the units' locks let go
+     * while a timer is replaced, then made again for the plan's phases. */
+    bool mc_wanted = false;
+    for (int t = ZBC_PWM_LEDC_TIMERS; t < ZBC_PWM_TIMERS; t++) {
+        mc_wanted |= timer_hz[t] != 0;
+    }
+    if (s_mc_state > 0 || (mc_wanted && mc_start_locked())) {
+        uint16_t deg[ZBC_PWM_MCPWM_UNITS] = { 0 };
+        for (size_t i = 0; i < n; i++) {
+            for (int k = 0; k < chans[i] && slot[i].timer >= ZBC_PWM_LEDC_TIMERS; k++) {
+                deg[(slot[i].ch[k] - ZBC_PWM_LEDC_CHANNELS) / 2] = zbc_mcpwm_unit_deg(&slot[i], k);
+            }
+        }
+        mc_unlock_locked();
+        for (int u = 0; u < ZBC_PWM_MCPWM_UNITS; u++) {
+            const int t = ZBC_PWM_LEDC_TIMERS + u;
+            if (timer_hz[t] != s_timer_hz[t]) {
+                mc_set_timer_locked(u, timer_hz[t]);
+            }
+        }
+        mc_lock_locked(deg);
     }
 
     for (size_t i = 0; i < n; i++) {
@@ -985,14 +1562,28 @@ void local_lights_reload(void)
         if (l->configured) {
             continue;
         }
-        if (l->timer < 0 || s_timer_hz[l->timer] != l->pwm_hz) {
-            continue;                   /* no channels, or its timer was refused: dark */
+        bool ready = l->timer >= 0;
+        for (int k = 0; ready && k < l->nch; k++) {
+            ready = s_timer_hz[channel_timer(l, k)] == l->pwm_hz;
         }
-        bool bound = true;
-        for (int k = 0; bound && k < l->nch; k++) {
-            bound = bind_channel(l->pin[k], l->ch[k], l->timer, l->active_low);
+        if (!ready) {
+            continue;                   /* no channels, or a timer was refused: dark */
         }
-        if (!bound) {
+        int bound = 0;
+        while (bound < l->nch &&
+               (is_mc_channel(l->ch[bound])
+                    ? mc_bind_locked(l->pin[bound], l->ch[bound], l->active_low, (l->peak >> bound) & 1)
+                    : bind_channel(l->pin[bound], l->ch[bound], l->timer, l->active_low))) {
+            bound++;
+        }
+        if (bound < l->nch) {
+            /* An MCPWM output stays taken until it is let go. */
+            for (int k = 0; k < bound; k++) {
+                if (is_mc_channel(l->ch[k])) {
+                    mc_unbind_locked(l->pin[k], l->ch[k], l->active_low);
+                    s_owned[l->pin[k]] = true;
+                }
+            }
             continue;
         }
         for (int k = 0; k < l->nch; k++) {

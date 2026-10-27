@@ -100,8 +100,22 @@ int      zbc_light_pin_level(bool on, bool active_low);
 #define ZBC_PWM_HZ_MIN   100u
 #define ZBC_PWM_HZ_MAX   19531u     /* the fastest the clock allows at 12 bits */
 #define ZBC_PWM_RES_MAX  20u
-#define ZBC_PWM_CHANNELS 6
-#define ZBC_PWM_TIMERS   4
+
+/* Two peripherals make the PWM. LEDC has timers 0-3 and channels 0-5, any
+ * channel on any timer. MCPWM has three units, each a timer and an operator
+ * with two outputs: unit u is timer ZBC_PWM_LEDC_TIMERS + u, and its outputs
+ * are channels ZBC_PWM_LEDC_CHANNELS + 2u and + 2u + 1. Its timers count up and
+ * down, and an output's pulse is centred either on its timer's zero or on its
+ * peak, half a period later - so a unit's two outputs are a tunable white
+ * pair, or two dimmable lights half a period apart. Units at one frequency are
+ * locked to each other at a phase. */
+#define ZBC_PWM_LEDC_CHANNELS 6
+#define ZBC_PWM_LEDC_TIMERS   4
+#define ZBC_PWM_MCPWM_UNITS   3
+#define ZBC_PWM_CHANNELS      (ZBC_PWM_LEDC_CHANNELS + 2 * ZBC_PWM_MCPWM_UNITS)
+#define ZBC_PWM_TIMERS        (ZBC_PWM_LEDC_TIMERS + ZBC_PWM_MCPWM_UNITS)
+#define ZBC_PWM_MCPWM_CLK_HZ  160000000u   /* PLL_F160M, the group clock undivided */
+#define ZBC_PWM_MCPWM_PEAK_MAX 65535u      /* the counter is 16 bits */
 
 /* The finest duty resolution in bits a timer can run at this frequency:
  * floor(log2(clock / hz)), capped at ZBC_PWM_RES_MAX. The fastest frequency at
@@ -110,6 +124,14 @@ int      zbc_light_pin_level(bool on, bool active_low);
  * 15, 4882 14, 9765 13 and 19531 12, and below ESPHome's list 610 is 17, 305 18
  * and 152 19 - one hertz more loses a bit. */
 uint8_t  zbc_pwm_resolution(uint32_t hz);
+
+/* The same for an MCPWM timer: the peak it counts up to and back from, which
+ * is a light's full duty, and the divider from ZBC_PWM_MCPWM_CLK_HZ that gets
+ * it there. Two ticks a count, so at the full clock it matches LEDC's counts
+ * from 1221 Hz up, and between two of LEDC's presets it has more; below 1221 Hz
+ * the 16-bit counter keeps it under 65536 counts where LEDC has 17-19 bits.
+ * 0 for 0 Hz. */
+uint32_t zbc_mcpwm_peak(uint32_t hz, uint32_t *divider);
 
 /* ZCL level, in thousandths (0-254000), to a duty out of `max` on the CIE 1931
  * lightness curve - the perceptual scale a Zigbee lamp dims on. 0 is dark, any
@@ -158,17 +180,46 @@ void     zbc_pwm_place_n(const uint32_t d[], int n, uint32_t max, uint32_t shift
 void     zbc_pwm_place(uint32_t dc, uint32_t dw, uint32_t max, uint32_t shift,
                        zbc_pwm_out_t *cold, zbc_pwm_out_t *warm);
 
+/* An MCPWM output's setting for d counts out of `peak`: the compare value, or
+ * a level forced at dark (0) and full (1), where the compare value would sit on
+ * the zero or the peak and the direction there is ambiguous. `at_peak` says
+ * where its pulse is centred (zbc_pwm_slot_t.peak). The pulse is high from the
+ * compare value counting one way to the compare value counting back - an output
+ * centred on the zero is high below it, one centred on the peak above it. */
 typedef struct {
-    int8_t   timer;     /* -1 = no PWM for this light */
+    int8_t   force;     /* -1: none, the compare value is used */
+    uint32_t cmp;
+} zbc_mcpwm_out_t;
+
+zbc_mcpwm_out_t zbc_mcpwm_out(uint32_t d, uint32_t peak, bool at_peak);
+
+typedef struct {
+    int8_t   timer;     /* -1 = no PWM for this light; an MCPWM light's first unit */
     int8_t   ch[ZBC_PWM_MAX_LIGHT_CH];  /* the light's channels in order, -1 past its count */
-    uint16_t phase_deg; /* where in its timer's period the light starts, 0-359 */
+    /* Where in the period of its frequency the light starts, 0-359: on LEDC its
+     * first pulse starts there, on MCPWM it is centred there. */
+    uint16_t phase_deg;
+    /* MCPWM: bit k is set when channel k is centred on its timer's peak, clear
+     * when on its zero. A light's units all run at one phase, which is
+     * phase_deg less half a period when bit 0 is set. 0 on LEDC. */
+    uint8_t  peak;
 } zbc_pwm_slot_t;
+
+/* The phase, 0-359, an MCPWM light's channel c needs its unit to run at: its
+ * first and third channels are centred at phase_deg and its second half a
+ * period on, each on its unit's zero or peak as `peak` says. Every channel the
+ * plan puts on one unit gives that unit the same phase. */
+uint16_t zbc_mcpwm_unit_deg(const zbc_pwm_slot_t *s, int c);
 
 /* Shares the timers and channels out over the lights: hz[i] is light i's PWM
  * frequency, 0 for a light that takes no PWM, and chans[i] its channels, 1 for
- * a dimmable light, 2 or 3 for tunable white. Lights at the same frequency share
- * a timer and are spread over its period, so the ripple of lights that light one
- * room partly cancels. Returns NULL, or why the chip cannot run them all. */
+ * a dimmable light, 2 or 3 for tunable white. LEDC takes the lights, in table
+ * order, while they fit it, and MCPWM the rest - so a set that LEDC alone can
+ * run is planned exactly as before MCPWM was used. A light's channels are all
+ * on one of the two. Lights at the same frequency on one of them share a timer
+ * (LEDC) or locked units (MCPWM) and are spread over the period, so the ripple
+ * of lights that light one room partly cancels. Returns NULL, or why the chip
+ * cannot run them all. */
 const char *zbc_pwm_plan(const uint16_t hz[], const uint8_t chans[], size_t n, zbc_pwm_slot_t out[],
                          uint16_t timer_hz[ZBC_PWM_TIMERS]);
 
