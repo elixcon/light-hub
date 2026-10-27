@@ -78,11 +78,33 @@ the first stack entry name `esp_vApplicationTickHook` and `__assert_func`, which
 riscv32-esp-elf-addr2line -pfiaC -e elixcon_light_hub.elf 0x40806ac2 0x42023315 0x40806a85 0x4080ea57 0x42023317
 ```
 
+`stack_bounds` is the crashed task's stack, lowest and highest address, null outside a task.
+
+A `Stack protection fault` comes from the hardware stack guard, which holds sp to the running
+stack's bounds. Its interrupt is taken an instruction or more after sp left them, so `pc` and `sp`
+are where the code had got to by then. Such a record has `guard`, null in any other: `pc`, the
+instruction after the one that moved sp (give it to addr2line as it is), the `bounds` it was held to,
+and `sp_in_bounds`. A real overflow leaves sp below them, as the test crash does:
+
+```json
+"task": "crash", "pc": "0x4202a6d0", "sp": "0x40873620", "stack_bounds": ["0x40873a84", "0x40874680"],
+"guard": {"pc": "0x4202a6ce", "bounds": ["0x40873a84", "0x40874680"], "sp_in_bounds": false}
+```
+
+`guard.bounds` other than `stack_bounds` are the interrupt stack's (`CONFIG_FREERTOS_ISR_STACKSIZE`).
+`sp_in_bounds: true` with `guard.pc` in task code is the guard going off with sp in range, right
+after an instruction that loads sp from memory (`lw sp,…`), as a function with a variable-length
+array does on its way out. That is [esp-idf#14456](https://github.com/espressif/esp-idf/issues/14456),
+open and without a known cause. In October 2026 it restarted two boxes from the Zigbee library's
+link status (`nwk_link_mngr_send_link_status_cmd`, every 15 s), with `zigbee_main` using some 500
+bytes of its 6 KB stack. Such a record does not mean a stack is too small. Records stored before
+`stack_bounds` and `guard` existed show both as null.
+
 So keep `build/elixcon_light_hub.elf` of every image that goes onto a box; a release has it as
 `elixcon_light_hub-<version>.elf`, the `version` in the record. `build` matches the
 "ELF file SHA256" `idf.py build` prints. To test the record, build with `CONFIG_ZBC_CRASH_TEST`. Then
-`POST /api/restart` takes `{"crash": "abort"}` or `{"crash": "fault"}` and crashes half a second
-later.
+`POST /api/restart` takes `{"crash": "abort"}`, `{"crash": "fault"}` or `{"crash": "stack"}` (an
+overflow the stack guard catches) and crashes half a second later.
 
 ## Continuous integration
 

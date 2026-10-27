@@ -19,6 +19,10 @@
 #include "freertos/task.h"
 #include "nvs.h"
 #include "riscv/rvruntime-frames.h"
+#include "soc/soc.h"
+#if CONFIG_ESP_SYSTEM_HW_STACK_GUARD
+#include "esp_private/hw_stack_guard.h"
+#endif
 
 #include "crash_log.h"
 
@@ -28,9 +32,10 @@ static const char *TAG = "crash_log";
 #define KEY_CRASH           "crash"
 
 /* The layout of crash_rec_t: change it with the struct. A record from a build
- * with another layout then fails the check and is dropped, never misread. */
-#define CRASH_MAGIC        0x31485243u   /* "CRH1" */
-#define CRASH_BLOB_VERSION 1
+ * with another layout then fails the check and is dropped, never misread - but
+ * for a stored version 1, which load() carries over. */
+#define CRASH_MAGIC        0x32485243u   /* "CRH2" */
+#define CRASH_BLOB_VERSION 2
 #define CRASH_STACK_WORDS  16
 /* How far up the stack to look for return addresses. Enough for several of
  * CHIP's or the Zigbee stack's frames; the scan stops sooner at the end of the
@@ -55,6 +60,13 @@ typedef struct {
     char     message[96];                /* an abort's; empty for a fault */
     char     version[32];
     char     build[12];                  /* the ELF SHA prefix /api/status calls `build` */
+    /* Since version 2, and after everything version 1 had: see load(). */
+    uint32_t stack_lo, stack_hi;         /* the crashed task's stack; 0 outside a task */
+    /* A stack protection fault: where the hardware guard saw sp leave the bounds
+     * it held it to, and those bounds. pc and sp are where its interrupt was
+     * taken, which can be a few instructions on, with sp back in bounds. 0 for
+     * any other crash. */
+    uint32_t guard_pc, guard_lo, guard_hi;
     uint32_t crc;                        /* over everything above */
 } crash_rec_t;
 
@@ -67,6 +79,13 @@ typedef struct {
     uint32_t    count;          /* crashes recorded since the key was first written */
     crash_rec_t rec;
 } crash_blob_t;
+
+/* A version 1 blob: this one up to stack_lo, then its crc and padding. Kept
+ * across the update rather than dropped, since the crash it holds may be the one
+ * the update is meant to look into. */
+#define CRASH_BLOB_V1_SIZE 320
+_Static_assert(offsetof(crash_blob_t, rec) + offsetof(crash_rec_t, stack_lo) + 8 == CRASH_BLOB_V1_SIZE,
+               "the fields a version 1 record has moved");
 
 /* In RTC memory, which a panic's restart leaves as it was; at power-on it holds
  * whatever the RAM came up with, which the magic and the CRC turn away. */
@@ -167,7 +186,7 @@ extern int _text_start, _text_end, _iram_text_start, _iram_text_end;
 /* The words from sp up to the end of the task's stack, or CRASH_SCAN_BYTES. A
  * fault in an interrupt has sp on the interrupt stack, not the task's, and is
  * bounded by the scan length and the end of RAM alone. */
-static void scan_stack(crash_rec_t *r, TaskHandle_t task)
+static void scan_stack(crash_rec_t *r)
 {
     uint32_t sp = r->sp & ~3u;
     if (!esp_ptr_in_dram((const void *)sp)) {
@@ -177,15 +196,8 @@ static void scan_stack(crash_rec_t *r, TaskHandle_t task)
     if (end > SOC_DRAM_HIGH) {
         end = SOC_DRAM_HIGH;
     }
-    /* pxEndOfStack is where the task's sp started (the top, aligned down), so
-     * everything pushed since lies below it. */
-    TaskSnapshot_t snap;
-    if (task && vTaskGetSnapshot(task, &snap) == pdTRUE) {
-        const uint32_t lo = (uint32_t)pxTaskGetStackStart(task);
-        const uint32_t hi = (uint32_t)snap.pxEndOfStack;
-        if (sp >= lo && sp < hi && hi < end) {
-            end = hi;
-        }
+    if (sp >= r->stack_lo && sp < r->stack_hi && r->stack_hi < end) {
+        end = r->stack_hi;
     }
     const crash_range_t code[] = {
         { (uint32_t)&_text_start, (uint32_t)&_text_end },
@@ -232,11 +244,30 @@ static void capture(const panic_info_t *info)
         task = xTaskGetCurrentTaskHandle();
         copy_str(r->task, sizeof(r->task), task ? pcTaskGetName(task) : NULL);
     }
+    /* pxEndOfStack is where the task's sp started (the top, aligned down), so
+     * everything pushed since lies below it. */
+    TaskSnapshot_t snap;
+    if (task && vTaskGetSnapshot(task, &snap) == pdTRUE) {
+        r->stack_lo = (uint32_t)pxTaskGetStackStart(task);
+        r->stack_hi = (uint32_t)snap.pxEndOfStack;
+    }
+#if CONFIG_ESP_SYSTEM_HW_STACK_GUARD
+    /* Its interrupt comes straight here (ASTDBG_ISR is the panic handler), so the
+     * bounds are still the ones it fired against: the task's, or the interrupt
+     * stack's. */
+    if (f && f->mcause == ETS_ASSIST_DEBUG_INUM) {
+        const uint32_t core = esp_hw_stack_guard_get_fired_cpu();
+        if (core != ESP_HW_STACK_GUARD_NOT_FIRED) {
+            r->guard_pc = esp_hw_stack_guard_get_pc(core);
+            esp_hw_stack_guard_get_bounds(core, &r->guard_lo, &r->guard_hi);
+        }
+    }
+#endif
     const esp_app_desc_t *app = esp_app_get_description();
     copy_str(r->version, sizeof(r->version), app->version);
     esp_app_get_elf_sha256(r->build, sizeof(r->build));
 
-    scan_stack(r, task);
+    scan_stack(r);
 
     r->magic = CRASH_MAGIC;
     r->crc   = rec_crc(r);
@@ -291,10 +322,17 @@ static void load(void)
     if (nvs_open(CRASH_NVS_NAMESPACE, NVS_READONLY, &nvs) != ESP_OK) {
         return;
     }
-    size_t len = sizeof(s_blob);
-    s_have = nvs_get_blob(nvs, KEY_CRASH, &s_blob, &len) == ESP_OK && len == sizeof(s_blob) &&
-             s_blob.version == CRASH_BLOB_VERSION;
+    size_t     len = sizeof(s_blob);
+    const bool got = nvs_get_blob(nvs, KEY_CRASH, &s_blob, &len) == ESP_OK;
     nvs_close(nvs);
+    if (got && len == CRASH_BLOB_V1_SIZE && s_blob.version == 1) {
+        /* Its crc and padding landed on the fields it does not have. */
+        const size_t from = offsetof(crash_blob_t, rec) + offsetof(crash_rec_t, stack_lo);
+        memset((uint8_t *)&s_blob + from, 0, sizeof(s_blob) - from);
+        s_blob.version = CRASH_BLOB_VERSION;
+        len            = sizeof(s_blob);
+    }
+    s_have = got && len == sizeof(s_blob) && s_blob.version == CRASH_BLOB_VERSION;
     if (s_have) {
         terminate(&s_blob.rec);
     }
@@ -370,6 +408,18 @@ static cJSON *str_or_null(const char *s)
     return s[0] ? cJSON_CreateString(s) : cJSON_CreateNull();
 }
 
+/* [lo, hi] as two hex strings; null when not known (0, 0). */
+static cJSON *bounds(uint32_t lo, uint32_t hi)
+{
+    if (!lo && !hi) {
+        return cJSON_CreateNull();
+    }
+    cJSON *a = cJSON_CreateArray();
+    cJSON_AddItemToArray(a, hex(lo));
+    cJSON_AddItemToArray(a, hex(hi));
+    return a;
+}
+
 cJSON *crash_log_json(void)
 {
     if (!s_have) {
@@ -396,8 +446,20 @@ cJSON *crash_log_json(void)
     cJSON_AddItemToObject(o, "pc", hex(r->pc));
     cJSON_AddItemToObject(o, "ra", hex(r->ra));
     cJSON_AddItemToObject(o, "sp", hex(r->sp));
+    cJSON_AddItemToObject(o, "stack_bounds", bounds(r->stack_lo, r->stack_hi));
     cJSON_AddNumberToObject(o, "mcause", r->cause);
     cJSON_AddItemToObject(o, "mtval", hex(r->tval));
+    if (r->guard_pc) {
+        cJSON *g = cJSON_AddObjectToObject(o, "guard");
+        cJSON_AddItemToObject(g, "pc", hex(r->guard_pc));
+        cJSON_AddItemToObject(g, "bounds", bounds(r->guard_lo, r->guard_hi));
+        /* An overflow leaves sp past them. Back inside, the guard went off on
+         * an sp that never left (esp-idf#14456: right after a load into sp) or
+         * on another stack - guard.pc says which. */
+        cJSON_AddBoolToObject(g, "sp_in_bounds", r->sp >= r->guard_lo && r->sp <= r->guard_hi);
+    } else {
+        cJSON_AddNullToObject(o, "guard");
+    }
     cJSON_AddNumberToObject(o, "free", r->free);
     cJSON_AddNumberToObject(o, "min_free", r->min_free);
     cJSON *stack = cJSON_AddArrayToObject(o, "stack");

@@ -206,6 +206,8 @@ host.
 Opening the serial port resets the board, so diagnostics go through `GET /api/status`: the radio
 counters (`cmd_undelivered`, `cmd_slow`, `corrections`, ...; read them as rates), and `last_crash`
 from `crash_log.c`. Decode crash addresses against the matching `build/elixcon_light_hub.elf`,
-subtracting one from `ra` and each `stack` entry (see `docs/development.md`).
+subtracting one from `ra` and each `stack` entry (see `docs/development.md`). A `Stack protection
+fault` with `guard.sp_in_bounds` true is the stack guard's false alarm (esp-idf#14456), not an
+overflow: do not grow a stack for it.
 `CONFIG_ZBC_CRASH_TEST` enables a test crash via `POST /api/restart`, and `CONFIG_ZBC_HEAP_WATCH`
 records per-request heap lows.

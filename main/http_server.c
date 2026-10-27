@@ -4217,13 +4217,29 @@ static esp_err_t wifi_resume_post(httpd_req_t *req)
 }
 
 #if CONFIG_ZBC_CRASH_TEST
+enum { CRASH_FAULT, CRASH_ABORT, CRASH_STACK };
+
+/* One frame deeper than the crash task's whole stack: the hardware stack guard's
+ * fault, with sp below the bounds it records. The byte written is the frame's
+ * top one, still on the task's stack, in case the guard's interrupt is taken a
+ * few instructions late. */
+static void __attribute__((noinline)) crash_overflow(void)
+{
+    volatile uint8_t big[4096];
+    big[sizeof(big) - 1] = 1;
+}
+
 /* The crash CONFIG_ZBC_CRASH_TEST offers, in a task of its own so the answer gets
  * out first and the record names a task that is not the web server. */
 static void crash_task(void *arg)
 {
     vTaskDelay(pdMS_TO_TICKS(500));
-    if (arg) {
+    const int kind = (int)(intptr_t)arg;
+    if (kind == CRASH_ABORT) {
         abort();
+    }
+    if (kind == CRASH_STACK) {
+        crash_overflow();
     }
     /* Below RAM, ROM and flash: a load access fault, with this as mtval. Through
      * a volatile, or the compiler sees the constant and warns instead. */
@@ -4245,25 +4261,31 @@ static esp_err_t restart_post(httpd_req_t *req)
                           "the new firmware is still on trial - it is confirmed once Wi-Fi is up, or after five minutes");
     }
 #if CONFIG_ZBC_CRASH_TEST
-    /* {"crash": "abort" | "fault"}: restart by crashing, to test crash_log.c. A
-     * crash does not pass through confirm_on_restart, so an image on trial is
-     * refused even once the station has joined. */
+    /* {"crash": "abort" | "fault" | "stack"}: restart by crashing, to test
+     * crash_log.c. A crash does not pass through confirm_on_restart, so an image
+     * on trial is refused even once the station has joined. */
     cJSON *json = NULL;
     if (req->content_len > 0 && !(json = read_json_body(req))) {
         return ESP_FAIL;                   /* answered already */
     }
     if (json) {
+        static const char *const KINDS[] = { [CRASH_FAULT] = "fault", [CRASH_ABORT] = "abort",
+                                             [CRASH_STACK] = "stack" };
         const cJSON *crash = cJSON_GetObjectItem(json, "crash");
-        const bool   want_abort = cJSON_IsString(crash) && strcmp(crash->valuestring, "abort") == 0;
-        const bool   want_fault = cJSON_IsString(crash) && strcmp(crash->valuestring, "fault") == 0;
+        int          kind  = -1;
+        for (int k = 0; k < (int)(sizeof(KINDS) / sizeof(KINDS[0])) && cJSON_IsString(crash); k++) {
+            if (strcmp(crash->valuestring, KINDS[k]) == 0) {
+                kind = k;
+            }
+        }
         cJSON_Delete(json);
-        if (want_abort || want_fault) {
+        if (kind >= 0) {
             if (ota_pending_verify()) {
                 return send_error(req, "409 Conflict", "the new firmware is still on trial");
             }
-            ESP_LOGW(TAG, "Crash requested over HTTP (%s)", want_abort ? "abort" : "fault");
+            ESP_LOGW(TAG, "Crash requested over HTTP (%s)", KINDS[kind]);
             send_ok(req, "200 OK");
-            xTaskCreate(crash_task, "crash", 3072, want_abort ? (void *)1 : NULL, 5, NULL);
+            xTaskCreate(crash_task, "crash", 3072, (void *)(intptr_t)kind, 5, NULL);
             return ESP_OK;
         }
     }

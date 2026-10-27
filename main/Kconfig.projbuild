@@ -184,11 +184,13 @@ menu "Elixcon Light Hub"
         bool "Crash on request, to test the crash record"
         default n
         help
-            Lets POST /api/restart take {"crash": "abort"} or {"crash": "fault"}:
-            half a second later a task of its own calls abort() or reads an
-            unmapped address, and the next boot shows what crash_log.c recorded
-            as `last_crash` in /api/status. Refused while the image is on trial,
-            which a crash would roll back. For a test build only.
+            Lets POST /api/restart take {"crash": "abort"}, {"crash": "fault"} or
+            {"crash": "stack"}: half a second later a task of its own calls
+            abort(), reads an unmapped address or overruns its stack (the
+            hardware stack guard's fault), and the next boot shows what
+            crash_log.c recorded as `last_crash` in /api/status. Refused while
+            the image is on trial, which a crash would roll back. For a test
+            build only.
 
     config ZBC_WLED
         bool "WLED interface: stream to Hue colour lamps"
