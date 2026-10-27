@@ -699,8 +699,13 @@ int main(void)
 
     /* ---- MCPWM's counts and outputs ---- */
     {
+        /* LEDC's presets are 2^bits of its clock, so twice that many ticks
+         * up and down: 4882 Hz is 16384 counts, not the 16387 its hertz round
+         * to. 100 Hz is 800768 ticks of LEDC's, and 16 the first divider that
+         * splits them into a count that fits. */
         const struct { uint32_t hz, div, peak; } at[] = {
-            { 19531, 1, 4096 }, { 4882, 1, 16387 }, { 1221, 1, 65520 }, { 1220, 2, 32787 }, { 100, 13, 61538 },
+            { 19531, 1, 4096 }, { 9765, 1, 8192 }, { 4882, 1, 16384 }, { 3000, 1, 26688 },
+            { 1221, 2, 32768 }, { 1220, 2, 32768 }, { 610, 4, 32768 }, { 600, 4, 33280 }, { 100, 16, 50048 },
         };
         for (size_t i = 0; i < sizeof(at) / sizeof(at[0]); i++) {
             uint32_t       div;
@@ -709,15 +714,23 @@ int main(void)
                    at[i].hz, peak, div, at[i].peak, at[i].div);
         }
         EXPECT(zbc_mcpwm_peak(0, NULL) == 0, "0 Hz has MCPWM counts");
+        /* The same period as LEDC, which IDF's ledc_calculate_divisor sets: the
+         * clock in 256ths over hz * 2^bits, rounded. */
         for (uint32_t hz = ZBC_PWM_HZ_MIN; hz <= ZBC_PWM_HZ_MAX; hz++) {
             uint32_t       div;
-            const uint32_t peak  = zbc_mcpwm_peak(hz, &div);
-            const double   tick  = (double)(ZBC_PWM_MCPWM_CLK_HZ / div);
-            const double   error = fabs(tick / (2.0 * peak) - hz) / hz;
-            const bool     finer = div == 1 || (ZBC_PWM_MCPWM_CLK_HZ / (div - 1) + hz) / (2 * hz) > ZBC_PWM_MCPWM_PEAK_MAX;
-            const bool     ledc  = hz < 1221 ? peak > 32768 : peak >= (1u << zbc_pwm_resolution(hz));
-            if (peak > ZBC_PWM_MCPWM_PEAK_MAX || div < 1 || div > 256 || error > 0.5 / peak + 1e-12 || !finer || !ledc) {
-                EXPECT(false, "%u Hz on MCPWM: %u counts at a divider of %u, %.5f %% off", hz, peak, div, 100 * error);
+            const uint32_t peak   = zbc_mcpwm_peak(hz, &div);
+            const uint32_t bits   = zbc_pwm_resolution(hz);
+            const uint64_t div256 = (((uint64_t)ZBC_PWM_CLK_HZ << 8) + ((uint64_t)hz << bits) / 2) / ((uint64_t)hz << bits);
+            const double   ledc_s = (double)(div256 << bits) / 256.0 / ZBC_PWM_CLK_HZ;
+            const double   mc_s   = 2.0 * peak * div / ZBC_PWM_MCPWM_CLK_HZ;
+            bool           finer  = false;  /* a smaller divider that fits */
+            for (uint32_t d = 1; d < div && !finer; d++) {
+                finer = (uint64_t)peak * div % d == 0 && (uint64_t)peak * div / d <= ZBC_PWM_MCPWM_PEAK_MAX;
+            }
+            const bool counts = hz < 1221 ? peak >= 32768 : peak >= (1u << bits);
+            if (peak > ZBC_PWM_MCPWM_PEAK_MAX || div < 1 || div > 256 || fabs(mc_s - ledc_s) > 1e-15 || finer || !counts) {
+                EXPECT(false, "%u Hz on MCPWM: %u counts at a divider of %u, %.9f s where LEDC's period is %.9f s", hz,
+                       peak, div, mc_s, ledc_s);
                 break;
             }
         }
@@ -731,7 +744,11 @@ int main(void)
                 const uint32_t d = peak <= 64 ? (uint32_t)r % (peak + 1) : (r < 2 ? (uint32_t)r * peak : rnd() % peak);
                 for (int at_peak = 0; at_peak < 2; at_peak++) {
                     const zbc_mcpwm_out_t o = zbc_mcpwm_out(d, peak, at_peak);
-                    EXPECT(d == 0 ? o.force == 0 : d >= peak ? o.force == 1 : o.force == -1 && o.cmp > 0 && o.cmp < peak,
+                    /* Forced, the compare value is the nearest lit one's: what
+                     * the output resumes from when it is let go. */
+                    const uint32_t lit = d == 0 ? 1 : d >= peak ? peak - 1 : d;
+                    EXPECT((d == 0 ? o.force == 0 : d >= peak ? o.force == 1 : o.force == -1) &&
+                               o.cmp == (at_peak ? peak - lit : lit),
                            "peak %u d %u: forced %d, compare %u", peak, d, o.force, o.cmp);
                     for (uint32_t t = 0; t < 2 * peak; t++) {
                         const bool want = at_peak ? t + d >= peak && t < peak + d : t < d || t >= 2 * peak - d;

@@ -127,10 +127,12 @@ uint8_t  zbc_pwm_resolution(uint32_t hz);
 
 /* The same for an MCPWM timer: the peak it counts up to and back from, which
  * is a light's full duty, and the divider from ZBC_PWM_MCPWM_CLK_HZ that gets
- * it there. Two ticks a count, so at the full clock it matches LEDC's counts
- * from 1221 Hz up, and between two of LEDC's presets it has more; below 1221 Hz
- * the 16-bit counter keeps it under 65536 counts where LEDC has 17-19 bits.
- * 0 for 0 Hz. */
+ * it there. Its period is LEDC's at that frequency to the tick, so a light keeps
+ * its frequency on either, and lights at one frequency on the two stay in step
+ * rather than sliding past each other: at 4882 Hz an MCPWM count rounded to the
+ * hertz drifted 1.8 times a second against LEDC lights at 9765 Hz. It has
+ * LEDC's counts from 1221 Hz up, more between two of LEDC's presets, and below
+ * 1221 Hz 32768-65535 where LEDC has 16-19 bits. 0 for 0 Hz. */
 uint32_t zbc_mcpwm_peak(uint32_t hz, uint32_t *divider);
 
 /* ZCL level, in thousandths (0-254000), to a duty out of `max` on the CIE 1931
@@ -180,7 +182,7 @@ void     zbc_pwm_place_n(const uint32_t d[], int n, uint32_t max, uint32_t shift
 void     zbc_pwm_place(uint32_t dc, uint32_t dw, uint32_t max, uint32_t shift,
                        zbc_pwm_out_t *cold, zbc_pwm_out_t *warm);
 
-/* An MCPWM output's setting for d counts out of `peak`: the compare value, or
+/* An MCPWM output's setting for d counts out of `peak`: the compare value, and
  * a level forced at dark (0) and full (1), where the compare value would sit on
  * the zero or the peak and the direction there is ambiguous. `at_peak` says
  * where its pulse is centred (zbc_pwm_slot_t.peak). The pulse is high from the
@@ -188,7 +190,7 @@ void     zbc_pwm_place(uint32_t dc, uint32_t dw, uint32_t max, uint32_t shift,
  * centred on the zero is high below it, one centred on the peak above it. */
 typedef struct {
     int8_t   force;     /* -1: none, the compare value is used */
-    uint32_t cmp;
+    uint32_t cmp;       /* forced: one count lit, or one short of full, for the release */
 } zbc_mcpwm_out_t;
 
 zbc_mcpwm_out_t zbc_mcpwm_out(uint32_t d, uint32_t peak, bool at_peak);

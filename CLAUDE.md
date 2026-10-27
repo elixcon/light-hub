@@ -160,6 +160,9 @@ outputs, so a pulse cannot sit anywhere: timers count up and down, and each outp
 timer's zero or peak (`zbc_mcpwm_out`, `slot.peak`). One timer per operator; units at one frequency
 are synced to the first at the phase the plan gives (`zbc_mcpwm_unit_deg`). `zbc_pwm_plan` gives
 LEDC the lights while any split lets it, so a set LEDC alone can run is planned exactly as before.
+An MCPWM timer's period is LEDC's for its frequency to the tick (`zbc_mcpwm_peak`). Rounded to the
+hertz instead, a 4882 Hz light on it slid past LEDC lights at 9765 Hz 1.8 times a second, which
+lights sharing a power supply can show as flicker.
 `mc_start_locked` makes and deletes a 160 MHz timer before any other: the driver's group clock
 divider is set by the first timer and shared, and without that one a later timer is refused or
 runs at a resolution its counts were not worked out for. `mc_set_timer_locked` remakes a unit's

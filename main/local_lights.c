@@ -52,17 +52,26 @@ uint8_t zbc_pwm_resolution(uint32_t hz)
     return res;
 }
 
+_Static_assert(ZBC_PWM_MCPWM_CLK_HZ == 2 * ZBC_PWM_CLK_HZ, "an MCPWM tick is no longer half an LEDC count");
+
 uint32_t zbc_mcpwm_peak(uint32_t hz, uint32_t *divider)
 {
     uint32_t div = 0, peak = 0;
     if (hz != 0) {
-        /* The fewest ticks a count that fit, rounded: the frequency is then the
-         * nearest the counts allow, within half a count (0.012 % at 4096). The
-         * tick is the clock divided as the driver divides it. */
+        /* LEDC's period at hz, to the tick. LEDC counts 2^bits of its clock
+         * divided in 256ths, a divider the driver rounds (ledc_calculate_divisor).
+         * Up and down, at twice that clock, the same time is peak * divider: the
+         * smallest divider that splits it into a count that fits. bits is 12 or
+         * more, so 2^(bits - 8) divides it, and some power of two up to that
+         * always fits. */
+        const uint32_t bits   = zbc_pwm_resolution(hz);
+        const uint64_t step   = (uint64_t)hz << bits;
+        const uint64_t div256 = (((uint64_t)ZBC_PWM_CLK_HZ << 8) + step / 2) / step;
+        const uint64_t ticks  = (div256 << bits) >> 8;
         do {
             div++;
-            peak = (ZBC_PWM_MCPWM_CLK_HZ / div + hz) / (2 * hz);
-        } while (peak > ZBC_PWM_MCPWM_PEAK_MAX && div < 256);
+        } while ((ticks % div != 0 || ticks / div > ZBC_PWM_MCPWM_PEAK_MAX) && div < 256);
+        peak = (uint32_t)(ticks / div);
     }
     if (divider) {
         *divider = div;
@@ -72,15 +81,12 @@ uint32_t zbc_mcpwm_peak(uint32_t hz, uint32_t *divider)
 
 zbc_mcpwm_out_t zbc_mcpwm_out(uint32_t d, uint32_t peak, bool at_peak)
 {
-    if (d == 0) {
-        return (zbc_mcpwm_out_t){ .force = 0, .cmp = 0 };
-    }
-    if (d >= peak) {
-        return (zbc_mcpwm_out_t){ .force = 1, .cmp = 0 };
-    }
     /* High for 2d ticks of the 2 * peak in a period: d either side of the zero,
-     * or of the peak. */
-    return (zbc_mcpwm_out_t){ .force = -1, .cmp = at_peak ? peak - d : d };
+     * or of the peak. Dark and full are forced, with the compare value of a
+     * count from them: the output resumes from that when the force lets go. */
+    const uint32_t lit = d < 1 ? 1 : d > peak - 1 ? peak - 1 : d;
+    const int8_t   force = d == 0 ? 0 : d >= peak ? 1 : -1;
+    return (zbc_mcpwm_out_t){ .force = force, .cmp = at_peak ? peak - lit : lit };
 }
 
 /* The light a level gives, 0-1. CIE 1931: level is lightness L* (0-100), and
@@ -903,8 +909,10 @@ static void set_channel_locked(int gpio, int ch, bool active_low, const zbc_pwm_
 }
 
 /* One MCPWM output at d counts of `peak`. Dark and full are levels forced at
- * once; between them the compare value takes over at the next zero, so the
- * period where a light leaves dark or full may be wrong. */
+ * once; the compare value takes over at the next zero, and is written under a
+ * force too. Without that, the half period after a light left dark ran on the
+ * value from before it went dark: on the bench, one pulse of 4000 counts in a
+ * fade-in at 100. */
 static void mc_set_locked(int ch, uint32_t d, uint32_t peak, bool at_peak)
 {
     mc_unit_t            *m = mc_unit_of(ch);
@@ -913,9 +921,7 @@ static void mc_set_locked(int ch, uint32_t d, uint32_t peak, bool at_peak)
     if (!m->gen[o]) {
         return;
     }
-    if (w.force < 0) {
-        mcpwm_comparator_set_compare_value(m->cmp[o], w.cmp);
-    }
+    mcpwm_comparator_set_compare_value(m->cmp[o], w.cmp);
     mcpwm_generator_set_force_level(m->gen[o], w.force, true);
 }
 

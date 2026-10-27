@@ -35,10 +35,11 @@ frequency: a tunable-white light takes a pair, two dimmable lights at the same f
 and a three-channel light takes a pair and half of another. With every light at one frequency the
 board runs, for example, four three-channel lights, six tunable-white lights or twelve dimmable
 ones. At most seven frequencies are in use at once. A light that would not fit is refused (`409`)
-instead of being accepted and staying dark. MCPWM counts at the same rate as LEDC from 1221 Hz up,
-and has more steps between LEDC's presets, but its counter is 16 bits: below 1221 Hz a light on it
-has 15 to 16 bits where LEDC has 16 to 19. The log says which light runs on which (`PWM timer 4`
-and up is MCPWM).
+instead of being accepted and staying dark. A light runs at exactly the same frequency on either,
+so lights at one frequency on the two keep in step. MCPWM counts at the same rate as LEDC from
+1221 Hz up, and has more steps between LEDC's presets, but its counter is 16 bits: below 1221 Hz a
+light on it has 15 to 16 bits where LEDC has 16 to 19. The log says which light runs on which
+(`PWM timer 4` and up is MCPWM).
 
 Each tunable-white light spreads the pulses of its lit whites across the period, the dark time
 between them shared evenly, so two lit whites are half a period apart. Lights at the same
@@ -55,9 +56,8 @@ On MCPWM a light's pulses are centred at its phase rather than starting there, a
 light's two pulses are always half a period apart. Lights at one frequency are spread as on LEDC:
 tunable-white lights at 0°, 90° or 0°, 60°, 120°, and two dimmable lights sharing a pair at 0° and
 180°. A three-channel light's third white is centred where its first is, so in a custom mix that
-lights all three, those two overlap. MCPWM lights have no wrapping cost, but the period in which a
-light leaves black or full brightness may be wrong. Lights on LEDC and on MCPWM are not spread
-against each other, even at the same frequency.
+lights all three, those two overlap. MCPWM lights have no wrapping cost. Lights on LEDC and on
+MCPWM are not spread against each other, even at the same frequency.
 
 Switching a wired light on or off fades it over the fade time set under *Settings*, easing in and
 out the way ESPHome's light transitions do, and starting from (or ending at) black one PWM step at a
