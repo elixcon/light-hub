@@ -4834,37 +4834,38 @@ static void warn_if_channels_collide(void)
 /* ------------------------------------------------- moving to another channel
  *
  * The standard way, a Mgmt_NWK_Update_req with ScanDuration 0xFE, and three
- * things esp-zigbee-lib 2.0.4 does that decide the shape of it (read from the
- * library, not documented):
+ * things esp-zigbee-lib 2.0.5 does that decide the shape of it (seen on the dev
+ * board, not documented):
  *
- *  - A device that receives the request changes channel at once.
- *  - A broadcast is not delivered to its sender: APS loops back a frame to our
- *    own short address, never one to 0xFFFF. So the coordinator moves itself
- *    with a second request, to 0x0000, once the broadcast has had time to
- *    spread.
- *  - A channel changed that way is not saved. The stack writes its network
- *    record when it forms, switches keys or resolves an address conflict, and
- *    restores the old channel at the next boot. settings_zigbee_channel() is
- *    therefore the authority, and channel_restore() moves the coordinator back
- *    onto it at every network-up.
+ *  - A device that receives the request changes channel 8-9 s later, about
+ *    when routers do (the spec's nwkNetworkBroadcastDeliveryTime). Asked again
+ *    meanwhile, it answers with status 0x80.
+ *  - A broadcast is not delivered to its sender, but a request to our own short
+ *    address is. So the coordinator asks itself with a second request, to
+ *    0x0000, sent with the broadcast, and changes with the routers. This counts
+ *    on that wait: 2.0.4 changed at once, which would put the coordinator on
+ *    the new channel ahead of the lamps.
+ *  - The new channel is saved when the stack changes. settings_zigbee_channel()
+ *    is still the authority: a restart in the seconds before that comes up on
+ *    the old channel, and channel_restore() moves the coordinator on at every
+ *    network-up.
  *
  * The stack also refuses to set its own nwkUpdateId while on a network, so the
  * id of the last move is kept with the channel: a lamp may ignore a request that
  * does not carry a newer one. */
 
-/* How long the routers get to pass the request on before the coordinator
- * follows - the spec's nwkNetworkBroadcastDeliveryTime. A router relays it and
- * then changes, and some wait this long themselves; leaving sooner would leave
- * the coordinator on the new channel talking to nobody. */
-#define ZBC_CHANNEL_MOVE_DELAY_US (9 * 1000000LL)
-/* After asking itself: the request goes through the APS task first. */
-#define ZBC_CHANNEL_SELF_CHECK_US (1 * 1000000LL)
-#define ZBC_CHANNEL_SELF_TRIES    3
+/* How long the coordinator waits for its own change before it asks again: the
+ * stack's delay, and some to spare. */
+#define ZBC_CHANNEL_SELF_WAIT_US  (15 * 1000000LL)
+/* How often it looks meanwhile. */
+#define ZBC_CHANNEL_CHECK_US      (1 * 1000000LL)
+#define ZBC_CHANNEL_SELF_TRIES    2
 
 static zb_channel_move_t  s_move;
 static portMUX_TYPE       s_move_mux = portMUX_INITIALIZER_UNLOCKED;
 static uint8_t            s_move_update_id;
 static uint8_t            s_move_tries;
+static int64_t            s_move_asked_us;   /* the coordinator's last request to itself */
 static esp_timer_handle_t s_channel_timer;
 
 static bool survey_busy(void);
@@ -4971,6 +4972,11 @@ esp_err_t zb_move_channel(uint8_t channel)
     if (err == ESP_OK) {
         esp_zigbee_lock_acquire(portMAX_DELAY);
         const ezb_err_t zerr = send_channel_change_locked(0xFFFF, channel, update_id);
+        /* Its own with it, so its wait runs with the routers'. One that is
+         * refused is sent again by channel_work when the wait is over. */
+        if (zerr == EZB_ERR_NONE) {
+            send_channel_change_locked(0x0000, channel, update_id);
+        }
         esp_zigbee_lock_release();
         err = esp_zigbee_err_to_esp(zerr);
         if (err != ESP_OK) {
@@ -4985,62 +4991,65 @@ esp_err_t zb_move_channel(uint8_t channel)
     }
 
     s_move_update_id = update_id;
-    s_move_tries     = 0;
+    s_move_tries     = 1;
+    s_move_asked_us  = esp_timer_get_time();
     move_set(ZB_MOVE_ANNOUNCED, from, channel, false);
     esp_timer_stop(s_channel_timer);
-    esp_timer_start_once(s_channel_timer, ZBC_CHANNEL_MOVE_DELAY_US);
+    esp_timer_start_once(s_channel_timer, ZBC_CHANNEL_CHECK_US);
     heap_watch_mark("zb_channel", channel);
-    ESP_LOGW(TAG, "Moving the network from channel %u to %u (update id %u); following in %lld s",
-             from, channel, update_id, ZBC_CHANNEL_MOVE_DELAY_US / 1000000);
+    ESP_LOGW(TAG, "Moving the network from channel %u to %u (update id %u)", from, channel, update_id);
     return ESP_OK;
 }
 
-/* zb_work_task: the coordinator's own half of a move, and checking that it took. */
+/* zb_work_task: waits for the coordinator's own change, and asks again when it
+ * does not come. */
 static void channel_work(void)
 {
     zb_channel_move_t m;
     zb_get_channel_move(&m);
+    if (m.state != ZB_MOVE_ANNOUNCED && m.state != ZB_MOVE_MOVING) {
+        return;
+    }
 
-    if (m.state == ZB_MOVE_MOVING) {
-        esp_zigbee_lock_acquire(portMAX_DELAY);
-        const uint8_t now = ezb_nwk_get_current_channel();
-        esp_zigbee_lock_release();
-        if (now == m.to) {
-            s_net.channel  = m.to;
-            s_collide_said = false;
-            reach_forget_all();
-            move_set(ZB_MOVE_MOVED, m.from, m.to, m.boot);
-            ESP_LOGW(TAG, "Now on channel %u", m.to);
-            /* Link quality and states as the lamps see them from here. */
-            esp_timer_stop(s_refresh_timer);
-            esp_timer_start_once(s_refresh_timer, 5 * 1000000ULL);
-            return;
-        }
+    esp_zigbee_lock_acquire(portMAX_DELAY);
+    const uint8_t now = ezb_nwk_get_current_channel();
+    esp_zigbee_lock_release();
+    if (now == m.to) {
+        s_net.channel  = m.to;
+        s_collide_said = false;
+        reach_forget_all();
+        move_set(ZB_MOVE_MOVED, m.from, m.to, m.boot);
+        ESP_LOGW(TAG, "Now on channel %u", m.to);
+        /* Link quality and states as the lamps see them from here. */
+        esp_timer_stop(s_refresh_timer);
+        esp_timer_start_once(s_refresh_timer, 5 * 1000000ULL);
+        return;
+    }
+    if (esp_timer_get_time() - s_move_asked_us >= ZBC_CHANNEL_SELF_WAIT_US) {
         if (s_move_tries >= ZBC_CHANNEL_SELF_TRIES) {
             move_set(ZB_MOVE_FAILED, m.from, m.to, m.boot);
             ESP_LOGE(TAG, "Still on channel %u after asking %u times to move to %u", now,
                      s_move_tries, m.to);
             return;
         }
-    } else if (m.state != ZB_MOVE_ANNOUNCED) {
-        return;
-    }
-
-    esp_zigbee_lock_acquire(portMAX_DELAY);
-    send_channel_change_locked(0x0000, m.to, s_move_update_id);
-    esp_zigbee_lock_release();
-    s_move_tries++;
-    if (m.state == ZB_MOVE_ANNOUNCED) {
-        move_set(ZB_MOVE_MOVING, m.from, m.to, m.boot);
+        ESP_LOGW(TAG, "Still on channel %u, asking again to move to %u", now, m.to);
+        esp_zigbee_lock_acquire(portMAX_DELAY);
+        send_channel_change_locked(0x0000, m.to, s_move_update_id);
+        esp_zigbee_lock_release();
+        s_move_tries++;
+        s_move_asked_us = esp_timer_get_time();
+        if (m.state == ZB_MOVE_ANNOUNCED) {
+            move_set(ZB_MOVE_MOVING, m.from, m.to, m.boot);
+        }
     }
     esp_timer_stop(s_channel_timer);
-    esp_timer_start_once(s_channel_timer, ZBC_CHANNEL_SELF_CHECK_US);
+    esp_timer_start_once(s_channel_timer, ZBC_CHANNEL_CHECK_US);
 }
 
 /* The Zigbee task, at network-up from storage: the stack is back on the channel
- * it last saved, the lamps on the one the network was last moved to. No
- * broadcast - the lamps are not listening on this channel, and waiting for one to
- * spread would keep them out of reach for its whole delay at every boot. */
+ * it last saved, the lamps on the one the network was last moved to - after a
+ * restart in the seconds before the stack changed. No broadcast: the lamps are
+ * not listening on this channel. */
 static void channel_restore(void)
 {
     const uint8_t want = settings_zigbee_channel();
@@ -5051,10 +5060,11 @@ static void channel_restore(void)
     ESP_LOGW(TAG, "Restored on channel %u, but the network was moved to %u: following it", have, want);
     s_move_update_id = settings_zigbee_update_id();
     s_move_tries     = 1;
+    s_move_asked_us  = esp_timer_get_time();
     send_channel_change_locked(0x0000, want, s_move_update_id);
     move_set(ZB_MOVE_MOVING, have, want, true);
     esp_timer_stop(s_channel_timer);
-    esp_timer_start_once(s_channel_timer, ZBC_CHANNEL_SELF_CHECK_US);
+    esp_timer_start_once(s_channel_timer, ZBC_CHANNEL_CHECK_US);
 }
 
 /* ------------------------------------------------------------ channel survey

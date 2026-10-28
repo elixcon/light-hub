@@ -26,8 +26,9 @@ The default channel, 20 (2450 MHz), suits Wi-Fi on channels 1-6 and 12-13 but co
 ## Moving the network
 
 *Settings → Zigbee network* moves a formed network to another channel and keeps every pairing (`POST
-/api/settings` with `{"zigbee_channel":15}`). The coordinator tells the lamps, gives the message
-about ten seconds to spread, and then follows. Lamps answer again within seconds.
+/api/settings` with `{"zigbee_channel":15}`). The coordinator tells the lamps and itself, and about
+nine seconds later, once the message has spread, they all change together. A lamp that changes a
+second or two early misses a command or two, which the coordinator sends again.
 
 Sleepy remotes do not hear the announcement. They find the network again when a press goes
 unanswered, and one that does not (often an Aqara remote) has to be paired again. So does a lamp

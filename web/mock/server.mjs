@@ -120,16 +120,17 @@ const wifiCheckState = () => {
   return { state, ssid: c.ssid, reason, ip: state === "joined" ? "192.168.1.77" : null };
 };
 /* The Zigbee channel and moving it (zb_move_channel): announced for 9 s, then
- * the coordinator follows. The survey runs 12 s; its readings are the dev
- * board's of 2026-10-05, with a busier 25 for the Wi-Fi on 13. */
+ * the routers and the coordinator change together. The survey runs 12 s; its
+ * readings are the dev board's of 2026-10-05, with a busier 25 for the Wi-Fi
+ * on 13. */
 let zbChannel = 20;
 let zbMove = null;
 const moveNow = () => {
   if (!zbMove) return { state: "idle" };
   const t = (Date.now() - zbMove.at) / 1000;
-  if (t >= 10 && zbChannel !== zbMove.to) zbChannel = zbMove.to;
-  const state = t < 9 ? "announced" : t < 10 ? "moving" : "moved";
-  return { state, from: zbMove.from, to: zbMove.to, boot: false, s_ago: Math.round(state === "moved" ? t - 10 : t) };
+  if (t >= 9 && zbChannel !== zbMove.to) zbChannel = zbMove.to;
+  const state = t < 9 ? "announced" : "moved";
+  return { state, from: zbMove.from, to: zbMove.to, boot: false, s_ago: Math.round(state === "moved" ? t - 9 : t) };
 };
 let zbSurvey = null;
 const SURVEY_DBM = { 11: [-92, -92, -92, -91], 12: [-91, -92, -91, -91], 13: [-91, -90, -91, -91], 14: [-90, -90, -90, -90],

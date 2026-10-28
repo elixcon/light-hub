@@ -428,9 +428,9 @@ esp_err_t zb_remove_device(const uint8_t ieee[ZBC_IEEE_LEN]);
 void      zb_get_netinfo(zb_netinfo_t *out);
 
 /* Moves the whole network to another channel, keeping every pairing: a
- * Mgmt_NWK_Update_req broadcast tells the routers, and the coordinator follows
- * once they have had time to pass it on. Returns at once; the move takes about
- * ten seconds (zb_get_channel_move). The channel is stored first and put back at
+ * Mgmt_NWK_Update_req broadcast tells the routers and a second one the
+ * coordinator, and all of them change once the broadcast has had time to
+ * spread. Returns at once; the move takes about ten seconds (zb_get_channel_move). The channel is stored first and put back at
  * every boot - see settings_zigbee_channel.
  *
  * Sleepy remotes do not hear broadcasts: they find the network again when a poll
@@ -444,8 +444,8 @@ esp_err_t zb_move_channel(uint8_t channel);
 
 typedef enum {
     ZB_MOVE_IDLE = 0,
-    ZB_MOVE_ANNOUNCED,   /* broadcast sent; the coordinator waits for it to spread */
-    ZB_MOVE_MOVING,      /* the coordinator has asked itself to change */
+    ZB_MOVE_ANNOUNCED,   /* requests sent; everyone waits for the broadcast to spread */
+    ZB_MOVE_MOVING,      /* the coordinator follows on its own: asked again, or at boot */
     ZB_MOVE_MOVED,
     ZB_MOVE_FAILED,      /* the coordinator did not change; the lamps may have */
 } zb_move_state_t;
