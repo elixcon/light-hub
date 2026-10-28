@@ -57,7 +57,10 @@ usb="$name-usb"
 mkdir "$out/$usb"
 
 cd "$build"
-cp flash_args "$out/$usb/"
+# IDF 6's esptool (v5) writes the options as --flash-mode and so on, which an
+# esptool 4.x refuses ('Address "dio" must be a number'). v5 still takes the
+# underscore spelling, so the zip carries that and works with either.
+sed '1s/--flash-\([a-z]*\)/--flash_\1/g' flash_args > "$out/$usb/flash_args"
 sed 1d flash_args | while read -r _offset file; do
     mkdir -p "$out/$usb/$(dirname "$file")"
     cp "$file" "$out/$usb/$file"

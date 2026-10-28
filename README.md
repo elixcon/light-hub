@@ -96,7 +96,7 @@ updates](docs/updates.md)).
 # once: the toolchain
 git clone -b v6.0.3 --recursive https://github.com/espressif/esp-idf.git ~/esp/esp-idf-v6
 ~/esp/esp-idf-v6/install.sh esp32c6
-~/esp/esp-idf-v6/tools/idf_tools.py install cmake ninja   # macOS: IDF 6 leaves them to you
+python3 ~/esp/esp-idf-v6/tools/idf_tools.py install cmake ninja   # macOS: IDF 6 leaves them to you
 
 # in every new shell
 . ~/esp/esp-idf-v6/export.sh

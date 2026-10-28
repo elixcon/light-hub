@@ -114,11 +114,14 @@ static void auth_format(const char *canon, char *out)
 /* >>> end host-test region: authkey <<< */
 
 /* SHA-256 through PSA: IDF 6's Mbed TLS keeps mbedtls_sha256() private. The
- * digest is the same, so keys hashed by an older build still match. */
-static void hash_key(const char *canon, uint8_t out[32])
+ * digest is the same, so keys hashed by an older build still match. False when
+ * PSA failed: `out` is then not a digest, and must be neither stored nor
+ * compared. */
+static bool hash_key(const char *canon, uint8_t out[32])
 {
-    size_t len;
-    psa_hash_compute(PSA_ALG_SHA_256, (const uint8_t *)canon, ZBC_AUTH_KEY_CHARS, out, 32, &len);
+    size_t             len = 0;
+    const psa_status_t st  = psa_hash_compute(PSA_ALG_SHA_256, (const uint8_t *)canon, ZBC_AUTH_KEY_CHARS, out, 32, &len);
+    return st == PSA_SUCCESS && len == 32;
 }
 
 static esp_err_t save_locked(void)
@@ -246,7 +249,9 @@ uint16_t auth_check(const char *presented)
         return 0;
     }
     uint8_t h[32];
-    hash_key(canon, h);
+    if (!hash_key(canon, h)) {
+        return 0;
+    }
 
     /* Every record is compared all the way through. What is compared is a hash,
      * so a timing difference could only ever say something about the hash - but
@@ -324,9 +329,9 @@ esp_err_t auth_create(zbc_key_kind_t kind, const char *name, char *shown_out, ui
     } else {
         snprintf(r->name, sizeof(r->name), "%s %u", kind == ZBC_KEY_API ? "API key" : "Browser", next);
     }
-    hash_key(canon, r->hash);
-
-    esp_err_t err = save_locked();
+    /* Not stored with a hash that is not the key's: it would be shown once and
+     * then never let anybody in - and, as the first key, lock everyone out. */
+    esp_err_t err = hash_key(canon, r->hash) ? save_locked() : ESP_FAIL;
     if (err != ESP_OK) {
         /* A key that works until the next boot and then silently stops is worse
          * than no key: it would be written down and trusted. */

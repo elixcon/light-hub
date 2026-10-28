@@ -164,8 +164,10 @@ An MCPWM timer's period is LEDC's for its frequency to the tick (`zbc_mcpwm_peak
 hertz instead, a 4882 Hz light on it slid past LEDC lights at 9765 Hz 1.8 times a second, which
 lights sharing a power supply can show as flicker.
 `mc_start_locked` makes and deletes a 160 MHz timer before any other: the driver's group clock
-divider is set by the first timer and shared, and without that one a later timer is refused or
-runs at a resolution its counts were not worked out for. `mc_set_timer_locked` remakes a unit's
+divider is set by the first timer and shared, and that timer fixes it at 1, so each later timer is
+divided by its own divider alone, as `zbc_mcpwm_peak` counts. IDF 6's driver defaults to 1 anyway;
+IDF 5's 2 refused a later timer or ran it at a resolution its counts were not worked out for, and
+the timer keeps the plan from depending on the default. `mc_set_timer_locked` remakes a unit's
 timer only after the old one has stopped at its zero: one remade while the old still ran keeps the
 old divider.
 
