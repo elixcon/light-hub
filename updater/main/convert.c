@@ -36,8 +36,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_bootloader_desc.h"
+#include "esp_efuse.h"
 #include "esp_flash.h"
-#include "esp_flash_encrypt.h"
 #include "esp_image_format.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
@@ -485,7 +485,7 @@ void convert_init(void)
     }
 
     s_plan = cv_make_plan(s_new, s_n_new, s_old, s_n_old, range_of(s_running), range_of(s_other),
-                          s_updater_len, s_flash_size, esp_flash_encryption_enabled());
+                          s_updater_len, s_flash_size, esp_efuse_is_flash_encryption_enabled());
 
     ESP_LOGW(TAG, "Another firmware's partition layout: running from '%s' at 0x%06" PRIx32 ", %" PRIu32
                   " MB flash, verdict %d%s%s",

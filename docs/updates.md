@@ -49,6 +49,14 @@ Until it gets one, the lights, Zigbee and Matter are off.
 An update that is started with no file following goes back to the coordinator by itself after ten
 minutes.
 
+## Going back to an older version
+
+An update over the network leaves the bootloader alone, so an older coordinator can be uploaded the
+same way as a newer one. The firmware is now built with ESP-IDF 6, and Espressif's bootloaders start
+images from their own or a newer ESP-IDF, not from an older one. A board that got its bootloader from
+a USB flash or a conversion of an ESP-IDF 6 build should therefore stay on ESP-IDF 6 builds. A board
+that has only ever been updated over the network still has its older bootloader, which runs both.
+
 ## Partition table changes
 
 A change to the partition table normally needs a USB flash: `idf.py -p /dev/cu.usbmodem* flash`, or

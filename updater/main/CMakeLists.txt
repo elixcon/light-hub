@@ -18,7 +18,7 @@ idf_component_register(
         "${app_dir}/ota.c"
     INCLUDE_DIRS "." "${app_dir}"
     PRIV_REQUIRES
-        app_update bootloader_support esp_app_format esp_bootloader_format esp_event esp_http_server
+        app_update bootloader_support efuse esp_app_format esp_bootloader_format esp_event esp_http_server
         esp_coex esp_netif esp_partition esp_system esp_timer esp_wifi ieee802154 lwip mbedtls
         nvs_flash spi_flash
     EMBED_TXTFILES "page.html")

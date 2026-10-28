@@ -6,11 +6,11 @@ dependencies:
       require: private
       version: '>=5.0'
     source:
-      registry_url: https://components.espressif.com
+      registry_url: https://components.espressif.com/
       type: service
     version: 1.7.19~2
   espressif/esp-zigbee-lib:
-    component_hash: d508f9b91c4b1973e6563fe840923fad2f15b23637f3d743dba1f5a719e1baab
+    component_hash: 84562c41e343152fae8152ea19eb335479230686e96745b65e45e012b7789fc8
     dependencies:
     - name: idf
       require: private
@@ -18,7 +18,7 @@ dependencies:
     source:
       registry_url: https://components.espressif.com/
       type: service
-    version: 2.0.4
+    version: 2.0.5
   espressif/esp_delta_ota:
     component_hash: 147161b602ef51e9f6649eb6d90c4d4ac3c94228cb264fa0e68be7877180462d
     dependencies:
@@ -46,7 +46,7 @@ dependencies:
       type: service
     version: 2.7.0
   espressif/esp_matter:
-    component_hash: f09f5dea282aa63b004ac372dd39087b6755fc26153921fab6e2bfb99d7ab681
+    component_hash: 7ba854953cc08731d445de21173c285f6d30f65eb2486f70b2eafc4985d2aded
     dependencies:
     - name: espressif/cjson
       registry_url: https://components.espressif.com
@@ -91,7 +91,7 @@ dependencies:
     source:
       registry_url: https://components.espressif.com/
       type: service
-    version: 1.6.0
+    version: 1.6.1
   espressif/esp_secure_cert_mgr:
     component_hash: 0b83e150f48d6839f0a0a8753850be55a51cc298cfca7658f21d355d5f41dd67
     dependencies:
@@ -103,7 +103,7 @@ dependencies:
       type: service
     version: 2.9.3
   espressif/mdns:
-    component_hash: 3ba256ac95e07c274be53cbd73f06cb846c403b61e8fbdf1be57bdb79db7a63e
+    component_hash: ef0766474b37459f6ad22461e453a8713e780e831a7c993b16919d817988dff6
     dependencies:
     - name: idf
       require: private
@@ -111,16 +111,17 @@ dependencies:
     source:
       registry_url: https://components.espressif.com/
       type: service
-    version: 1.12.0
+    version: 1.14.1
   idf:
     source:
       type: idf
-    version: 5.5.5
+    version: 6.0.3
 direct_dependencies:
+- espressif/cjson
 - espressif/esp-zigbee-lib
 - espressif/esp_matter
 - espressif/mdns
 - idf
-manifest_hash: f107b0c1220d5d141ae948679978f9a2e0da4d1fd934ff61731965cf858f43e9
+manifest_hash: 27d7c0bcd0afb48a770ff21fd899ab4bcbc9d77eb0e6dbce76dda90f258ea7c7
 target: esp32c6
-version: 2.0.0
+version: 3.0.0

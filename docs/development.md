@@ -2,15 +2,16 @@
 
 ## Building
 
-The toolchain is ESP-IDF v5.5.5:
+The toolchain is ESP-IDF v6.0.3:
 
 ```sh
 # once
-git clone -b v5.5.5 --recursive https://github.com/espressif/esp-idf.git ~/esp/esp-idf
-~/esp/esp-idf/install.sh esp32c6
+git clone -b v6.0.3 --recursive https://github.com/espressif/esp-idf.git ~/esp/esp-idf-v6
+~/esp/esp-idf-v6/install.sh esp32c6
+~/esp/esp-idf-v6/tools/idf_tools.py install cmake ninja   # macOS: IDF 6 leaves them to you
 
 # in every new shell
-. ~/esp/esp-idf/export.sh
+. ~/esp/esp-idf-v6/export.sh
 
 idf.py build
 idf.py -p /dev/cu.usbmodem* flash monitor
@@ -110,7 +111,7 @@ overflow the stack guard catches) and crashes half a second later.
 
 `.github/workflows/firmware.yml` runs the host tests and the web page's tests, checks that the
 committed `main/www/index.html` is what `web/` builds, and alongside them builds both images in the
-`espressif/idf:v5.5.5` container, from `sdkconfig.defaults`. Every push uploads the images as a
+`espressif/idf:v6.0.3` container, from `sdkconfig.defaults`. Every push uploads the images as a
 workflow artifact, and a `v*` tag also publishes them as a GitHub release. Options set only in a
 local `sdkconfig`, such as `CONFIG_ZBC_HEAP_WATCH`, are off in those builds. `sdkconfig` itself is
 not committed.
@@ -145,7 +146,7 @@ failure.
 
 ## Zigbee SDK version
 
-The firmware is built against esp-zigbee-lib 2.0.4 (ESP-IDF 5.5.x), whose API is the `ezb_*` family.
+The firmware is built against esp-zigbee-lib 2.0.5 (ESP-IDF 6.0.x), whose API is the `ezb_*` family.
 Most Zigbee material online still shows the 1.x `esp_zb_*` API, which does not apply here. The
 reference is the headers in `managed_components/espressif__esp-zigbee-lib/include/ezbee/`.
 

@@ -11,7 +11,8 @@
 #include "esp_log.h"
 #include "esp_rom_gpio.h"
 #include "esp_timer.h"
-#include "soc/ledc_periph.h"
+#include "hal/ledc_periph.h"
+#include "hal/mcpwm_ll.h"
 #include "soc/soc_caps.h"
 
 #include "buttons.h"
@@ -27,9 +28,10 @@ static const char *TAG = "local_lights";
 _Static_assert(ZBC_PWM_LEDC_CHANNELS <= SOC_LEDC_CHANNEL_NUM, "more LEDC channels planned than the chip has");
 _Static_assert(ZBC_PWM_LEDC_TIMERS <= LEDC_TIMER_MAX, "more LEDC timers planned than the chip has");
 _Static_assert(ZBC_PWM_RES_MAX <= SOC_LEDC_TIMER_BIT_WIDTH, "PWM resolution beyond the timer width");
-_Static_assert(ZBC_PWM_MCPWM_UNITS <= SOC_MCPWM_TIMERS_PER_GROUP && ZBC_PWM_MCPWM_UNITS <= SOC_MCPWM_OPERATORS_PER_GROUP,
+_Static_assert(ZBC_PWM_MCPWM_UNITS <= MCPWM_LL_GET(TIMERS_PER_GROUP) &&
+                   ZBC_PWM_MCPWM_UNITS <= MCPWM_LL_GET(OPERATORS_PER_GROUP),
                "more MCPWM units planned than the chip has");
-_Static_assert(SOC_MCPWM_GENERATORS_PER_OPERATOR == 2 && SOC_MCPWM_COMPARATORS_PER_OPERATOR >= 2,
+_Static_assert(MCPWM_LL_GET(GENERATORS_PER_OPERATOR) == 2 && MCPWM_LL_GET(COMPARATORS_PER_OPERATOR) >= 2,
                "an MCPWM unit is planned as two outputs with a comparator each");
 
 #define LEDC_MODE        LEDC_LOW_SPEED_MODE
@@ -1118,12 +1120,13 @@ static bool bind_channel(int gpio, int ch, int timer, bool active_low)
 }
 
 /* MCPWM's operators and comparators, once. The group divides its clock once
- * for every timer in it, and the first timer made sets that divider: left at
- * the driver's default of 2, a timer later asked for the full 160 MHz, or a
- * third of it, is refused or runs at another resolution than its counts were
- * worked out for. A timer made here at 160 MHz sets 1, the operators keep the
- * group - and the divider - after it is deleted, and every timer after it is
- * divided by its own divider alone, as zbc_mcpwm_peak counts. */
+ * for every timer in it, and the first timer made sets that divider: one that
+ * came out at 2 (the default of IDF 5's driver; IDF 6's is 1) would leave a
+ * timer later asked for the full 160 MHz, or a third of it, refused or running
+ * at another resolution than its counts were worked out for. A timer made here
+ * at 160 MHz sets 1, the operators keep the group - and the divider - after it
+ * is deleted, and every timer after it is divided by its own divider alone, as
+ * zbc_mcpwm_peak counts. */
 static bool mc_start_locked(void)
 {
     if (s_mc_state) {
@@ -1299,16 +1302,20 @@ static bool mc_bind_locked(int gpio, int ch, bool active_low, bool at_peak)
         err = mcpwm_generator_set_force_level(g, 0, true);
     }
     if (err == ESP_OK) {
-        err = mcpwm_generator_set_actions_on_compare_event(
-            g, MCPWM_GEN_COMPARE_EVENT_ACTION(MCPWM_TIMER_DIRECTION_UP, m->cmp[o], at_peak_is),
-            MCPWM_GEN_COMPARE_EVENT_ACTION(MCPWM_TIMER_DIRECTION_DOWN, m->cmp[o], at_zero_is),
-            MCPWM_GEN_COMPARE_EVENT_ACTION_END());
+        err = mcpwm_generator_set_action_on_compare_event(
+            g, MCPWM_GEN_COMPARE_EVENT_ACTION(MCPWM_TIMER_DIRECTION_UP, m->cmp[o], at_peak_is));
     }
     if (err == ESP_OK) {
-        err = mcpwm_generator_set_actions_on_timer_event(
-            g, MCPWM_GEN_TIMER_EVENT_ACTION(MCPWM_TIMER_DIRECTION_UP, MCPWM_TIMER_EVENT_EMPTY, at_zero_is),
-            MCPWM_GEN_TIMER_EVENT_ACTION(MCPWM_TIMER_DIRECTION_DOWN, MCPWM_TIMER_EVENT_FULL, at_peak_is),
-            MCPWM_GEN_TIMER_EVENT_ACTION_END());
+        err = mcpwm_generator_set_action_on_compare_event(
+            g, MCPWM_GEN_COMPARE_EVENT_ACTION(MCPWM_TIMER_DIRECTION_DOWN, m->cmp[o], at_zero_is));
+    }
+    if (err == ESP_OK) {
+        err = mcpwm_generator_set_action_on_timer_event(
+            g, MCPWM_GEN_TIMER_EVENT_ACTION(MCPWM_TIMER_DIRECTION_UP, MCPWM_TIMER_EVENT_EMPTY, at_zero_is));
+    }
+    if (err == ESP_OK) {
+        err = mcpwm_generator_set_action_on_timer_event(
+            g, MCPWM_GEN_TIMER_EVENT_ACTION(MCPWM_TIMER_DIRECTION_DOWN, MCPWM_TIMER_EVENT_FULL, at_peak_is));
     }
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "PWM channel %d (MCPWM) on GPIO %d refused (0x%x)", ch, gpio, err);

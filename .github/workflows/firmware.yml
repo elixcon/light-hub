@@ -44,7 +44,7 @@ jobs:
   # Alongside the tests rather than after them: release waits for all three.
   build:
     runs-on: ubuntu-latest
-    container: espressif/idf:v5.5.5
+    container: espressif/idf:v6.0.3
     env:
       # The image turns ccache on (IDF_CCACHE_ENABLE); kept between runs below.
       CCACHE_DIR: /tmp/ccache
@@ -62,8 +62,8 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ccache-idf-v5.5.5-${{ github.sha }}
-          restore-keys: ccache-idf-v5.5.5-
+          key: ccache-idf-v6.0.3-${{ github.sha }}
+          restore-keys: ccache-idf-v6.0.3-
       - name: Build
         shell: bash
         run: |

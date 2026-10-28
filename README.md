@@ -94,11 +94,12 @@ updates](docs/updates.md)).
 
 ```sh
 # once: the toolchain
-git clone -b v5.5.5 --recursive https://github.com/espressif/esp-idf.git ~/esp/esp-idf
-~/esp/esp-idf/install.sh esp32c6
+git clone -b v6.0.3 --recursive https://github.com/espressif/esp-idf.git ~/esp/esp-idf-v6
+~/esp/esp-idf-v6/install.sh esp32c6
+~/esp/esp-idf-v6/tools/idf_tools.py install cmake ninja   # macOS: IDF 6 leaves them to you
 
 # in every new shell
-. ~/esp/esp-idf/export.sh
+. ~/esp/esp-idf-v6/export.sh
 
 idf.py -p /dev/cu.usbmodem* flash monitor
 ```

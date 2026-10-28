@@ -7,8 +7,8 @@
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_timer.h"
-#include "mbedtls/sha256.h"
 #include "nvs.h"
+#include "psa/crypto.h"
 
 #include "auth.h"
 
@@ -113,9 +113,12 @@ static void auth_format(const char *canon, char *out)
 
 /* >>> end host-test region: authkey <<< */
 
+/* SHA-256 through PSA: IDF 6's Mbed TLS keeps mbedtls_sha256() private. The
+ * digest is the same, so keys hashed by an older build still match. */
 static void hash_key(const char *canon, uint8_t out[32])
 {
-    mbedtls_sha256((const unsigned char *)canon, ZBC_AUTH_KEY_CHARS, out, 0);
+    size_t len;
+    psa_hash_compute(PSA_ALG_SHA_256, (const uint8_t *)canon, ZBC_AUTH_KEY_CHARS, out, 32, &len);
 }
 
 static esp_err_t save_locked(void)

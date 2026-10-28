@@ -1,12 +1,16 @@
 ## IDF Component Manager Manifest File
 dependencies:
   idf:
-    version: ">=5.5"
+    version: ">=6.0"
   espressif/esp-zigbee-lib:
-    version: "==2.0.4"
+    version: "==2.0.5"
   espressif/mdns:
     version: "^1.8"
-  # Pinned exactly, as esp-zigbee-lib is: v1.6.0 is the release built against
-  # IDF v5.5.5, and a newer one follows esp-matter main onto IDF 6.
+  # Pinned exactly, as esp-zigbee-lib is: v1.6.1 is the release built against
+  # IDF v6.0.2, and a newer one follows esp-matter main onto a newer IDF.
   espressif/esp_matter:
-    version: "==1.6.0"
+    version: "==1.6.1"
+  # IDF 6 no longer ships cJSON as its json component. esp_matter brings this one
+  # too, but privately, so main asks for it itself.
+  espressif/cjson:
+    version: "^1.7.19"

@@ -35,7 +35,7 @@ CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=y
 #
 # Every received frame is copied into a dynamic RX buffer of its own size,
 # held until lwIP's consumer has taken it. Now and then a burst arrives faster
-# than tiT and the mdns task (priority 1) drain it, and the `wifi` task's heap
+# than tcpip and the mdns task (priority 1) drain it, and the `wifi` task's heap
 # rises by tens of kilobytes for under a second: on the Shelly 51.5 KB, i.e.
 # most of the default allowance of 32, which left 4.4 KB of heap free
 # (heap_watch tasks, 2026-10-03). At 16, UDP floods of 1,000 and 3,000
@@ -75,7 +75,6 @@ CONFIG_ENABLE_CHIP_SHELL=n
 # The vendor and product names a controller shows for the bridge - see the header.
 CONFIG_CHIP_PROJECT_CONFIG="main/CHIPProjectConfig.h"
 CONFIG_ENABLE_OTA_REQUESTOR=n
-CONFIG_MBEDTLS_HKDF_C=y
 CONFIG_LWIP_IPV6_AUTOCONFIG=y
 CONFIG_LWIP_IPV6_NUM_ADDRESSES=6
 CONFIG_LWIP_HOOK_IP6_ROUTE_DEFAULT=y
@@ -100,15 +99,14 @@ CONFIG_CHIP_CONFIG_NAMESPACE_PARTITION_LABEL="nvs_matter"
 CONFIG_CHIP_COUNTERS_NAMESPACE_PARTITION_LABEL="nvs_matter"
 CONFIG_CHIP_KVS_NAMESPACE_PARTITION_LABEL="nvs_matter"
 # Clusters no light bridge uses, compiled out for flash. This is Espressif's own
-# list from examples/light, less Bridged Device Basic Information - which carries
-# each group's name and is the one cluster a bridge cannot do without - and less
-# the two TLS clusters: that list is from esp-matter main, and 1.6.0 still
-# compiles their integration.cpp when they are switched off while dropping the
-# certificate table it calls, so turning them off fails the link.
+# list from examples/light (esp-matter 1.6.1), less Bridged Device Basic
+# Information - which carries each group's name and is the one cluster a bridge
+# cannot do without.
 CONFIG_SUPPORT_ACCOUNT_LOGIN_CLUSTER=n
 CONFIG_SUPPORT_ACTIONS_CLUSTER=n
 CONFIG_SUPPORT_ACTIVATED_CARBON_FILTER_MONITORING_CLUSTER=n
 CONFIG_SUPPORT_AIR_QUALITY_CLUSTER=n
+CONFIG_SUPPORT_AMBIENT_CONTEXT_SENSING_CLUSTER=n
 CONFIG_SUPPORT_APPLICATION_BASIC_CLUSTER=n
 CONFIG_SUPPORT_APPLICATION_LAUNCHER_CLUSTER=n
 CONFIG_SUPPORT_AUDIO_OUTPUT_CLUSTER=n
@@ -160,6 +158,7 @@ CONFIG_SUPPORT_LAUNDRY_WASHER_CONTROLS_CLUSTER=n
 CONFIG_SUPPORT_LAUNDRY_WASHER_MODE_CLUSTER=n
 CONFIG_SUPPORT_LOCALIZATION_CONFIGURATION_CLUSTER=n
 CONFIG_SUPPORT_LOW_POWER_CLUSTER=n
+CONFIG_SUPPORT_MEDIA_FILE_MANAGEMENT_CLUSTER=n
 CONFIG_SUPPORT_MEDIA_INPUT_CLUSTER=n
 CONFIG_SUPPORT_MEDIA_PLAYBACK_CLUSTER=n
 CONFIG_SUPPORT_MESSAGES_CLUSTER=n
@@ -205,6 +204,8 @@ CONFIG_SUPPORT_THERMOSTAT_USER_INTERFACE_CONFIGURATION_CLUSTER=n
 CONFIG_SUPPORT_TIMER_CLUSTER=n
 CONFIG_SUPPORT_TIME_FORMAT_LOCALIZATION_CLUSTER=n
 CONFIG_SUPPORT_TIME_SYNCHRONIZATION_CLUSTER=n
+CONFIG_SUPPORT_TLS_CERTIFICATE_MANAGEMENT_CLUSTER=n
+CONFIG_SUPPORT_TLS_CLIENT_MANAGEMENT_CLUSTER=n
 CONFIG_SUPPORT_TVOC_CONCENTRATION_MEASUREMENT_CLUSTER=n
 CONFIG_SUPPORT_UNIT_LOCALIZATION_CLUSTER=n
 CONFIG_SUPPORT_UNIT_TESTING_CLUSTER=n

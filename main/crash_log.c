@@ -11,11 +11,11 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_memory_utils.h"
-#include "esp_private/freertos_debug.h"
 #include "esp_private/panic_internal.h"
 #include "esp_rom_crc.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/freertos_debug.h"
 #include "freertos/task.h"
 #include "nvs.h"
 #include "riscv/rvruntime-frames.h"
@@ -248,7 +248,7 @@ static void capture(const panic_info_t *info)
      * everything pushed since lies below it. */
     TaskSnapshot_t snap;
     if (task && vTaskGetSnapshot(task, &snap) == pdTRUE) {
-        r->stack_lo = (uint32_t)pxTaskGetStackStart(task);
+        r->stack_lo = (uint32_t)xTaskGetStackStart(task);
         r->stack_hi = (uint32_t)snap.pxEndOfStack;
     }
 #if CONFIG_ESP_SYSTEM_HW_STACK_GUARD

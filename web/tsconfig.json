@@ -12,7 +12,6 @@
     "noEmit": true,
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
-    "baseUrl": ".",
     "paths": { "$lib": ["./src/lib"], "$lib/*": ["./src/lib/*"] },
     "types": ["svelte", "vite/client", "node"]
   },

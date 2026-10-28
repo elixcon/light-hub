@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-ESP32-C6 firmware (ESP-IDF v5.5.5, C with some C++ for Matter) that runs a Zigbee coordinator on
+ESP32-C6 firmware (ESP-IDF v6.0.3, C with some C++ for Matter) that runs a Zigbee coordinator on
 the 802.15.4 radio, joins Wi-Fi on the same chip, bridges each room to Matter and serves a Svelte
 web UI. Target: 4 MB flash, built with `-Os`. User-facing docs are in `docs/`; `docs/development.md`
 has the source layout, the crash-decoding procedure and the shared-radio settings.
@@ -14,7 +14,7 @@ headings when editing.
 ## Commands
 
 ```sh
-. ~/esp/esp-idf/export.sh          # every new shell; needs zopfli on PATH too
+. ~/esp/esp-idf-v6/export.sh       # every new shell; needs zopfli on PATH too
 idf.py build                       # builds the coordinator AND the updater (subproject)
 idf.py -p /dev/cu.usbmodem* flash monitor   # bootloader, full partition table, both apps
 idf.py app-flash                   # coordinator only
@@ -178,10 +178,10 @@ calls it too). Leave the 802.15.4 coexistence priorities at their defaults, and 
 
 ### Zigbee SDK
 
-The build uses esp-zigbee-lib 2.0.4, whose API is `ezb_*`. Most online examples use the 1.x
+The build uses esp-zigbee-lib 2.0.5, whose API is `ezb_*`. Most online examples use the 1.x
 `esp_zb_*` API, which does not apply here. The reference is
-`managed_components/espressif__esp-zigbee-lib/include/ezbee/`. esp_matter is pinned to 1.6.0
-(the release built against IDF 5.5.5).
+`managed_components/espressif__esp-zigbee-lib/include/ezbee/`. esp_matter is pinned to 1.6.1
+(the release built against IDF 6.0.2).
 
 ### Host-test regions
 
