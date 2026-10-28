@@ -54,8 +54,14 @@ minutes.
 An update over the network leaves the bootloader alone, so an older coordinator can be uploaded the
 same way as a newer one. The firmware is now built with ESP-IDF 6, and Espressif's bootloaders start
 images from their own or a newer ESP-IDF, not from an older one. A board that got its bootloader from
-a USB flash or a conversion of an ESP-IDF 6 build should therefore stay on ESP-IDF 6 builds. A board
-that has only ever been updated over the network still has its older bootloader, which runs both.
+a USB flash or a conversion of an ESP-IDF 6 build therefore stays on ESP-IDF 6 builds. A board that
+has only ever been updated over the network still has its older bootloader, which runs both.
+
+The updater refuses a coordinator, and the coordinator refuses an updater, from an older ESP-IDF
+than the bootloader's, before writing anything. `X-Ota-Error` (or `error` for `/api/updater/image`)
+names both versions. Bugfix releases count as the same ESP-IDF, so a v6.0.3 bootloader takes a v6.0.2
+build, and a v6.1 one does not take a v6.0 build. To go back further, flash the older release's USB zip,
+bootloader included.
 
 ## Partition table changes
 

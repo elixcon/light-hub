@@ -170,8 +170,8 @@ See [Firmware updates](updates.md) and [Updating Zigbee devices](zigbee-device-u
 | Method | Path | Purpose |
 |---|---|---|
 | `POST` | `/api/update/prepare` | restarts into the updater, `202`; poll `/api/status` until it says `"updater": true`, then upload |
-| `POST` | `/update` | multipart firmware upload, ESPHome's shape; the coordinator answers `503` and restarts into the updater, which takes the retried upload |
-| `POST` | `/api/updater/image` | multipart `elixcon_light_hub_updater.bin`: replaces and checks the updater while the coordinator runs; `/api/status` `ota.updater_valid` says whether it is whole |
+| `POST` | `/update` | multipart firmware upload, ESPHome's shape; the coordinator answers `503` and restarts into the updater, which takes the retried upload. A refused file gets `400` and the reason in `X-Ota-Error`: not an app image, or one from an older ESP-IDF than the bootloader's ([updates](updates.md#going-back-to-an-older-version)) |
+| `POST` | `/api/updater/image` | multipart `elixcon_light_hub_updater.bin`: replaces and checks the updater while the coordinator runs; `/api/status` `ota.updater_valid` says whether it is whole. `400` without writing anything for an updater from an older ESP-IDF than the bootloader's |
 | `POST` | `/api/updater/run` | restarts through the updater and straight back, `202`; how a coordinator on the old partition table gets the new one (`ota.layout`) |
 | `GET` | `/api/zigbee/ota` | the stored Zigbee device image, its target, the transfer and the last query: the same object as `zigbee.ota` in `/api/status` |
 | `POST` | `/api/zigbee/ota/image` | multipart upload of one plain Zigbee OTA file (`0x0BEEF11E` header, up to 512 KiB); `409` while a device is downloading |

@@ -8,6 +8,7 @@
 
 #include "esp_app_desc.h"
 #include "esp_app_format.h"
+#include "esp_bootloader_desc.h"
 #include "esp_flash.h"
 #include "esp_image_format.h"
 #include "esp_log.h"
@@ -339,6 +340,86 @@ static const char *check_image_head(const uint8_t *head)
     return NULL;
 }
 
+/* >>> host-test region: idf-ver <<< */
+/* The ESP-IDF release series in a descriptor's idf_ver, as major * 1000 +
+ * minor: "v6.0.3" and "v6.0.3-dirty" are 6000, "v6.1-dev-12-gabc" is 6001. -1
+ * for anything that does not start that way. `size` bounds a field that need
+ * not end in a NUL. */
+static int idf_series(const char *ver, size_t size)
+{
+    size_t i = 0;
+    int    part[2];
+    if (i < size && ver[i] == 'v') {
+        i++;
+    }
+    for (int k = 0; k < 2; k++) {
+        if (k > 0) {
+            if (i >= size || ver[i] != '.') {
+                return -1;
+            }
+            i++;
+        }
+        if (i >= size || ver[i] < '0' || ver[i] > '9') {
+            return -1;
+        }
+        int n = 0;
+        while (i < size && ver[i] >= '0' && ver[i] <= '9') {
+            n = n * 10 + (ver[i++] - '0');
+            if (n > 999) {
+                return -1;
+            }
+        }
+        part[k] = n;
+    }
+    return part[0] * 1000 + part[1];
+}
+
+/* Whether a bootloader from ESP-IDF `boot` would not start an image from ESP-IDF
+ * `image`. Espressif's bootloaders start images from their own ESP-IDF or a
+ * newer one, not from an older one. Bugfix releases only fix bugs, so the series
+ * decides: a v6.0.3 bootloader takes a v6.0.2 image, a v6.1 one does not. A
+ * version that cannot be read refuses nothing - a bootloader without a
+ * description predates ESP-IDF 6, and starts newer images. */
+static bool idf_image_too_old(const char *image, size_t image_size, const char *boot, size_t boot_size)
+{
+    const int img = idf_series(image, image_size);
+    const int bl  = idf_series(boot, boot_size);
+    return img >= 0 && bl >= 0 && img < bl;
+}
+/* >>> end host-test region: idf-ver <<< */
+
+/* The bootloader's ESP-IDF, read once: only a USB flash or a conversion writes
+ * a bootloader, and both restart afterwards. Empty without a description. Asked
+ * from the httpd task only. */
+static const char *boot_idf(void)
+{
+    static char ver[33];
+    static bool read;
+    if (!read) {
+        esp_bootloader_desc_t desc;
+        if (esp_ota_get_bootloader_description(NULL, &desc) == ESP_OK) {
+            snprintf(ver, sizeof(ver), "%.32s", desc.idf_ver);
+        }
+        read = true;
+    }
+    return ver;
+}
+
+/* Why this board's bootloader would not start the image `desc` describes, or
+ * NULL. Asked before anything is written, so a refused file leaves the board as
+ * it was. The answer lasts until the next call. */
+static const char *check_image_idf(const esp_app_desc_t *desc)
+{
+    static char why[160];
+    const char *boot = boot_idf();
+    if (!idf_image_too_old(desc->idf_ver, sizeof(desc->idf_ver), boot, strlen(boot))) {
+        return NULL;
+    }
+    snprintf(why, sizeof(why), "this image is from ESP-IDF %.32s, older than this board's bootloader (%s), which would not start it",
+             desc->idf_ver, boot);
+    return why;
+}
+
 static const char *app_sink_write(void *ctx, const uint8_t *data, size_t len)
 {
     app_sink_t *s = ctx;
@@ -361,7 +442,12 @@ static const char *app_sink_write(void *ctx, const uint8_t *data, size_t len)
             return why;
         }
         const esp_app_desc_t *desc = (const esp_app_desc_t *)(s->head + APP_DESC_OFFSET);
-        ESP_LOGI(TAG, "Incoming image: %.32s %.32s", desc->project_name, desc->version);
+        ESP_LOGI(TAG, "Incoming image: %.32s %.32s, ESP-IDF %.32s", desc->project_name, desc->version,
+                 desc->idf_ver);
+        why = check_image_idf(desc);
+        if (why) {
+            return why;
+        }
 
         if (esp_ota_write(s->handle, s->head, IMAGE_HDR_LEN) != ESP_OK) {
             return "flash write failed";
@@ -836,6 +922,10 @@ static const char *check_updater_head(void *ctx, const uint8_t *head, size_t len
     const esp_app_desc_t *desc = (const esp_app_desc_t *)(head + APP_DESC_OFFSET);
     if (strncmp(desc->project_name, UPDATER_PROJECT, sizeof(desc->project_name)) != 0) {
         return "this is not the updater - use build/updater/elixcon_light_hub_updater.bin";
+    }
+    why = check_image_idf(desc);
+    if (why) {
+        return why;
     }
     ESP_LOGW(TAG, "Writing the updater %.32s", desc->version);
     return NULL;
