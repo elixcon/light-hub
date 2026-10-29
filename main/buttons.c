@@ -593,52 +593,66 @@ typedef struct {
  * the esp_timer callback must not take a mutex: it copies this under a spinlock
  * held for a few dozen bytes instead. */
 typedef struct {
+    uint16_t      id;          /* first, so the bytes after it pack without a gap */
     bool          used;
-    uint16_t      id;
-    uint8_t       src;         /* zbc_btn_src_t */
+    uint8_t       src;         /* zbc_btn_src_t, and so which part of the union below is live */
     int8_t        gpio;
     bool          inverted;
     bool          is_switch;          /* ZBC_INPUT_SWITCH: btn_switch_step, not btn_step */
     bool          want_double;
-    /* Source: Zigbee. Copied here rather than looked up in button_db, because
-     * the sampler runs in the esp_timer task and must not take a mutex. */
+    /* Source: Zigbee or sensor. Copied here rather than looked up in button_db,
+     * because the sampler runs in the esp_timer task and must not take a mutex. */
     uint8_t       ieee[ZBC_BTN_IEEE_LEN];
     uint8_t       zb_ep;
     uint8_t       zb_key;
-    int64_t       last_event_us;   /* for the UI, where a pin would show a dot */
-    /* The Test button's end of a hold on a Zigbee button: there is no pin to let
-     * go of, so the release comes from the clock instead. */
-    int64_t       sim_hold_until;
-    /* When this button last nudged, so a stream of nudges can be told from a
-     * one-off and given a transition that tracks it. See run_nudges(). */
-    int64_t       last_nudge_us;
-    zbc_btn_fsm_t fsm;
-    zbc_zbtn_fsm_t zfsm;
-    zbc_unlock_fsm_t unlock;   /* the press-5-times failsafe, see above */
     /* Which way a reversing dimmer is going. Flipped when a hold begins and
      * again when a light lands on a rail, so a new hold always undoes the
      * direction the last one ended on. Shared by every reversing rule of the
      * button, so the lights one hold dims turn round together. */
     int8_t        dim_dir;
-    /* When the current sweeps started, so each command works out its target
-     * from the clock rather than from the command before it. A slow or dropped
-     * tick then costs a step of smoothness, never a change of speed. */
-    int64_t       ramp_since;
-    /* One per dimming rule of the case the hold runs - see run_hold(). */
-    btn_sweep_t   sweep[ZBC_BTN_MAX_SWEEPS];
     /* The first rule of the case this hold runs, in its gesture's list; -1
      * when none. Chosen when the hold begins and kept to its end: see dispatch(). */
     int8_t        hold_case;
     /* How far ahead this hold's commands aim and how long each takes; 0 means
      * BTN_REPEAT_US. Set by run_case before each step, see zbtn_repeat_us(). */
     int32_t       hold_iv_us;
-    /* While this is in the future the sampler reads the button as held, so a
-     * test drives the same machine a finger does. */
-    int64_t       sim_until;
-    /* Source: sensor. What its reports mean for its rules, and how long its
-     * no-motion time is (clear_s). */
-    zbc_motion_fsm_t mfsm;
-    int64_t       clear_us;
+    int64_t       last_event_us;   /* for the UI, where a pin would show a dot */
+    /* When this button last nudged, so a stream of nudges can be told from a
+     * one-off and given a transition that tracks it. See run_nudges(). */
+    int64_t       last_nudge_us;
+    /* When the current sweeps started, so each command works out its target
+     * from the clock rather than from the command before it. A slow or dropped
+     * tick then costs a step of smoothness, never a change of speed. */
+    int64_t       ramp_since;
+    /* The press-5-times failsafe, see above: a pin's presses, or the clicks of
+     * a remote's on/off key. */
+    zbc_unlock_fsm_t unlock;
+    /* One per dimming rule of the case the hold runs - see run_hold(). */
+    btn_sweep_t   sweep[ZBC_BTN_MAX_SWEEPS];
+    /* What one source alone needs, laid over each other: a slot costs its
+     * largest source rather than all three. Read only the part src names - the
+     * others' bytes are this one's - and reset the slot (live_init) when the
+     * source changes. */
+    union {
+        struct {                       /* Source: GPIO */
+            zbc_btn_fsm_t fsm;
+            /* While this is in the future the sampler reads the button as
+             * held, so a test drives the same machine a finger does. */
+            int64_t       sim_until;
+        };
+        struct {                       /* Source: Zigbee */
+            zbc_zbtn_fsm_t zfsm;
+            /* The Test button's end of a hold: there is no pin to let go of,
+             * so the release comes from the clock instead. */
+            int64_t        sim_hold_until;
+        };
+        struct {                       /* Source: sensor */
+            /* What its reports mean for its rules, and how long its
+             * no-motion time is (clear_s). */
+            zbc_motion_fsm_t mfsm;
+            int64_t          clear_us;
+        };
+    };
 } btn_live_t;
 
 static btn_live_t     s_live[CONFIG_ZBC_MAX_BUTTONS];
@@ -785,8 +799,8 @@ static void live_init(btn_live_t *l, const btn_wiring_t *w, int64_t now)
     l->zb_key      = w->zb_key;
     l->dim_dir     = -1;   /* the first hold flips this, so it dims up */
     l->hold_case   = -1;
-    l->clear_us    = w->clear_us;
     if (l->src == ZBC_BTN_SRC_SENSOR) {
+        l->clear_us = w->clear_us;
         motion_start(&l->mfsm, l->clear_us, now);
     }
 }
@@ -854,7 +868,9 @@ void buttons_reload(void)
         placed[i] = true;
         if (same_wiring(l, &w[i])) {
             l->want_double = w[i].want_double;
-            l->clear_us    = w[i].clear_us;
+            if (l->src == ZBC_BTN_SRC_SENSOR) {
+                l->clear_us = w[i].clear_us;
+            }
         } else {
             live_init(l, &w[i], now);
         }
@@ -920,8 +936,8 @@ static void poll_cb(void *arg)
                     zbc_state_bump();
                 } else {
                     portENTER_CRITICAL(&s_live_mux);
-                    if (s_live[i].used && s_live[i].id == id && !s_live[i].mfsm.occupied &&
-                        s_live[i].mfsm.clear_at == 0) {
+                    if (s_live[i].used && s_live[i].id == id && s_live[i].src == src &&
+                        !s_live[i].mfsm.occupied && s_live[i].mfsm.clear_at == 0) {
                         s_live[i].mfsm = before;
                     }
                     portEXIT_CRITICAL(&s_live_mux);
@@ -959,12 +975,14 @@ static void poll_cb(void *arg)
          * up: no release, the hold left open with its sweeps, and the next test
          * a string of repeats of the old one. */
         portENTER_CRITICAL(&s_live_mux);
-        const bool sim  = used && s_live[i].sim_until > now;
-        const bool busy = used && (s_live[i].fsm.stable || s_live[i].fsm.raw ||
-                                   s_live[i].fsm.pending_short);
+        const bool pinned = used && s_live[i].used && s_live[i].id == id &&
+                            s_live[i].src == ZBC_BTN_SRC_GPIO;
+        const bool sim  = pinned && s_live[i].sim_until > now;
+        const bool busy = pinned && (s_live[i].fsm.stable || s_live[i].fsm.raw ||
+                                     s_live[i].fsm.pending_short);
         portEXIT_CRITICAL(&s_live_mux);
 
-        if (!used || (pin < 0 && !sim && !busy)) {
+        if (!pinned || (pin < 0 && !sim && !busy)) {
             continue;
         }
         /* A simulated hold reads as pressed whichever way the button is wired,
@@ -973,13 +991,14 @@ static void poll_cb(void *arg)
                               : (pin >= 0 ? gpio_get_level(pin) : (inverted ? 1 : 0));
 
         portENTER_CRITICAL(&s_live_mux);
-        /* Re-check: a reload between the two critical sections would have moved
-         * this slot, and stepping a machine that no longer belongs to this pin
-         * would invent a press. */
+        /* Re-check: a reload between the two critical sections may have given
+         * this slot to another button or another source, and stepping a machine
+         * that no longer belongs to this pin would invent a press. */
         zbc_btn_emit_t emit     = ZBC_EMIT_NONE;
         zbc_unlock_t   unlocked = UNLOCK_NONE;
         bool           edge     = false;
-        if (s_live[i].used && s_live[i].id == id && s_live[i].gpio == pin) {
+        if (s_live[i].used && s_live[i].id == id && s_live[i].src == ZBC_BTN_SRC_GPIO &&
+            s_live[i].gpio == pin) {
             const uint8_t was = s_live[i].fsm.stable;
             emit     = is_sw ? btn_switch_step(&s_live[i].fsm, level, inverted, now)
                              : btn_step(&s_live[i].fsm, level, inverted, want_dbl, now);
@@ -1572,7 +1591,8 @@ static void run_case(int slot, uint16_t id, const zbc_btn_rule_t *rules, int n, 
      * nudge, which is a reasonable thing to want. */
     if (emit == ZBC_EMIT_LONG || emit == ZBC_EMIT_LONG_REPEAT) {
         portENTER_CRITICAL(&s_live_mux);
-        s_live[slot].hold_iv_us = (int32_t)zbtn_repeat_us(&s_live[slot].zfsm);
+        s_live[slot].hold_iv_us = s_live[slot].src == ZBC_BTN_SRC_ZIGBEE
+                                ? (int32_t)zbtn_repeat_us(&s_live[slot].zfsm) : BTN_REPEAT_US;
         portEXIT_CRITICAL(&s_live_mux);
         run_hold(slot, rules, n, emit == ZBC_EMIT_LONG, now);
     } else {
@@ -1624,6 +1644,15 @@ static int slot_of(uint16_t id)
     }
     portEXIT_CRITICAL(&s_live_mux);
     return slot;
+}
+
+/* Under s_live_mux: the slot still holds this button, from this source. A
+ * reload between looking a slot up and using it may have given the slot to
+ * another button or the button another source, and the source's state is
+ * where the other's lies (see btn_live_t). */
+static bool still_is(int slot, uint16_t id, uint8_t src)
+{
+    return s_live[slot].used && s_live[slot].id == id && s_live[slot].src == src;
 }
 
 static void dispatch(const btn_msg_t *msg)
@@ -1951,7 +1980,7 @@ void buttons_sensor_event(const uint8_t ieee[ZBC_BTN_IEEE_LEN], uint8_t ep, bool
             const btn_msg_t msg = { .id = id, .emit = emit };
             if (xQueueSend(s_queue, &msg, 0) != pdTRUE) {
                 portENTER_CRITICAL(&s_live_mux);
-                if (s_live[i].used && s_live[i].id == id) {
+                if (s_live[i].used && s_live[i].id == id && s_live[i].src == ZBC_BTN_SRC_SENSOR) {
                     s_live[i].mfsm.occupied = 0;
                 }
                 portEXIT_CRITICAL(&s_live_mux);
@@ -1968,8 +1997,10 @@ bool buttons_sensor_state(uint16_t id, bool *occupied, int64_t *clear_in_ms)
     for (int i = 0; i < CONFIG_ZBC_MAX_BUTTONS; i++) {
         if (s_live[i].used && s_live[i].id == id) {
             sensor = s_live[i].src == ZBC_BTN_SRC_SENSOR;
-            occ    = s_live[i].mfsm.occupied != 0;
-            at     = s_live[i].mfsm.clear_at;
+            if (sensor) {
+                occ = s_live[i].mfsm.occupied != 0;
+                at  = s_live[i].mfsm.clear_at;
+            }
             break;
         }
     }
@@ -2049,8 +2080,10 @@ bool buttons_pin_state(uint16_t id, bool *pressed, int *level)
         if (s_live[i].used && s_live[i].id == id) {
             /* A Zigbee button has no pin to read, and reporting one would be a
              * wiring diagnosis of a button with no wiring. */
-            pin    = s_live[i].src != ZBC_BTN_SRC_GPIO ? -1 : s_live[i].gpio;
-            stable = s_live[i].fsm.stable != 0;
+            if (s_live[i].src == ZBC_BTN_SRC_GPIO) {
+                pin    = s_live[i].gpio;
+                stable = s_live[i].fsm.stable != 0;
+            }
             break;
         }
     }
@@ -2107,9 +2140,12 @@ esp_err_t buttons_fire(uint16_t id, zbc_btn_event_t ev, int hold_ms)
              * ended by the timer below - which still drives zbtn_step, so the
              * repeats and the release that stops the lamps are the real ones. */
             portENTER_CRITICAL(&s_live_mux);
-            s_live[slot].sim_hold_until = esp_timer_get_time() + (int64_t)hold_ms * 1000;
-            zbc_btn_emit_t emit = zbtn_step(&s_live[slot].zfsm, ZB_REMOTE_HOLD,
-                                            s_live[slot].want_double, esp_timer_get_time());
+            zbc_btn_emit_t emit = ZBC_EMIT_NONE;
+            if (still_is(slot, id, ZBC_BTN_SRC_ZIGBEE)) {
+                s_live[slot].sim_hold_until = esp_timer_get_time() + (int64_t)hold_ms * 1000;
+                emit = zbtn_step(&s_live[slot].zfsm, ZB_REMOTE_HOLD, s_live[slot].want_double,
+                                 esp_timer_get_time());
+            }
             portEXIT_CRITICAL(&s_live_mux);
             if (emit != ZBC_EMIT_NONE) {
                 const btn_msg_t hold = { .id = id, .emit = emit };
@@ -2120,8 +2156,10 @@ esp_err_t buttons_fire(uint16_t id, zbc_btn_event_t ev, int hold_ms)
         /* Long enough to clear the debounce and the hold threshold on top of
          * whatever sweep was asked for. */
         portENTER_CRITICAL(&s_live_mux);
-        s_live[slot].sim_until = esp_timer_get_time() +
-                                 (int64_t)hold_ms * 1000 + BTN_LONG_US + BTN_DEBOUNCE_US * 2;
+        if (still_is(slot, id, ZBC_BTN_SRC_GPIO)) {
+            s_live[slot].sim_until = esp_timer_get_time() +
+                                     (int64_t)hold_ms * 1000 + BTN_LONG_US + BTN_DEBOUNCE_US * 2;
+        }
         portEXIT_CRITICAL(&s_live_mux);
         return ESP_OK;
     }
@@ -2133,8 +2171,10 @@ esp_err_t buttons_fire(uint16_t id, zbc_btn_event_t ev, int hold_ms)
         portENTER_CRITICAL(&s_live_mux);
         const zb_remote_ev_t press = ev == ZBC_EV_SHORT  ? ZB_REMOTE_CLICK
                                    : ev == ZBC_EV_TRIPLE ? ZB_REMOTE_TRIPLE : ZB_REMOTE_DOUBLE;
-        zbc_btn_emit_t emit = zbtn_step(&s_live[slot].zfsm, press,
-                                        s_live[slot].want_double, esp_timer_get_time());
+        zbc_btn_emit_t emit = ZBC_EMIT_NONE;
+        if (still_is(slot, id, ZBC_BTN_SRC_ZIGBEE)) {
+            emit = zbtn_step(&s_live[slot].zfsm, press, s_live[slot].want_double, esp_timer_get_time());
+        }
         portEXIT_CRITICAL(&s_live_mux);
         if (emit == ZBC_EMIT_NONE) {
             return ESP_OK;   /* held back for the double window; the sampler emits it */

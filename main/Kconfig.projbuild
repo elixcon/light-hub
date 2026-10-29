@@ -47,7 +47,7 @@ menu "Elixcon Light Hub"
         default 32
         help
             Changing it changes nothing stored: the table is kept by count. Each
-            button costs about 380 bytes of RAM, most of it the state of its
+            button costs about 280 bytes of RAM, most of it the state of its
             presses and holds. Its rules are counted in ZBC_BUTTON_POOL.
 
     config ZBC_MAX_LIGHTS
