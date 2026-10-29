@@ -16,7 +16,7 @@
 	import type { ButtonDef } from "$lib/types.ts";
 
 	const cards = $derived(remoteCards(data.devices, data.buttons));
-	const wired = $derived(data.buttons.filter((b) => b.source !== "zigbee"));
+	const wired = $derived(data.buttons.filter((b) => b.source === "gpio"));
 	const unlinked = $derived(data.buttons.filter((b) => b.source === "zigbee" && !b.ieee));
 
 	const wiring = (b: ButtonDef) => b.gpio === null || b.gpio === undefined ? "no pin yet"

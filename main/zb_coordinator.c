@@ -444,6 +444,7 @@ static void simple_desc_result(const ezb_zdo_simple_desc_req_result_t *result, v
     for (int i = 0; i < desc->app_input_cluster_count; i++) {
         switch (desc->app_cluster_list[i]) {
         case EZB_ZCL_CLUSTER_ID_ON_OFF:        features |= ZBC_FEAT_ONOFF; has_onoff = true; break;
+        case EZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING: features |= ZBC_FEAT_MOTION; break;
         case EZB_ZCL_CLUSTER_ID_LEVEL:         features |= ZBC_FEAT_LEVEL; has_level = true; break;
         case EZB_ZCL_CLUSTER_ID_COLOR_CONTROL: features |= ZBC_FEAT_COLOR_TEMP; break;
         case EZB_ZCL_CLUSTER_ID_MULTISTATE_INPUT:
@@ -486,13 +487,22 @@ static void simple_desc_result(const ezb_zdo_simple_desc_req_result_t *result, v
         features &= (uint16_t)~ZBC_FEAT_ONOFF;
     }
 
+    /* An endpoint with Occupancy Sensing is a motion sensor and nothing else.
+     * Some list On/Off or Level as outputs too, to switch a lamp bound to them
+     * directly, which would make them remotes above; their motion is read here
+     * from the occupancy report instead. */
+    const bool is_sensor = (features & ZBC_FEAT_MOTION) != 0;
+    if (is_sensor) {
+        features = ZBC_FEAT_MOTION;
+    }
+
     if (has_ota) {
         zb_ota_note_client(saddr, desc->ep_id);
     }
 
     const bool is_light  = (features & ZBC_FEAT_ONOFF) != 0;
     const bool is_switch = (features & ZBC_FEAT_SWITCH) != 0;
-    if (!is_light && !is_switch) {
+    if (!is_light && !is_switch && !is_sensor) {
         /* The simple descriptor is the authority, so any record of it goes (lamps
          * excepted - see device_db_remove_endpoint). */
         device_db_remove_endpoint(ieee, desc->ep_id);
@@ -525,10 +535,16 @@ static void simple_desc_result(const ezb_zdo_simple_desc_req_result_t *result, v
 
     ESP_LOGI(TAG, "Device 0x%04x endpoint %d is a %s (device id 0x%04x, features 0x%02x)",
              saddr, desc->ep_id,
-             is_light && is_switch ? "light and a switch" : (is_light ? "light" : "switch"),
+             is_sensor ? "motion sensor"
+                       : (is_light && is_switch ? "light and a switch" : (is_light ? "light" : "switch")),
              desc->app_device_id, features);
     device_db_add_endpoint(ieee, desc->ep_id, desc->app_device_id, recorded);
-    if (is_switch && !is_light) {
+    if (is_sensor) {
+        /* The simple descriptor is the authority here too: whatever the endpoint
+         * was recorded as goes, but not what its reports taught us. */
+        device_db_clear_features(ieee, desc->ep_id,
+                                 (uint16_t)~(ZBC_FEAT_MOTION | ZBC_FEAT_MOTION_CLEARS));
+    } else if (is_switch && !is_light) {
         /* device_db_add_endpoint only adds bits, so clear them first: the simple
          * descriptor is the authority on what an endpoint is. The colour bits,
          * learned later and separately, are left alone. */
@@ -559,6 +575,18 @@ static void simple_desc_result(const ezb_zdo_simple_desc_req_result_t *result, v
         if (has_level && !is_light) {
             bind_for_reports(saddr, desc->ep_id, EZB_ZCL_CLUSTER_ID_LEVEL);
         }
+    }
+
+    if (is_sensor) {
+        /* Most sensors report occupancy only to a binding, and a configured
+         * maximum interval repeats the last value, which mends a lost
+         * "unoccupied". A Xiaomi reports to the coordinator unbound and ignores
+         * both; it is asleep again by the time an answer would be due. */
+        bind_for_reports(saddr, desc->ep_id, EZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING);
+        configure_reporting(saddr, desc->ep_id, EZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING,
+                            EZB_ZCL_ATTR_OCCUPANCY_SENSING_OCCUPANCY_ID, EZB_ZCL_ATTR_TYPE_MAP8,
+                            ZBC_REPORT_MIN_ONOFF_S);
+        return;
     }
 
     if (!is_light) {
@@ -945,13 +973,19 @@ static const uint16_t ZBC_BINDABLE[] = {
     EZB_ZCL_CLUSTER_ID_ON_OFF,
     EZB_ZCL_CLUSTER_ID_LEVEL,
     EZB_ZCL_CLUSTER_ID_MULTISTATE_INPUT,
+    EZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING,
 };
 #define ZBC_BINDABLE_CLUSTERS ((int)(sizeof(ZBC_BINDABLE) / sizeof(ZBC_BINDABLE[0])))
-/* zb_report_state() hands these out over the API, so the two sizes are one
- * number; a cluster added here without widening that struct would be dropped
- * from the status silently. */
-_Static_assert(ZBC_BINDABLE_CLUSTERS <= ZB_REPORT_MAX_CLUSTERS,
-               "ZB_REPORT_MAX_CLUSTERS is smaller than ZBC_BINDABLE");
+/* The most of them one endpoint wants (wanted_reports): a remote's three. A
+ * lamp wants two and a sensor one, so the answer tables below are sized by this
+ * rather than by every cluster there is - each cluster more would cost 3.5 KB
+ * of RAM that no endpoint could ever use. */
+#define ZBC_WANTED_PER_EP 3
+/* zb_report_state() hands one endpoint's out over the API, so the two sizes are
+ * one number; an endpoint wanting more without widening that struct would have
+ * the rest dropped from the status silently. */
+_Static_assert(ZBC_WANTED_PER_EP <= ZB_REPORT_MAX_CLUSTERS,
+               "ZB_REPORT_MAX_CLUSTERS is smaller than ZBC_WANTED_PER_EP");
 
 static uint32_t bind_cluster_index(uint16_t cluster_id)
 {
@@ -983,7 +1017,7 @@ typedef struct {
     uint16_t cluster_id;
 } zbc_done_t;
 
-#define ZBC_DONE_ENTRIES (CONFIG_ZBC_MAX_DEVICES * CONFIG_ZBC_MAX_ENDPOINTS_PER_DEVICE * ZBC_BINDABLE_CLUSTERS)
+#define ZBC_DONE_ENTRIES (CONFIG_ZBC_MAX_DEVICES * CONFIG_ZBC_MAX_ENDPOINTS_PER_DEVICE * ZBC_WANTED_PER_EP)
 static zbc_done_t s_bound[ZBC_DONE_ENTRIES];
 static zbc_done_t s_configured[ZBC_DONE_ENTRIES];
 
@@ -1242,8 +1276,8 @@ static void ensure_cluster_reports(uint16_t short_addr, uint8_t ep, uint16_t clu
 /* What an endpoint wants established, from its features alone. The one
  * statement of the rule, shared by the retry that establishes bindings and
  * reporting and by `zb_report_state()`, so the two cannot disagree. At most
- * ZBC_BINDABLE_CLUSTERS entries, which sizes the caller's array: a remote wants
- * three, a lamp two. */
+ * ZBC_WANTED_PER_EP entries, which sizes the caller's array: a remote wants
+ * three, a lamp two, a sensor one. */
 typedef struct {
     uint16_t    cluster_id;
     const char *name;
@@ -1256,6 +1290,13 @@ typedef struct {
 static int wanted_reports(uint16_t features, zbc_report_want_t *out)
 {
     int n = 0;
+    /* A sensor reports occupancy and is asked nothing else. */
+    if (features & ZBC_FEAT_MOTION) {
+        out[n++] = (zbc_report_want_t){ EZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING, "occupancy",
+                                        EZB_ZCL_ATTR_OCCUPANCY_SENSING_OCCUPANCY_ID,
+                                        EZB_ZCL_ATTR_TYPE_MAP8, ZBC_REPORT_MIN_ONOFF_S, true };
+        return n;
+    }
     /* A remote's bindings are what make it send at all, and a battery one is
      * asleep most of the time: the repeating scan is what catches it awake. */
     if (features & ZBC_FEAT_SWITCH) {
@@ -1285,7 +1326,7 @@ static void ensure_reports_bound(uint16_t short_addr, const zbc_device_t *dev)
 {
     const bool may_bind = bind_scan_take(dev->ieee);
     for (int i = 0; i < dev->ep_count; i++) {
-        zbc_report_want_t want[ZBC_BINDABLE_CLUSTERS];
+        zbc_report_want_t want[ZBC_WANTED_PER_EP];
         const int         n = wanted_reports(dev->eps[i].features, want);
         for (int w = 0; w < n; w++) {
             ensure_cluster_reports(short_addr, dev->eps[i].ep, want[w].cluster_id,
@@ -2773,6 +2814,50 @@ static void note_answered(uint16_t short_addr, uint8_t ep)
     }
 }
 
+/* ---------------------------------------------------------------- sensors */
+
+static zb_sensor_cb_t s_sensor_cb;
+
+void zb_set_sensor_handler(zb_sensor_cb_t cb)
+{
+    s_sensor_cb = cb;
+}
+
+/* An Occupancy report, bit 0 of which says whether anybody is there. The report
+ * is what makes an endpoint a sensor as much as its simple descriptor does: a
+ * Xiaomi lumi.sensor_motion is asleep again before most interrogations finish,
+ * and reports its occupancy unbound and unasked, so an endpoint not on record
+ * is recorded from it. One recorded as a lamp or a remote is left alone. Zigbee
+ * task, stack lock held. */
+static void note_occupancy(uint16_t short_addr, uint8_t ep, bool occupied)
+{
+    uint8_t ieee[ZBC_IEEE_LEN];
+    if (!device_db_ieee_by_short(short_addr, ieee)) {
+        return;
+    }
+    uint16_t features = device_db_features_by_short(short_addr, ep);
+    if (features == 0) {
+        ESP_LOGI(TAG, "Device 0x%04x endpoint %d reports occupancy: recording a motion sensor",
+                 short_addr, ep);
+        if (device_db_add_endpoint(ieee, ep, 0, ZBC_FEAT_MOTION) != ESP_OK) {
+            return;
+        }
+        features = ZBC_FEAT_MOTION;
+    }
+    if (!(features & ZBC_FEAT_MOTION)) {
+        return;
+    }
+    if (!occupied && !(features & ZBC_FEAT_MOTION_CLEARS)) {
+        ESP_LOGI(TAG, "Device 0x%04x endpoint %d says when it is clear itself", short_addr, ep);
+        device_db_add_features(ieee, ep, ZBC_FEAT_MOTION_CLEARS);
+        features |= ZBC_FEAT_MOTION_CLEARS;
+    }
+    ESP_LOGI(TAG, "Device 0x%04x endpoint %d: %s", short_addr, ep, occupied ? "motion" : "no motion");
+    if (s_sensor_cb) {
+        s_sensor_cb(ieee, ep, occupied, (features & ZBC_FEAT_MOTION_CLEARS) != 0);
+    }
+}
+
 static void handle_attribute(uint16_t src_addr, uint8_t src_ep, uint16_t cluster_id,
                              uint16_t attr_id, uint8_t attr_type, const void *value)
 {
@@ -2792,6 +2877,12 @@ static void handle_attribute(uint16_t src_addr, uint8_t src_ep, uint16_t cluster
             memcpy(&v, value, sizeof(v));
             zb_ota_note_attr(src_addr, src_ep, attr_id, v);
         }
+        return;
+    }
+
+    if (cluster_id == EZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING &&
+        attr_id == EZB_ZCL_ATTR_OCCUPANCY_SENSING_OCCUPANCY_ID) {
+        note_occupancy(src_addr, src_ep, (*(const uint8_t *)value & 0x01) != 0);
         return;
     }
 
@@ -6566,7 +6657,7 @@ esp_err_t zb_set_color_xy(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, uint16_t
 void zb_report_state(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, uint16_t features,
                     zb_report_state_t *out)
 {
-    zbc_report_want_t want[ZBC_BINDABLE_CLUSTERS];
+    zbc_report_want_t want[ZBC_WANTED_PER_EP];
     const int         n = wanted_reports(features, want);
 
     /* No lock: both tables are keyed by IEEE, so there is no short address to
@@ -6614,16 +6705,19 @@ esp_err_t zb_remove_device(const uint8_t ieee[ZBC_IEEE_LEN])
      * the network, and the page says so. A lamp is always listening and gets the
      * request. Not device_listens(), which asks only for no On/Off and would take
      * a mains device whose endpoint dims without switching for a remote; here
-     * every endpoint has to be a switch. */
+     * every endpoint has to be a switch, or a motion sensor, which sleeps the
+     * same way. */
     bool remote = runs_on_a_battery(ieee);
     if (!remote && dev.ep_count > 0) {
         remote = true;
         for (int i = 0; i < dev.ep_count; i++) {
-            remote &= (dev.eps[i].features & ZBC_FEAT_SWITCH) && !(dev.eps[i].features & ZBC_FEAT_ONOFF);
+            const uint16_t f = dev.eps[i].features;
+            remote &= ((f & ZBC_FEAT_SWITCH) && !(f & ZBC_FEAT_ONOFF)) || (f & ZBC_FEAT_MOTION);
         }
     }
     if (remote) {
-        ESP_LOGI(TAG, "Forgetting remote 0x%04x without a leave request - see zb_remove_device", short_addr);
+        ESP_LOGI(TAG, "Forgetting remote or sensor 0x%04x without a leave request - see zb_remove_device",
+                 short_addr);
         return device_db_remove(ieee);
     }
 

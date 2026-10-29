@@ -207,6 +207,10 @@ esp_err_t lighting_group_set_adaptive_day(uint16_t group_id, const zbc_al_profil
  * (`used`: sunrise and sunset moved into its day's limits, when there is a time
  * zone to read them in). False without a location. */
 bool      lighting_al_day(uint16_t group_id, int64_t utc_s, zbc_sun_day_t *real, zbc_sun_day_t *used);
+/* Whether the sun is down here now: between the real sunset and sunrise, not a
+ * room's stretched day; all day in a polar night. False without a clock or a
+ * location, and *down is then left alone. A button's "when the sun is down". */
+bool      lighting_sun_is_down(bool *down);
 
 /* ------------------------------------------------- entertainment streams
  *

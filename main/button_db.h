@@ -39,10 +39,15 @@ extern "C" {
 /* Which internal resistor the pin gets. A button wired to GND wants a pull-up
  * and reads inverted; one wired to 3V3 wants a pull-down and does not. */
 /* Where a button's presses come from. GPIO is first so a stored record from
- * before remotes existed converts to it by zeroing. */
+ * before remotes existed converts to it by zeroing.
+ *
+ * A motion sensor is a button too: one endpoint of a paired Zigbee sensor, whose
+ * two events - motion, and no motion for clear_s - stand where a remote's
+ * gestures do, with the same rules behind them. */
 typedef enum {
     ZBC_BTN_SRC_GPIO = 0,
     ZBC_BTN_SRC_ZIGBEE,
+    ZBC_BTN_SRC_SENSOR,
     ZBC_BTN_SRC_COUNT,
 } zbc_btn_src_t;
 
@@ -70,6 +75,20 @@ typedef enum {
     ZBC_EV_COUNT,
 } zbc_btn_event_t;
 
+/* A sensor's two events, in the first two gestures' places in the pool: the
+ * stored layout has no other room for them, and a sensor has no presses. A
+ * sensor's double and triple press always stay empty. */
+#define ZBC_EV_MOTION ZBC_EV_SHORT
+#define ZBC_EV_CLEAR  ZBC_EV_LONG
+
+/* How long a sensor waits without motion before its no-motion rules run, in
+ * seconds. Not below half a minute: a Xiaomi or Aqara sensor reports motion at
+ * most once a minute, so anything much shorter ends while somebody is still
+ * moving in the room. */
+#define ZBC_SENSOR_CLEAR_MIN_S     30
+#define ZBC_SENSOR_CLEAR_MAX_S     3600
+#define ZBC_SENSOR_CLEAR_DEFAULT_S 120
+
 /* When a rule applies, asked of the rule's own target. Tried in order, first
  * match wins. A room or a light whose state is not known counts as off and as
  * 0 %, which is what lighting_group_any_on() already does - so "when off" and
@@ -81,8 +100,18 @@ typedef enum {
     ZBC_COND_ON,
     ZBC_COND_BELOW,      /* brightness < cond_arg % */
     ZBC_COND_ABOVE,      /* brightness > cond_arg % */
+    /* Between sunset and sunrise at the location Adaptive Lighting uses. Asked
+     * of the sun, not of the target, so like ALWAYS it needs none; without a
+     * clock or a location it holds, as not knowing a light counts as off. */
+    ZBC_COND_SUN_DOWN,
     ZBC_COND_COUNT,
 } zbc_btn_cond_t;
+
+/* Whether a condition is asked of the rule's own room or light. */
+static inline bool zbc_cond_needs_target(uint8_t cond)
+{
+    return cond != ZBC_COND_ALWAYS && cond != ZBC_COND_SUN_DOWN;
+}
 
 /* State-dependence lives here rather than in a condition the user has to write:
  * TOGGLE and DIM_CYCLE are the two cases everybody wants, and spelling them as
@@ -123,6 +152,11 @@ typedef struct {
     uint8_t  flags;       /* ZBC_RULE_AND */
     uint8_t  ep;          /* the light's endpoint; 0 when the target is a room */
     uint8_t  ieee[ZBC_BTN_IEEE_LEN];  /* the light; zero when the target is a room */
+    /* Seconds after the event that the action runs; 0 runs it at once. The next
+     * event of the same button drops whatever is still waiting, and so does a
+     * restart (buttons.c). Never on a dimming rule, which only means something
+     * while the button is held. */
+    uint16_t delay_s;
 } zbc_btn_rule_t;
 
 /* How many dimming rules one case of a long press may hold. Each is a sweep of
@@ -140,11 +174,11 @@ typedef struct {
     int8_t   gpio;                    /* -1 = not wired up yet */
     bool     inverted;                /* the pin reads low when pressed */
     uint8_t  pull;                    /* zbc_btn_pull_t */
-    /* Source: Zigbee. All zero = not bound to a remote yet, which is also what a
-     * button is left as when its remote is deleted. */
+    /* Source: Zigbee or sensor. All zero = not bound to a remote or a sensor
+     * yet, which is also what a button is left as when its device is deleted. */
     uint8_t  ieee[ZBC_BTN_IEEE_LEN];
     uint8_t  zb_ep;
-    uint8_t  zb_key;                  /* which button of that endpoint */
+    uint8_t  zb_key;                  /* which button of that endpoint; 0 for a sensor */
     /* One pool for every gesture: the short press's rules first, then the long
      * press's, and so on - see button_db_rules(). A wall switch has one gesture
      * and may use the whole pool. */
@@ -152,9 +186,13 @@ typedef struct {
     zbc_btn_rule_t rules[CONFIG_ZBC_BUTTON_RULES];
     /* Source: GPIO. zbc_btn_input_t. */
     uint8_t  input;
+    uint8_t  pad;                     /* zero */
+    /* Source: sensor. Seconds without motion before the no-motion rules run,
+     * ZBC_SENSOR_CLEAR_MIN_S to _MAX_S; zero for any other source. */
+    uint16_t clear_s;
     /* Zero. A field added in here later changes nothing stored, where one added
      * after it would bump BUTTON_BLOB_VERSION. */
-    uint8_t  reserved[7];
+    uint8_t  reserved[6];
 } zbc_button_t;
 
 /* One gesture's rules: where they start in the pool, and how many (n may be
@@ -213,14 +251,18 @@ bool      button_db_pin_taken(int gpio, uint16_t except_id);
 bool      button_db_key_taken(const uint8_t ieee[ZBC_BTN_IEEE_LEN], uint8_t ep, uint8_t key,
                               uint16_t except_id);
 
+/* And for a sensor's endpoint: one record per sensor, or one motion would run
+ * two lists. */
+bool      button_db_sensor_taken(const uint8_t ieee[ZBC_BTN_IEEE_LEN], uint8_t ep, uint16_t except_id);
+
 /* A deleted group leaves its rules in place but unassigned, so the button keeps
  * its shape and the UI can say "pick a group" instead of silently losing the
  * work. Mirrors group_db_forget_device / curve_db_forget_device. */
 void      button_db_forget_group(uint16_t group_id);
 
-/* And the same when a device is deleted. A remote: the button keeps its name and
- * its rules and loses only its source, so the UI can say "pick a remote". A
- * light: every rule that named it stays, unassigned, as for a room. */
+/* And the same when a device is deleted. A remote or a sensor: the button keeps
+ * its name and its rules and loses only its source, so the UI can say "pick a
+ * remote". A light: every rule that named it stays, unassigned, as for a room. */
 void      button_db_forget_device(const uint8_t ieee[ZBC_BTN_IEEE_LEN]);
 
 esp_err_t button_db_erase(void);

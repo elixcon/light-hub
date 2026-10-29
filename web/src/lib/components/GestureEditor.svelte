@@ -2,11 +2,11 @@
 	import { Button } from "$lib/components/ui/button";
 	import RuleRow from "./RuleRow.svelte";
 	import { blankRule, hasTarget } from "$lib/buttons.ts";
-	import type { Rule, Gesture } from "$lib/types.ts";
+	import type { Rule, Gesture, SensorEvent } from "$lib/types.ts";
 	/* `left` is how many more rows the button's pool takes, all its gestures
-	 * together. */
-	let { gesture, label, rules, left, ontest }:
-		{ gesture: Gesture; label: string; rules: Rule[]; left: number; ontest: () => void } = $props();
+	 * together. `sensor` for a motion sensor's events, which never dim. */
+	let { gesture, label, rules, left, ontest, sensor = false }:
+		{ gesture: Gesture | SensorEvent; label: string; rules: Rule[]; left: number; ontest: () => void; sensor?: boolean } = $props();
 	const bare = $derived(rules.length === 1 && rules[0].when === "always" && rules[0].do === "none" && !hasTarget(rules[0]));
 	/* More than one case: the conditions decide between them. */
 	const cases = $derived(rules.filter((r, i) => i === 0 || !r.and).length);
@@ -27,7 +27,7 @@
 		let head = rules.length - 1;
 		while (head > 0 && rules[head].and) head--;
 		const prev = rules[head];
-		rules.push({ ...blankRule(), group: prev.group, ieee: prev.ieee ?? null, ep: prev.ep ?? null, do: prev.do, value: prev.value });
+		rules.push({ ...blankRule(), group: prev.group, ieee: prev.ieee ?? null, ep: prev.ep ?? null, do: prev.do, value: prev.value, delay: prev.delay ?? 0 });
 	}
 	function addAnd() {
 		if (left <= 0) return;
@@ -60,7 +60,7 @@
 	</div>
 	<div class="flex flex-col gap-2">
 		{#each rules as rule, i (i)}
-			<RuleRow {rule} first={i === 0} showWhen={cases > 1 || rule.when !== "always"} removable={rules.length > 1} onremove={() => remove(i)} />
+			<RuleRow {rule} {sensor} first={i === 0} showWhen={cases > 1 || rule.when !== "always"} removable={rules.length > 1} onremove={() => remove(i)} />
 		{/each}
 	</div>
 	{#if !bare}

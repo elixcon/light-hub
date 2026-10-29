@@ -48,7 +48,7 @@ static inline bool zbc_short_known(uint16_t short_addr)
  * with no lamp behind it. A spare bit of the existing features word on purpose:
  * a new field in zbc_endpoint_t changes sizeof(zbc_device_t), the load-time size
  * check then rejects the stored table, and the names the user gave their lights
- * are gone. Bits 6..15 are still free. */
+ * are gone. Bits 9..15 are still free. */
 #define ZBC_FEAT_SWITCH     (1u << 5)
 /* A Hue dimmer whose buttons have been heard on Philips' own cluster (0xFC00),
  * on its button endpoint: from then on that is where its presses are read, and
@@ -57,6 +57,15 @@ static inline bool zbc_short_known(uint16_t short_addr)
  * survives our restarts; cleared when the dimmer announces itself, which is
  * what a re-pair (and a lost binding) looks like from here. */
 #define ZBC_FEAT_HUE_BUTTONS (1u << 6)
+/* A motion sensor: Occupancy Sensing is an input cluster, or the endpoint was
+ * heard reporting it (a Xiaomi sensor often never answers the simple descriptor
+ * request). Never a lamp and never a remote. */
+#define ZBC_FEAT_MOTION      (1u << 7)
+/* The sensor has been heard reporting "unoccupied" itself, so its own report
+ * starts the no-motion time; one that never does (Xiaomi) gets the time counted
+ * from its last motion. Learned from the first such report and persisted:
+ * interrogation leaves it alone, since no cluster list says it. */
+#define ZBC_FEAT_MOTION_CLEARS (1u << 8)
 
 /* Attributes we track per endpoint, addressed by this enum so one setter serves
  * every ZCL attribute we care about. */

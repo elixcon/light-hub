@@ -4,7 +4,7 @@
 /* A detail view's name starts with its list view's name less the final "s" -
  * that prefix is how StaggeredMenu marks the current section. */
 export type RouteName = "groups" | "group" | "lights" | "light" | "remotes" | "remote" | "remote-button"
-  | "settings" | "access" | "matter" | "wifi" | "setup";
+  | "sensors" | "sensor" | "settings" | "access" | "matter" | "wifi" | "setup";
 
 export interface Route { name: RouteName; params: Record<string, string> }
 
@@ -22,6 +22,7 @@ function parse(hash: string): Route {
        * ignored); a button by its number. */
       if (b && b.startsWith("0x")) return { name: "remote", params: { ieee: b } };
       return b ? { name: "remote-button", params: { id: b } } : { name: "remotes", params: {} };
+    case "sensors": return b ? { name: "sensor", params: { ieee: b } } : { name: "sensors", params: {} };
     case "settings":
       if (b === "access" || b === "matter" || b === "wifi") return { name: b, params: {} };
       return { name: "settings", params: {} };

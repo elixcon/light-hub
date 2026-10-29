@@ -16,6 +16,7 @@
 	import { navigate } from "$lib/router.svelte.ts";
 	import { ALL_GESTURES, GESTURES, MAX_RULES, PINS, PIN_NOTE, PULLS, blankRule, cleanRules, remoteName, rowsUsed } from "$lib/buttons.ts";
 	import { gesturesFor, keyName, knownRemote, remotePath } from "$lib/remotes.ts";
+	import { sensorPath } from "$lib/sensors.ts";
 	import { ago } from "$lib/format.ts";
 	import type { Gesture, InputKind, Pull, Rule } from "$lib/types.ts";
 
@@ -23,6 +24,8 @@
 	const live = $derived(data.buttons.find((x) => x.id === id));
 	/* A remote's button belongs to that remote's page; a wired one to the list. */
 	const home = $derived(live?.source === "zigbee" && live.ieee ? remotePath(live.ieee) : "/remotes");
+	/* A sensor's record is edited on the sensor's own page. */
+	$effect(() => { if (live?.source === "sensor") navigate(live.ieee ? sensorPath(live.ieee) : "/sensors", true); });
 
 	const b = $state({
 		loaded: -1, name: "", source: "gpio" as "gpio" | "zigbee",
@@ -40,7 +43,7 @@
 	$effect(() => {
 		if (live && b.loaded !== live.id) {
 			b.loaded = live.id;
-			b.name = live.name; b.source = live.source || "gpio";
+			b.name = live.name; b.source = live.source === "zigbee" ? "zigbee" : "gpio";
 			b.gpio = live.gpio; b.inverted = live.inverted; b.pull = live.pull; b.input = live.input || "button";
 			b.ieee = live.ieee; b.ep = live.ep; b.key = live.key;
 			for (const [ev] of ALL_GESTURES) {

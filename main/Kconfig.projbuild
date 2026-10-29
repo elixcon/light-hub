@@ -42,7 +42,7 @@ menu "Elixcon Light Hub"
             their brightness through unchanged.
 
     config ZBC_MAX_BUTTONS
-        int "Maximum number of buttons, counting every button of every remote"
+        int "Maximum number of buttons, counting every button of every remote and every motion sensor"
         range 1 16
         default 16
 

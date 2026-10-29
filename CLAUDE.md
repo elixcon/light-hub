@@ -88,6 +88,10 @@ The updater compiles shared modules (`wifi_manager.c`, `settings.c`, `auth.c`, `
 - `*_db.c` are NVS-backed registries: devices keyed by IEEE address, groups of (device, endpoint),
   curves, buttons, wired lights, Matter lamps, Adaptive Lighting. `config_backup.c` saves and
   restores them, and the restore is applied at boot before any table loads.
+- `buttons.c` runs every button's rules: pins, remote keys, and motion sensors, which are buttons
+  with a third source (`ZBC_BTN_SRC_SENSOR`, events motion and clear in the first two gesture
+  slots). It also runs rules' delayed actions from its own task. The occupancy machine
+  (`motion_step`) and the delay table are host-tested (`test_motion`, `test_delayed`).
 - Matter is C++. `matter_bridge.cpp` exposes one dimmable light per group, and
   `matter_fabric.cpp`/`matter_commission.cpp`/`matter_ctl.cpp` are the controller for Wi-Fi Matter
   lamps (`matter_priv.h` is internal and runs on the CHIP thread; `matter_ctl.h` is the C API). No

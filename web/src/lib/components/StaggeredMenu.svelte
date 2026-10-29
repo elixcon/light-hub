@@ -14,7 +14,7 @@
 
 	const items: [string, string, string][] = [
 		["Rooms", "/groups", "groups"], ["Lights", "/lights", "lights"],
-		["Remotes", "/remotes", "remotes"], ["Settings", "/settings", "settings"],
+		["Remotes", "/remotes", "remotes"], ["Sensors", "/sensors", "sensors"], ["Settings", "/settings", "settings"],
 	];
 
 	/* Any navigation closes it. */

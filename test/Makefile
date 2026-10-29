@@ -50,8 +50,8 @@ TESTS    = test_gate test_settle test_sweep test_zremote test_remote test_matter
            test_unlock test_btnstep test_authkey test_switchpoint test_prewarm test_lightaddr test_cwww test_ramp test_updater test_convert \
            test_sun test_tz test_ntc test_alstate test_linkgap test_reach test_zbota test_fadein \
            test_mctl_gate test_mctl_disc test_clause test_parent test_crash test_ent test_stream test_wled \
-           test_config_backup test_idfver
-REGIONS  = gate-types gate-body settle-types settle-body sweep zremote btnstep levels matter slug \
+           test_config_backup test_idfver test_motion test_delayed
+REGIONS  = gate-types gate-body settle-types settle-body sweep zremote btnstep motion delayed levels matter slug \
            unlock authkey switchpoint prewarm fadein lightaddr cwww ramp pchip updater-decide convert-plan alstate linkgap reach zota-wake \
            mctl-gate mctl-disc clause parent crash-scan ent-frame stream wled-parse cfg-plan idf-ver
 INCS     = $(REGIONS:%=%.inc)
@@ -74,6 +74,8 @@ FROM_sweep        = $(SRC_BTN)
 FROM_clause       = $(SRC_BTN)
 FROM_zremote      = $(SRC_BTN)
 FROM_btnstep      = $(SRC_BTN)
+FROM_motion       = $(SRC_BTN)
+FROM_delayed      = $(SRC_BTN)
 FROM_levels       = $(SRC_LIGHT)
 FROM_matter       = $(SRC_MATTER)
 FROM_slug         = $(SRC_SET)
@@ -153,6 +155,12 @@ test_btnstep: test_btnstep.c btnstep.inc
 	@$(CC) $(CFLAGS) -o $@ $<
 
 test_zremote: test_zremote.c zremote.inc
+	@$(CC) $(CFLAGS) -o $@ $<
+
+test_motion: test_motion.c motion.inc
+	@$(CC) $(CFLAGS) -o $@ $<
+
+test_delayed: test_delayed.c delayed.inc
 	@$(CC) $(CFLAGS) -o $@ $<
 
 test_slug:   test_slug.c   slug.inc

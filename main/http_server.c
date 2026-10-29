@@ -1075,6 +1075,12 @@ static cJSON *device_to_json(const zbc_device_t *dev, int64_t now)
         if (src->features & ZBC_FEAT_HUE_BUTTONS) {
             cJSON_AddItemToArray(feat, cJSON_CreateString("hue_buttons"));
         }
+        /* A motion sensor; whether it says "unoccupied" itself decides what its
+         * no-motion time is counted from. */
+        if (src->features & ZBC_FEAT_MOTION) {
+            cJSON_AddItemToArray(feat, cJSON_CreateString("motion"));
+            cJSON_AddBoolToObject(ep, "reports_clear", (src->features & ZBC_FEAT_MOTION_CLEARS) != 0);
+        }
 
         if (src->on_off == ZBC_UNKNOWN) {
             cJSON_AddNullToObject(ep, "on");
@@ -1898,12 +1904,30 @@ static esp_err_t groups_get(httpd_req_t *req)
 
 /* Names rather than enum numbers on the wire: a button's configuration is the
  * one thing here somebody will read with curl and want to understand. */
-static const char *const COND_NAMES[]   = { "always", "off", "on", "below", "above" };
+static const char *const COND_NAMES[]   = { "always", "off", "on", "below", "above", "sun_down" };
+_Static_assert(sizeof(COND_NAMES) / sizeof(COND_NAMES[0]) == ZBC_COND_COUNT,
+               "one JSON name per condition, in button_db.h order");
 static const char *const ACTION_NAMES[] = { "none", "on", "off", "toggle", "set",
                                             "dim_up", "dim_down", "dim_cycle", "adaptive" };
 static const char *const EVENT_NAMES[]  = { "short", "long", "double", "triple" };
 _Static_assert(sizeof(EVENT_NAMES) / sizeof(EVENT_NAMES[0]) == ZBC_EV_COUNT,
                "one JSON name per gesture, in button_db.h order");
+/* A sensor's two events, in the first two gestures' places (button_db.h). */
+static const char *const SENSOR_EVENT_NAMES[] = { "motion", "clear" };
+_Static_assert(ZBC_EV_MOTION == 0 && ZBC_EV_CLEAR == 1, "a sensor's events are the first two");
+static const char *const SOURCE_NAMES[] = { "gpio", "zigbee", "sensor" };
+_Static_assert(sizeof(SOURCE_NAMES) / sizeof(SOURCE_NAMES[0]) == ZBC_BTN_SRC_COUNT,
+               "one JSON name per source, in button_db.h order");
+
+/* What a gesture of this button is called on the wire, or NULL when its source
+ * has no such gesture - a sensor has two events and no presses. */
+static const char *event_name(uint8_t src, int ev)
+{
+    if (src == ZBC_BTN_SRC_SENSOR) {
+        return ev < 2 ? SENSOR_EVENT_NAMES[ev] : NULL;
+    }
+    return EVENT_NAMES[ev];
+}
 static const char *const PULL_NAMES[]   = { "none", "up", "down" };
 static const char *const INPUT_NAMES[]  = { "button", "switch" };
 
@@ -1925,13 +1949,17 @@ static cJSON *button_to_json(const zbc_button_t *b)
     cJSON *obj = cJSON_CreateObject();
     cJSON_AddNumberToObject(obj, "id", b->id);
     cJSON_AddStringToObject(obj, "name", b->name);
-    cJSON_AddStringToObject(obj, "source", b->src == ZBC_BTN_SRC_ZIGBEE ? "zigbee" : "gpio");
-    if (b->src == ZBC_BTN_SRC_ZIGBEE && button_db_has_source(b)) {
+    cJSON_AddStringToObject(obj, "source", SOURCE_NAMES[b->src < ZBC_BTN_SRC_COUNT ? b->src : 0]);
+    if ((b->src == ZBC_BTN_SRC_ZIGBEE || b->src == ZBC_BTN_SRC_SENSOR) && button_db_has_source(b)) {
         char ieee[19];
         zbc_ieee_to_str(b->ieee, ieee);
         cJSON_AddStringToObject(obj, "ieee", ieee);
         cJSON_AddNumberToObject(obj, "ep", b->zb_ep);
-        cJSON_AddNumberToObject(obj, "key", b->zb_key);
+        if (b->src == ZBC_BTN_SRC_SENSOR) {
+            cJSON_AddNullToObject(obj, "key");
+        } else {
+            cJSON_AddNumberToObject(obj, "key", b->zb_key);
+        }
     } else {
         cJSON_AddNullToObject(obj, "ieee");
         cJSON_AddNullToObject(obj, "ep");
@@ -1965,9 +1993,43 @@ static cJSON *button_to_json(const zbc_button_t *b)
         cJSON_AddNullToObject(obj, "last_event_ms");
     }
 
+    /* A sensor as its rules see it: motion that has run its rules, and how
+     * long until the no-motion ones are due. `occupied` is null until the
+     * sensor has been heard since the coordinator started. */
+    if (b->src == ZBC_BTN_SRC_SENSOR) {
+        cJSON_AddNumberToObject(obj, "clear_s", b->clear_s);
+        bool    occupied = false;
+        int64_t clear_in = -1;
+        if (buttons_sensor_state(b->id, &occupied, &clear_in) && ago >= 0) {
+            cJSON_AddBoolToObject(obj, "occupied", occupied);
+        } else {
+            cJSON_AddNullToObject(obj, "occupied");
+        }
+        if (clear_in >= 0) {
+            cJSON_AddNumberToObject(obj, "clear_in_ms", (double)clear_in);
+        } else {
+            cJSON_AddNullToObject(obj, "clear_in_ms");
+        }
+    }
+
+    /* What its last event left waiting. */
+    int     waiting = 0;
+    int64_t next_ms = 0;
+    if (buttons_delayed(b->id, &waiting, &next_ms)) {
+        cJSON *d = cJSON_AddObjectToObject(obj, "delayed");
+        cJSON_AddNumberToObject(d, "count", waiting);
+        cJSON_AddNumberToObject(d, "next_ms", (double)next_ms);
+    } else {
+        cJSON_AddNullToObject(obj, "delayed");
+    }
+
     cJSON *events = cJSON_AddObjectToObject(obj, "events");
     for (int e = 0; e < ZBC_EV_COUNT; e++) {
-        cJSON *rules = cJSON_AddArrayToObject(events, EVENT_NAMES[e]);
+        const char *ev_name = event_name(b->src, e);
+        if (!ev_name) {
+            continue;
+        }
+        cJSON *rules = cJSON_AddArrayToObject(events, ev_name);
         int n = 0;
         const zbc_btn_rule_t *list = button_db_rules((zbc_button_t *)b, e, &n);
         for (int r = 0; r < n; r++) {
@@ -1988,6 +2050,7 @@ static cJSON *button_to_json(const zbc_button_t *b)
             cJSON_AddNumberToObject(ro, "arg", rule->cond_arg);
             cJSON_AddStringToObject(ro, "do", ACTION_NAMES[rule->action]);
             cJSON_AddNumberToObject(ro, "value", rule->action_arg);
+            cJSON_AddNumberToObject(ro, "delay", rule->delay_s);
             cJSON_AddItemToArray(rules, ro);
         }
     }
@@ -2064,8 +2127,10 @@ static esp_err_t buttons_post(httpd_req_t *req)
 }
 
 /* One rule from the request body. `first` says it opens its gesture, which has
- * nothing before it to join. Returns a reason on refusal, NULL on success. */
-static const char *rule_from_json(const cJSON *item, zbc_btn_rule_t *r, bool first)
+ * nothing before it to join; `sensor` that the button is a motion sensor, which
+ * is never held and so never dims. Returns a reason on refusal, NULL on
+ * success. */
+static const char *rule_from_json(const cJSON *item, zbc_btn_rule_t *r, bool first, bool sensor)
 {
     if (!cJSON_IsObject(item)) {
         return "a rule has to be an object";
@@ -2093,10 +2158,13 @@ static const char *rule_from_json(const cJSON *item, zbc_btn_rule_t *r, bool fir
         r->ep = (uint8_t)jep->valueint;
     }
 
-    const int cond = name_index(COND_NAMES, ZBC_COND_COUNT, cJSON_GetObjectItem(item, "when"));
-    const int act  = name_index(ACTION_NAMES, ZBC_ACT_COUNT, cJSON_GetObjectItem(item, "do"));
+    /* A rule with no condition always applies - the way a rule joined with
+     * "and" is written, which has none of its own. */
+    const cJSON *when = cJSON_GetObjectItem(item, "when");
+    const int    cond = when ? name_index(COND_NAMES, ZBC_COND_COUNT, when) : ZBC_COND_ALWAYS;
+    const int    act  = name_index(ACTION_NAMES, ZBC_ACT_COUNT, cJSON_GetObjectItem(item, "do"));
     if (cond < 0) {
-        return "when must be always, on, off, below or above";
+        return "when must be always, on, off, below, above or sun_down";
     }
     if (act < 0) {
         return "do must be one of none, on, off, toggle, set, dim_up, dim_down, dim_cycle, adaptive";
@@ -2120,6 +2188,21 @@ static const char *rule_from_json(const cJSON *item, zbc_btn_rule_t *r, bool fir
     }
     r->cond_arg   = (uint8_t)argv;
     r->action_arg = (uint8_t)valv;
+
+    const bool   dim   = act == ZBC_ACT_DIM_UP || act == ZBC_ACT_DIM_DOWN || act == ZBC_ACT_DIM_CYCLE;
+    const cJSON *delay = cJSON_GetObjectItem(item, "delay");
+    if (delay && !cJSON_IsNull(delay)) {
+        if (!cJSON_IsNumber(delay) || delay->valuedouble < 0 || delay->valuedouble > 65535) {
+            return "delay is in seconds, 0 to 65535";
+        }
+        r->delay_s = (uint16_t)delay->valueint;
+    }
+    if (dim && sensor) {
+        return "a sensor cannot dim: it is never held";
+    }
+    if (dim && r->delay_s) {
+        return "a dim cannot wait: it moves while the button is held";
+    }
 
     /* A rule that points at a room or a light nobody can name would be a button
      * that quietly does nothing. Say so now rather than after it is wired to a
@@ -2158,32 +2241,68 @@ static const char *button_from_json(const cJSON *json, zbc_button_t *out, uint16
      * remote must not keep claiming the pin. */
     const cJSON *source = cJSON_GetObjectItem(json, "source");
     if (source) {
-        if (!cJSON_IsString(source)) {
-            return "source must be gpio or zigbee";
+        const int src = name_index(SOURCE_NAMES, ZBC_BTN_SRC_COUNT, source);
+        if (src < 0) {
+            return "source must be gpio, zigbee or sensor";
         }
-        if (strcmp(source->valuestring, "zigbee") == 0) {
-            if (out->src != ZBC_BTN_SRC_ZIGBEE) {
-                out->src      = ZBC_BTN_SRC_ZIGBEE;
-                out->gpio     = -1;
-                out->inverted = false;
-                out->pull     = ZBC_PULL_NONE;
+        if (src != out->src) {
+            /* A remote's key and a sensor are different identities, and a pin
+             * is neither: none of them carries over. */
+            memset(out->ieee, 0, ZBC_BTN_IEEE_LEN);
+            out->zb_ep    = 0;
+            out->zb_key   = 0;
+            out->gpio     = -1;
+            out->clear_s  = 0;
+            out->inverted = src == ZBC_BTN_SRC_GPIO;
+            out->pull     = src == ZBC_BTN_SRC_GPIO ? ZBC_PULL_UP : ZBC_PULL_NONE;
+            if (src == ZBC_BTN_SRC_SENSOR) {
+                /* Presses mean nothing to a sensor: it starts with no rules. */
+                out->clear_s = ZBC_SENSOR_CLEAR_DEFAULT_S;
+                memset(out->rule_count, 0, sizeof(out->rule_count));
+                memset(out->rules, 0, sizeof(out->rules));
             }
-        } else if (strcmp(source->valuestring, "gpio") == 0) {
-            if (out->src != ZBC_BTN_SRC_GPIO) {
-                out->src   = ZBC_BTN_SRC_GPIO;
-                out->gpio  = -1;
-                out->pull  = ZBC_PULL_UP;
-                out->inverted = true;
-                memset(out->ieee, 0, ZBC_BTN_IEEE_LEN);
-                out->zb_ep  = 0;
-                out->zb_key = 0;
-            }
-        } else {
-            return "source must be gpio or zigbee";
+            out->src = (uint8_t)src;
         }
     }
 
-    if (out->src == ZBC_BTN_SRC_ZIGBEE) {
+    if (out->src == ZBC_BTN_SRC_SENSOR) {
+        /* Both or neither, as for a remote's key. */
+        const cJSON *jieee = cJSON_GetObjectItem(json, "ieee");
+        const cJSON *jep   = cJSON_GetObjectItem(json, "ep");
+        if (jieee && cJSON_IsNull(jieee)) {
+            memset(out->ieee, 0, ZBC_BTN_IEEE_LEN);
+            out->zb_ep = 0;
+        } else if (jieee || jep) {
+            uint8_t ieee[ZBC_IEEE_LEN];
+            if (!cJSON_IsString(jieee) || !zbc_str_to_ieee(jieee->valuestring, ieee)) {
+                return "ieee has to be a 0x-prefixed 64-bit address";
+            }
+            if (!cJSON_IsNumber(jep) || jep->valueint < 1 || jep->valueint > 240) {
+                return "ep has to be an endpoint number";
+            }
+            zbc_device_t          dev;
+            const zbc_endpoint_t *e = device_db_get(ieee, &dev) ? lighting_find_endpoint(&dev, (uint8_t)jep->valueint)
+                                                                : NULL;
+            if (!e || !(e->features & ZBC_FEAT_MOTION)) {
+                return "that is not a paired motion sensor";
+            }
+            memcpy(out->ieee, ieee, ZBC_BTN_IEEE_LEN);
+            out->zb_ep = (uint8_t)jep->valueint;
+            if (button_db_sensor_taken(out->ieee, out->zb_ep, id)) {
+                return "another button already uses that sensor";
+            }
+        }
+        const cJSON *clear = cJSON_GetObjectItem(json, "clear_s");
+        if (clear) {
+            if (!cJSON_IsNumber(clear) || clear->valueint < ZBC_SENSOR_CLEAR_MIN_S ||
+                clear->valueint > ZBC_SENSOR_CLEAR_MAX_S) {
+                return "clear_s is the no-motion time in seconds, 30 to 3600";
+            }
+            out->clear_s = (uint16_t)clear->valueint;
+        }
+        out->gpio   = -1;
+        out->zb_key = 0;
+    } else if (out->src == ZBC_BTN_SRC_ZIGBEE) {
         /* All three arrive together or not at all: they are one identity, and
          * half of one would point at a key nobody ever pressed. */
         const cJSON *jieee = cJSON_GetObjectItem(json, "ieee");
@@ -2265,7 +2384,12 @@ static const char *button_from_json(const cJSON *json, zbc_button_t *out, uint16
         zbc_button_t was = *out;
         int          at  = 0;
         for (int e = 0; e < ZBC_EV_COUNT; e++) {
-            const cJSON *list = cJSON_GetObjectItem(events, EVENT_NAMES[e]);
+            const char  *ev_name = event_name(out->src, e);
+            const cJSON *list    = ev_name ? cJSON_GetObjectItem(events, ev_name) : NULL;
+            if (!ev_name) {
+                out->rule_count[e] = 0;     /* a sensor has no such event */
+                continue;
+            }
             if (!list) {
                 int n = 0;
                 const zbc_btn_rule_t *keep = button_db_rules(&was, e, &n);
@@ -2289,15 +2413,17 @@ static const char *button_from_json(const cJSON *json, zbc_button_t *out, uint16
             const cJSON *item   = NULL;
             cJSON_ArrayForEach(item, list) {
                 zbc_btn_rule_t *r   = &out->rules[at];
-                const char     *why = rule_from_json(item, r, out->rule_count[e] == 0);
+                const char     *why = rule_from_json(item, r, out->rule_count[e] == 0,
+                                                     out->src == ZBC_BTN_SRC_SENSOR);
                 if (why) {
                     return why;
                 }
                 if (!(r->flags & ZBC_RULE_AND)) {
                     sweeps = 0;
                 }
-                if (e == ZBC_EV_LONG && (r->action == ZBC_ACT_DIM_UP || r->action == ZBC_ACT_DIM_DOWN ||
-                                         r->action == ZBC_ACT_DIM_CYCLE) &&
+                if (out->src != ZBC_BTN_SRC_SENSOR && e == ZBC_EV_LONG &&
+                    (r->action == ZBC_ACT_DIM_UP || r->action == ZBC_ACT_DIM_DOWN ||
+                     r->action == ZBC_ACT_DIM_CYCLE) &&
                     ++sweeps > ZBC_BTN_MAX_SWEEPS) {
                     return "one long press can dim at most four rooms or lights";
                 }
@@ -2349,21 +2475,30 @@ static esp_err_t button_patch(httpd_req_t *req, uint16_t id)
     }
 
     /* Re-read the pins now rather than at the next reboot: someone changing a
-     * pin is almost certainly standing over the board with a wire in hand. */
+     * pin is almost certainly standing over the board with a wire in hand. And
+     * what the old rules left waiting goes: it may be a rule that is no more. */
+    buttons_forget_delayed(id);
     buttons_reload();
     return send_json(req, button_to_json(&b), "200 OK");
 }
 
-/* POST /api/buttons/{id}/test  {"event": "short"|"long"|"double"|"triple"} */
+/* POST /api/buttons/{id}/test  {"event": "short"|"long"|"double"|"triple"}, or
+ * "motion"|"clear" for a sensor */
 static esp_err_t button_test_post(httpd_req_t *req, uint16_t id)
 {
+    zbc_button_t b;
+    if (!button_db_get(id, &b)) {
+        return send_error(req, "404 Not Found", "unknown button");
+    }
+    const bool sensor = b.src == ZBC_BTN_SRC_SENSOR;
     cJSON *json = NULL;
     if (req->content_len > 0 && !(json = read_json_body(req))) {
         return ESP_FAIL;                   /* answered already; nothing is fired */
     }
     int ev = ZBC_EV_SHORT, hold_ms = 0;
     if (json) {
-        ev = name_index(EVENT_NAMES, ZBC_EV_COUNT, cJSON_GetObjectItem(json, "event"));
+        ev = sensor ? name_index(SENSOR_EVENT_NAMES, 2, cJSON_GetObjectItem(json, "event"))
+                    : name_index(EVENT_NAMES, ZBC_EV_COUNT, cJSON_GetObjectItem(json, "event"));
         /* How long to hold, for a long press. The sweep and the stop that ends
          * it are the whole of what a long press does, so a test that does not
          * hold tests none of it. */
@@ -2373,7 +2508,8 @@ static esp_err_t button_test_post(httpd_req_t *req, uint16_t id)
         }
         cJSON_Delete(json);
         if (ev < 0) {
-            return send_error(req, "400 Bad Request", "event must be short, long or double");
+            return send_error(req, "400 Bad Request", sensor ? "event must be motion or clear"
+                                                             : "event must be short, long, double or triple");
         }
     }
     esp_err_t err = buttons_fire(id, (zbc_btn_event_t)ev, hold_ms);
@@ -2419,6 +2555,7 @@ static esp_err_t button_dispatch(httpd_req_t *req)
         if (button_db_remove((uint16_t)id) == ESP_ERR_NOT_FOUND) {
             return send_error(req, "404 Not Found", "unknown button");
         }
+        buttons_forget_delayed((uint16_t)id);
         buttons_reload();                  /* hands the pin back */
         return send_ok(req, "200 OK");
     }

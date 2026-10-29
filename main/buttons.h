@@ -60,6 +60,8 @@ typedef enum {
     ZBC_EMIT_LONG_RELEASE,   /* the hold ended - stop the lamps where they are */
     ZBC_EMIT_DOUBLE,
     ZBC_EMIT_TRIPLE,         /* only ever from a remote that counted it itself */
+    ZBC_EMIT_MOTION,         /* a sensor: motion after a quiet room */
+    ZBC_EMIT_CLEAR,          /* a sensor: no motion for its clear_s */
 } zbc_btn_emit_t;
 
 typedef struct {
@@ -157,11 +159,28 @@ zbc_btn_emit_t zbtn_step(zbc_zbtn_fsm_t *st, zb_remote_ev_t ev, bool want_double
  * a Stop uses to end whichever key of that endpoint is holding. */
 void buttons_remote_event(const uint8_t ieee[8], uint8_t ep, uint8_t key, zb_remote_ev_t ev);
 
-/* Milliseconds since this Zigbee button last heard from its remote, or -1 when
- * it is not one or has never been pressed. The GPIO equivalent is
- * buttons_pin_state: both exist so the UI can tell "mis-configured" from
- * "nobody has touched it". */
+/* An occupancy report from a motion sensor, delivered by zb_coordinator in the
+ * Zigbee task (zb_sensor_cb_t). Same contract as buttons_remote_event. */
+void buttons_sensor_event(const uint8_t ieee[8], uint8_t ep, bool occupied, bool reports_clear);
+
+/* Milliseconds since this Zigbee button last heard from its remote, or this
+ * sensor from its sensor, or -1 when it is neither or has heard nothing. The
+ * GPIO equivalent is buttons_pin_state: both exist so the UI can tell
+ * "mis-configured" from "nobody has touched it". */
 int64_t buttons_last_event_ms(uint16_t id);
+
+/* A sensor's state as its rules see it: `occupied` once motion has run its
+ * rules and the no-motion ones are still to come, and the milliseconds until
+ * those are due (-1 when none are). False when the button is not a sensor. */
+bool buttons_sensor_state(uint16_t id, bool *occupied, int64_t *clear_in_ms);
+
+/* The button's actions still waiting out their delays: how many, and the
+ * milliseconds until the first. False when there are none. */
+bool buttons_delayed(uint16_t id, int *count, int64_t *next_ms);
+
+/* Drops the button's waiting actions: it was changed or deleted, and what it
+ * scheduled belongs to rules that may no longer exist. */
+void buttons_forget_delayed(uint16_t id);
 
 /* Starts the sampler and the task that runs the actions. Safe to call before
  * Zigbee is up: the pins are read either way, so wiring can be checked from the
@@ -177,7 +196,9 @@ void buttons_reload(void);
  * button has no pin yet. */
 bool buttons_pin_state(uint16_t id, bool *pressed, int *level);
 
-/* Runs a gesture as though it had been pressed, for the UI's Test button.
+/* Runs a gesture as though it had been pressed, for the UI's Test button. A
+ * sensor's ZBC_EV_MOTION or ZBC_EV_CLEAR runs that event's rules and leaves what
+ * the sensor last reported alone.
  *
  * A long press is simulated by holding the pin down for `hold_ms` rather than by
  * posting the event, so the whole real path runs - debounce, the hold threshold,

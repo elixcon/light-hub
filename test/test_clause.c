@@ -18,8 +18,13 @@
 #define ZBC_RULE_AND 0x01
 
 typedef enum {
-    ZBC_COND_ALWAYS = 0, ZBC_COND_OFF, ZBC_COND_ON, ZBC_COND_BELOW, ZBC_COND_ABOVE,
+    ZBC_COND_ALWAYS = 0, ZBC_COND_OFF, ZBC_COND_ON, ZBC_COND_BELOW, ZBC_COND_ABOVE, ZBC_COND_SUN_DOWN,
 } zbc_btn_cond_t;
+
+static bool zbc_cond_needs_target(uint8_t cond)
+{
+    return cond != ZBC_COND_ALWAYS && cond != ZBC_COND_SUN_DOWN;
+}
 
 typedef enum {
     ZBC_ACT_NONE = 0, ZBC_ACT_ON, ZBC_ACT_OFF, ZBC_ACT_TOGGLE,
@@ -32,6 +37,7 @@ typedef struct {
     uint16_t group_id;
     uint8_t  cond, cond_arg, action, action_arg, flags, ep;
     uint8_t  ieee[8];
+    uint16_t delay_s;
 } zbc_btn_rule_t;
 
 static bool button_db_rule_assigned(const zbc_btn_rule_t *r) { return r->ep != 0 || r->group_id != 0; }
@@ -40,18 +46,22 @@ static bool button_db_rule_assigned(const zbc_btn_rule_t *r) { return r->ep != 0
 
 /* ---- the lamps, stubbed ---- */
 
-/* Rooms 1-7; which are lit decides every condition here. */
+/* Rooms 1-7; which are lit decides every condition here, and the sun the one
+ * that is asked of no room. */
 static bool s_lit[8];
+static bool s_day;
 static int  s_asked;
 
-/* A condition: "on" and "off" against the room's state, everything else holds. */
+/* A condition: "on" and "off" against the room's state, the sun against the
+ * time of day, everything else holds. */
 static bool holds(const zbc_btn_rule_t *r)
 {
     s_asked++;
     switch (r->cond) {
-    case ZBC_COND_ON:  return s_lit[r->group_id];
-    case ZBC_COND_OFF: return !s_lit[r->group_id];
-    default:           return true;
+    case ZBC_COND_ON:       return s_lit[r->group_id];
+    case ZBC_COND_OFF:      return !s_lit[r->group_id];
+    case ZBC_COND_SUN_DOWN: return !s_day;
+    default:                return true;
     }
 }
 
@@ -77,6 +87,7 @@ static zbc_btn_rule_t rule(int room, uint8_t cond, uint8_t action, bool joined)
 static void reset(void)
 {
     memset(s_lit, 0, sizeof(s_lit));
+    s_day   = false;
     s_asked = 0;
 }
 
@@ -178,6 +189,23 @@ static void test_a_state_condition_needs_a_target(void)
     ok(s_asked == 0, "and nothing is asked about a target that is not there");
 }
 
+/* The sun is asked of no room, so a sun case whose head names nothing - its
+ * room deleted, or only "and" rules doing the work - is still decided by it. */
+static void test_the_sun_needs_no_target(void)
+{
+    reset();
+    const zbc_btn_rule_t r[] = {
+        rule(0, ZBC_COND_SUN_DOWN, ZBC_ACT_ON, false),
+        rule(2, ZBC_COND_ALWAYS, ZBC_ACT_ON, true),
+        rule(2, ZBC_COND_ALWAYS, ZBC_ACT_SET, false),
+    };
+    int end = -1;
+    ok(pick_case(r, 3, holds, &end) == 0 && end == 2, "night: the sun case, though its head has no room");
+    ok(s_asked == 1, "and the sun was asked");
+    s_day = true;
+    ok(pick_case(r, 3, holds, &end) == 2 && end == 3, "day: the otherwise case");
+}
+
 /* Nothing holds: nothing runs. */
 static void test_nothing_holds(void)
 {
@@ -239,6 +267,19 @@ static void test_an_unassigned_toggle_does_not_count(void)
     ok(case_toggle(r, 2, lit) == ZB_ONOFF_TOGGLE, "one real toggle is still one");
 }
 
+/* A toggle that waits is not one of the case's toggles: by the time it runs
+ * the others have been switched, so it decides from its own target then. */
+static void test_a_waiting_toggle_is_not_decided_with_the_rest(void)
+{
+    reset();
+    s_lit[2] = true;
+    zbc_btn_rule_t r[] = { rule(1, ZBC_COND_ALWAYS, ZBC_ACT_TOGGLE, false),
+                           rule(2, ZBC_COND_ALWAYS, ZBC_ACT_TOGGLE, true) };
+    r[1].delay_s = 60;
+    ok(case_toggle(r, 2, lit) == ZB_ONOFF_TOGGLE, "one toggle now: left to its room");
+    ok(s_asked == 0, "and the lit room that waits is not asked");
+}
+
 /* Only the toggles' own targets decide: a lit room turned on beside them does
  * not make the toggles go off. */
 static void test_only_the_toggles_targets_decide(void)
@@ -260,12 +301,14 @@ int main(void)
     test_a_dead_case_is_passed_over();
     test_an_always_head_without_a_target_still_runs_its_case();
     test_a_state_condition_needs_a_target();
+    test_the_sun_needs_no_target();
     test_nothing_holds();
     test_a_case_ends_at_the_next_head();
     test_one_toggle_is_left_to_its_target();
     test_toggles_are_decided_together();
     test_an_unassigned_toggle_does_not_count();
     test_only_the_toggles_targets_decide();
+    test_a_waiting_toggle_is_not_decided_with_the_rest();
     printf("all %d checks passed\n", s_checks);
     return 0;
 }

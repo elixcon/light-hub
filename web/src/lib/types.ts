@@ -3,7 +3,7 @@
 
 import type { MixCurvesJson } from "./mix.ts";
 
-export type Feature = "onoff" | "brightness" | "color_temp" | "color" | "switch" | "hue_buttons";
+export type Feature = "onoff" | "brightness" | "color_temp" | "color" | "switch" | "hue_buttons" | "motion";
 
 export interface Endpoint {
   ep: number;
@@ -19,6 +19,9 @@ export interface Endpoint {
   color_mode: "color_temp" | "color" | null;
   curves: { level: boolean; chroma: boolean };
   input_pct: number | null;
+  /* A motion sensor: whether it has been heard saying "unoccupied" itself,
+   * which decides what its no-motion time is counted from. */
+  reports_clear?: boolean;
 }
 
 /* An end device's parent, from the coordinator's own neighbour table
@@ -184,7 +187,9 @@ export interface Group {
 }
 
 export type Gesture = "short" | "long" | "double" | "triple";
-export type When = "always" | "off" | "on" | "below" | "above";
+/* A motion sensor's two events, where a button has gestures. */
+export type SensorEvent = "motion" | "clear";
+export type When = "always" | "off" | "on" | "below" | "above" | "sun_down";
 export type Action = "none" | "on" | "off" | "toggle" | "set" | "dim_up" | "dim_down" | "dim_cycle" | "adaptive";
 export type Pull = "none" | "up" | "down";
 /* A push button springs back; a switch stays put, and every flip is one short press. */
@@ -202,12 +207,16 @@ export interface Rule {
   arg: number;
   do: Action;
   value: number;
+  /* Seconds after the event; 0 or absent runs it at once. */
+  delay?: number;
 }
+
+export type ButtonSource = "gpio" | "zigbee" | "sensor";
 
 export interface ButtonDef {
   id: number;
   name: string;
-  source: "gpio" | "zigbee";
+  source: ButtonSource;
   ieee: string | null;
   ep: number | null;
   key: number | null;
@@ -218,7 +227,16 @@ export interface ButtonDef {
   pressed: boolean | null;
   level: number | null;
   last_event_ms: number | null;
-  events: Record<Gesture, Rule[]>;
+  /* A sensor's events are "motion" and "clear"; everything else has gestures. */
+  events: Partial<Record<Gesture | SensorEvent, Rule[]>>;
+  /* A sensor: its no-motion time; whether motion has run its rules and the
+   * no-motion ones are still to come (null until heard since the start); and
+   * how long until they are due. */
+  clear_s?: number;
+  occupied?: boolean | null;
+  clear_in_ms?: number | null;
+  /* What the button's last event left waiting. */
+  delayed?: { count: number; next_ms: number } | null;
 }
 
 export interface RemoteEvent {

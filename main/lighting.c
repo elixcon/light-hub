@@ -2848,6 +2848,18 @@ bool lighting_al_day(uint16_t group_id, int64_t utc_s, zbc_sun_day_t *real, zbc_
     return al_day(utc_s, &prof, real, used);
 }
 
+bool lighting_sun_is_down(bool *down)
+{
+    int32_t       lat, lon;
+    zbc_sun_day_t day;
+    const int64_t now = time(NULL);
+    if (!al_clock_ok() || !settings_location(&lat, &lon) || !zbc_sun_day(now, lat / 1e6, lon / 1e6, &day)) {
+        return false;
+    }
+    *down = zbc_sun_phase(now, &day) < 0;
+    return true;
+}
+
 esp_err_t lighting_group_set_adaptive_day(uint16_t group_id, const zbc_al_profile_t *day)
 {
     if (!group_db_get(group_id, NULL)) {

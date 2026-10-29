@@ -16,7 +16,22 @@ export const MAX_SWEEPS = 4;
 /* The condition carries the word "when" so a row reads as one sentence:
  * "When under 30 %  ·  Kitchen  ·  Set to 80 %". */
 export const WHENS: [When, string][] = [["always", "Always"], ["off", "When off"], ["on", "When on"],
-  ["below", "When under"], ["above", "When over"]];
+  ["below", "When under"], ["above", "When over"], ["sun_down", "When the sun is down"]];
+/* Conditions asked of the rule's own room or light; the sun is asked of none. */
+export const whenNeedsTarget = (w: When) => w !== "always" && w !== "sun_down";
+
+/* How long a rule can wait, as offered; any other number of seconds the API
+ * holds shows as itself. "at once" is 0. Mirrors delay_s in button_db.h. */
+export const DELAYS = [0, 30, 60, 120, 300, 600, 900, 1800, 3600];
+export const MAX_DELAY_S = 65535;
+
+/* 90 → "1 min 30 s", 3600 → "1 h". */
+export function delayLabel(s: number): string {
+  if (s < 60) return `${s} s`;
+  if (s < 3600) return s % 60 ? `${Math.floor(s / 60)} min ${s % 60} s` : `${s / 60} min`;
+  const m = Math.round((s % 3600) / 60);
+  return m ? `${Math.floor(s / 3600)} h ${m} min` : `${Math.floor(s / 3600)} h`;
+}
 export const ACTIONS: [Action, string][] = [["none", "Do nothing"], ["toggle", "Toggle"], ["on", "Turn on"],
   ["off", "Turn off"], ["set", "Set to"], ["dim_cycle", "Dim, reversing"],
   ["dim_up", "Dim brighter"], ["dim_down", "Dim dimmer"], ["adaptive", "Adaptive Lighting"]];
@@ -41,7 +56,10 @@ export const keyLabel = (k: number | null | undefined) =>
 export const isDimAction = (a: Action) => a === "dim_up" || a === "dim_down" || a === "dim_cycle";
 export const takesValue = (a: Action) => a === "set" || isDimAction(a);
 
-export const blankRule = (): Rule => ({ group: 0, ieee: null, ep: null, and: false, when: "always", arg: 30, do: "none", value: 60 });
+export const blankRule = (): Rule => ({ group: 0, ieee: null, ep: null, and: false, when: "always", arg: 30, do: "none", value: 60, delay: 0 });
+
+/* A dim moves while a button is held, so it never waits. */
+export const canWait = (a: Action) => a !== "none" && !isDimAction(a);
 
 /* One light a rule can act on: every endpoint that switches and is not a
  * remote's, as a room's member list offers them. `k` is its key in a select. */
@@ -83,6 +101,11 @@ export function targetName(r: Rule, groups: Group[], devices: Device[]): string 
  * "and"; `lead` capitalises it. A text that starts with a name is left as the
  * name was typed. */
 function actionText(r: Rule, groups: Group[], devices: Device[], lead: boolean): string | null {
+  const a = bareActionText(r, groups, devices, lead);
+  return a && r.delay ? `${a} after ${delayLabel(r.delay)}` : a;
+}
+
+function bareActionText(r: Rule, groups: Group[], devices: Device[], lead: boolean): string | null {
   const name = targetName(r, groups, devices);
   const g = isLightRule(r) ? null : groups.find((x) => x.id === r.group);
   const verb = (s: string) => (lead ? s[0].toUpperCase() + s.slice(1) : s);
@@ -110,6 +133,7 @@ function condText(r: Rule, subject: string | null): string {
     case "above": return subject ? ` when ${subject} is over ${r.arg} %` : ` when over ${r.arg} %`;
     case "on": return ` while ${it} is on`;
     case "off": return ` while ${it} is off`;
+    case "sun_down": return " while the sun is down";
     default: return "";
   }
 }
@@ -176,6 +200,7 @@ export function cleanRules(rules: Rule[]): Rule[] {
       /* A joined rule's condition is not read; saved as what it means. */
       when: row.and ? "always" : row.when, arg: row.and ? 0 : row.arg | 0,
       do: row.do, value: row.value | 0,
+      delay: canWait(row.do) ? Math.max(0, Math.min(MAX_DELAY_S, (row.delay ?? 0) | 0)) : 0,
     });
   });
   return out;
@@ -185,7 +210,7 @@ export function cleanRules(rules: Rule[]): Rule[] {
  * row, filled in or not, except the one empty row a gesture with nothing on it
  * shows. Counted this way so the page stops offering rows before the pool is
  * full, not after somebody has filled them in. */
-export const rowsUsed = (events: Partial<Record<Gesture, Rule[]>>) =>
+export const rowsUsed = (events: Partial<Record<string, Rule[]>>) =>
   Object.values(events).reduce((n, rules) => {
     const rows = rules || [];
     const empty = rows.length === 1 && !hasTarget(rows[0]) && rows[0].do === "none";

@@ -45,7 +45,9 @@ device that has stopped answering gets `503`.
 Each endpoint in `/api/devices` has a `features` list (`onoff`, `brightness`, `color_temp`, `color`)
 and the lamp's physical `min_kelvin` and `max_kelvin`, so a client never has to guess what a light
 can do. With a level curve active, bind a slider to `input_pct`, not `brightness_pct` (see [Response
-curves](lighting.md#setting-curves-from-a-script)).
+curves](lighting.md#setting-curves-from-a-script)). A remote's endpoint has `switch` and a motion
+sensor's `motion`, with `reports_clear` saying whether the sensor reports the end of motion itself
+(see [motion sensors](buttons-and-remotes.md#motion-sensors)).
 
 A group's `on` comes from its lights, so a light switched elsewhere still shows. Its
 `brightness_pct` is the value the group was last set to, because lamps settle a percent or two apart
@@ -82,7 +84,7 @@ those are only on `/api/status`.
 | `POST` | `/api/devices/{ieee}/ep/{ep}/color_temp` | `{"kelvin":2700}` |
 | `POST` | `/api/devices/{ieee}/ep/{ep}/color` | `{"hue":280,"sat":90}`: degrees and percent |
 | `PATCH` | `/api/devices/{ieee}` | `{"name":"Desk lamp"}` |
-| `DELETE` | `/api/devices/{ieee}` | asks a lamp to leave and forgets the device (a sleepy remote is only forgotten); a wired light gives its pin back; a Matter lamp is forgotten, and its device is told to forget the coordinator (RemoveFabric) when it was the device's last lamp |
+| `DELETE` | `/api/devices/{ieee}` | asks a lamp to leave and forgets the device (a sleepy remote or sensor is only forgotten); a wired light gives its pin back; a Matter lamp is forgotten, and its device is told to forget the coordinator (RemoveFabric) when it was the device's last lamp |
 | `GET` | `/api/devices/{ieee}/ep/{ep}/curves` | this light's response curves |
 | `POST` | `/api/devices/{ieee}/ep/{ep}/curves` | replaces them: `level` points, `chroma` stops; a `null` member clears that part |
 | `DELETE` | `/api/devices/{ieee}/ep/{ep}/curves` | back to passing the brightness straight through |
@@ -112,11 +114,11 @@ Rooms are called groups in the API.
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/api/remotes` | the last few presses from any paired remote, for learning which key a button means, and the last decoded command `frames` |
-| `GET` | `/api/buttons` | every button, its source, its rules and its live pin reading |
+| `GET` | `/api/buttons` | every button, its source, its rules and its live pin reading; each rule's `delay` in seconds; `delayed` (`count`, `next_ms`, or `null`) for what its last event left waiting; a sensor's `clear_s`, `occupied` (null until heard since the start) and `clear_in_ms` |
 | `POST` | `/api/buttons` | `{"name":"Kitchen switch"}` creates one, answers with its id |
-| `PATCH` | `/api/buttons/{id}` | replaces the whole record: name, source and every gesture |
+| `PATCH` | `/api/buttons/{id}` | replaces the whole record: name, source (`gpio`, `zigbee` or `sensor`) and every gesture, or a sensor's `motion` and `clear` and its `clear_s` (30-3600); drops what the button had waiting (see [delayed actions](buttons-and-remotes.md#delayed-actions)) |
 | `DELETE` | `/api/buttons/{id}` | deletes it and gives the pin back |
-| `POST` | `/api/buttons/{id}/test` | `{"event":"short"\|"long"\|"double"\|"triple"}` runs a gesture with no finger on the pin; a long press takes `hold_ms` |
+| `POST` | `/api/buttons/{id}/test` | `{"event":"short"\|"long"\|"double"\|"triple"}` runs a gesture with no finger on the pin; a long press takes `hold_ms`. A sensor takes `"motion"\|"clear"`, which runs those rules and leaves the sensor's state alone |
 
 ## Settings and system
 

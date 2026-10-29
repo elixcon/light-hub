@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { cleanRules, eventText, rowsUsed, blankRule, lightChoices } from "../src/lib/buttons.ts";
-import type { Device, Group, Rule } from "../src/lib/types.ts";
+import { cleanRules, eventText, rowsUsed, blankRule, lightChoices, delayLabel } from "../src/lib/buttons.ts";
+import { sensorCards, sensorState } from "../src/lib/sensors.ts";
+import type { ButtonDef, Device, Group, Rule } from "../src/lib/types.ts";
 
 const groups = [{ id: 1, name: "Kitchen" }, { id: 2, name: "Hall" }] as unknown as Group[];
 const devices = [
@@ -24,8 +25,8 @@ test("a remote's endpoint is not a light to pick", () => {
 
 test("cleanRules sends a room or a light, never both", () => {
   const out = cleanRules([room(1), lamp({ and: true, group: 7 })]);
-  assert.deepEqual(out[0], { group: 1, ieee: null, ep: null, and: false, when: "always", arg: 30, do: "toggle", value: 60 });
-  assert.deepEqual(out[1], { group: 0, ieee: "0x0011223344556677", ep: 11, and: true, when: "always", arg: 0, do: "toggle", value: 60 });
+  assert.deepEqual(out[0], { group: 1, ieee: null, ep: null, and: false, when: "always", arg: 30, do: "toggle", value: 60, delay: 0 });
+  assert.deepEqual(out[1], { group: 0, ieee: "0x0011223344556677", ep: 11, and: true, when: "always", arg: 0, do: "toggle", value: 60, delay: 0 });
 });
 
 test("cleanRules drops rows with nothing to act on", () => {
@@ -89,4 +90,51 @@ test("eventText names what is gone", () => {
 
 test("rowsUsed counts every row but a gesture's one empty row", () => {
   assert.equal(rowsUsed({ short: [blankRule()], long: [room(1), { ...blankRule(), and: true }] }), 2);
+});
+
+test("a rule that waits says so, and a dim never waits", () => {
+  assert.equal(eventText([room(1, { do: "on" }), room(1, { and: true, do: "off", delay: 600 })], groups, devices),
+    "Turn on Kitchen and turn off Kitchen after 10 min");
+  const out = cleanRules([room(1, { do: "off", delay: 90 }), room(2, { do: "dim_up", value: 6, delay: 30 })]);
+  assert.equal(out[0].delay, 90);
+  assert.equal(out[1].delay, 0, "a dim is sent without its delay");
+  assert.equal(cleanRules([room(1, { delay: 99999 })])[0].delay, 65535, "and none past what the coordinator stores");
+});
+
+test("delays read as minutes and hours", () => {
+  assert.equal(delayLabel(30), "30 s");
+  assert.equal(delayLabel(90), "1 min 30 s");
+  assert.equal(delayLabel(600), "10 min");
+  assert.equal(delayLabel(3600), "1 h");
+  assert.equal(delayLabel(5400), "1 h 30 min");
+});
+
+test("the sun is a condition of the case", () => {
+  assert.equal(eventText([room(1, { do: "on", when: "sun_down" }), room(1, { do: "set", value: 30 })], groups, devices),
+    "Turn on Kitchen while the sun is down, otherwise Kitchen to 30 %");
+});
+
+test("one card per sensor endpoint, with its record or none", () => {
+  const sensors = [
+    { ieee: "0x00158d00014dc9e0", name: "Hall motion", endpoints: [{ ep: 1, features: ["motion"] }] },
+    { ieee: "0x0017880106a1b2c3", name: "Hue motion", endpoints: [{ ep: 1, features: ["switch"] }, { ep: 2, features: ["motion"] }] },
+    ...devices,
+  ] as unknown as Device[];
+  const rec = (id: number, ieee: string, ep: number) =>
+    ({ id, source: "sensor", ieee, ep, events: { motion: [], clear: [] } }) as unknown as ButtonDef;
+  const cards = sensorCards(sensors, [rec(1, "0x00158d00014dc9e0", 1), rec(2, "0x0000000000000001", 1),
+    { id: 3, source: "zigbee", ieee: "0x8899AABBCCDDEEFF", ep: 1 } as unknown as ButtonDef]);
+  assert.equal(cards.length, 3, "two sensors and a record whose sensor is gone; the remote's button is not one");
+  assert.equal(cards[0].button?.id, 1);
+  assert.equal(cards[1].ep, 2, "the Hue's motion endpoint, not its remote one");
+  assert.equal(cards[1].button, null);
+  assert.equal(cards[2].device, null);
+});
+
+test("a sensor's state counts down between polls", () => {
+  const b = { occupied: true, clear_in_ms: 80000 } as unknown as ButtonDef;
+  assert.equal(sensorState(b), "Motion · no-motion rules in 1:20");
+  assert.equal(sensorState(b, 20000), "Motion · no-motion rules in 1:00");
+  assert.equal(sensorState({ occupied: false, clear_in_ms: null } as unknown as ButtonDef), "No motion");
+  assert.equal(sensorState({ occupied: null, clear_in_ms: 5000 } as unknown as ButtonDef), "Not heard since the coordinator started · no-motion rules in 0:05");
 });

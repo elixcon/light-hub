@@ -60,7 +60,13 @@ const remoteEp = (ep, device_id) => ({ ep, device_id, features: ["switch"], on: 
 devices.push({ ieee: "0x00178801086a4064", short_addr: 0x938b, name: "Hallway dimmer", manufacturer: "Philips", model: "RWL021", online: true, last_seen_s_ago: 600, lqa: null,
   endpoints: [remoteEp(1, 0x0830), remoteEp(2, 0x000c)],
   ota: { ep: null, manufacturer_code: null, image_type: null, file_version: null, hw_version: null, queried_s_ago: null } });
-const sleepy = (d) => d.endpoints.every((e) => e.features.includes("switch"));
+/* Two motion sensors: a Xiaomi set up on the living room, a Hue not yet. */
+const sensorEp = (ep, reports_clear) => ({ ...remoteEp(ep, 0x0107), features: ["motion"], reports_clear });
+devices.push({ ieee: "0x00158d00014dc9e0", short_addr: 0x1386, name: "Hall motion", manufacturer: "", model: "lumi.sensor_motion", online: true, last_seen_s_ago: 40, lqa: null,
+  endpoints: [sensorEp(1, false)], ota: null });
+devices.push({ ieee: "0x0017880106a1b2c3", short_addr: 0x4411, name: "Hue motion sensor", manufacturer: "Signify Netherlands B.V.", model: "SML001", online: true, last_seen_s_ago: 300, lqa: null,
+  endpoints: [sensorEp(2, true)], ota: null });
+const sleepy = (d) => d.endpoints.every((e) => e.features.includes("switch") || e.features.includes("motion"));
 devices.push(wired(1, "Porch lamp", 4));
 devices.push(Object.assign(wired(2, "Desk strip", 18), { kind: "cwww", gpio_warm: 19, pwm_hz: 9765, pwm_phase: 0 }));
 refreshWired(devices[devices.length - 1]);
@@ -80,6 +86,10 @@ const buttons = [
     events: { short: [{ group: 1, when: "always", arg: 30, do: "toggle", value: 60 }], long: [{ group: 1, when: "always", arg: 30, do: "dim_cycle", value: 6 }], double: [{ group: 1, when: "below", arg: 30, do: "set", value: 80 }, { group: 1, when: "always", arg: 30, do: "set", value: 30 }] } },
   { id: 2, name: "Hue button", source: "zigbee", ieee: devices[3].ieee, ep: 1, key: 0, gpio: null, inverted: false, pull: "none", pressed: null, level: null, last_event_ms: 45000,
     events: { short: [{ group: 1, when: "always", arg: 30, do: "toggle", value: 60 }], long: [], double: [] } },
+  { id: 3, name: "Hall motion", source: "sensor", ieee: "0x00158d00014dc9e0", ep: 1, key: null, gpio: null, inverted: false, pull: "none", pressed: null, level: null, last_event_ms: 40000,
+    clear_s: 120, occupied: true, clear_in_ms: 80000, delayed: null,
+    events: { motion: [{ group: 1, when: "sun_down", arg: 0, do: "on", value: 60, delay: 0 }],
+      clear: [{ group: 1, when: "always", arg: 0, do: "set", value: 20, delay: 0 }, { group: 1, and: true, when: "always", arg: 0, do: "off", value: 60, delay: 60 }] } },
 ];
 const curves = {
   [`${devices[0].ieee}/11`]: { level: { points: [[1, 1], [25, 6], [50, 20], [75, 50], [100, 100]] }, chroma: { stops: [{ at: 1, hue: 12, sat: 90 }, { at: 35, kelvin: 2200 }, { at: 100, kelvin: 5000 }] } },
@@ -314,8 +324,17 @@ http.createServer(async (req, res) => {
   if (p[0] === "api" && p[1] === "buttons") {
     if (!p[2] && m === "POST") { const b = { id: buttons.length + 1, name: (await body(req)).name, source: "gpio", ieee: null, ep: null, key: null, gpio: null, inverted: true, pull: "up", pressed: null, level: null, last_event_ms: null, events: { short: [], long: [], double: [], triple: [] } }; buttons.push(b); return json(res, 201, b); }
     const b = buttons.find((x) => x.id === Number(p[2])); if (!b) return json(res, 404, { error: "no such button" });
-    if (p[3] === "test") { return json(res, 202, { ok: true }); }
-    if (m === "PATCH") { Object.assign(b, await body(req)); return json(res, 200, { ok: true }); }
+    if (p[3] === "test") {
+      /* A sensor's rules that wait show as waiting, so the page's countdown has something to count. */
+      const ev = (await body(req)).event, waits = (b.events[ev] || []).filter((r) => r.delay);
+      if (b.source === "sensor") b.delayed = waits.length ? { count: waits.length, next_ms: Math.min(...waits.map((r) => r.delay)) * 1000 } : null;
+      return json(res, 202, { ok: true });
+    }
+    if (m === "PATCH") {
+      const patch = await body(req);
+      if (patch.source === "sensor" && b.source !== "sensor") Object.assign(b, { key: null, gpio: null, clear_s: 120, occupied: null, clear_in_ms: 120000, delayed: null, events: { motion: [], clear: [] } });
+      Object.assign(b, patch); return json(res, 200, { ok: true });
+    }
     if (m === "DELETE") { buttons.splice(buttons.indexOf(b), 1); return json(res, 200, { ok: true }); }
   }
   if (u.pathname === "/api/zigbee/ota" && m === "GET") return json(res, 200, zotaStatus());

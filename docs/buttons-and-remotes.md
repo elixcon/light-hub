@@ -2,7 +2,8 @@
 
 A button has a source and a set of rules. The source is a pin on the board, with a push button or a
 wall switch on it, or one key of a paired Zigbee remote. The rules say what each gesture does to a
-room or a light.
+room or a light. A [motion sensor](#motion-sensors) is a button too, with motion and no motion in
+place of gestures.
 
 ## Pairing a remote
 
@@ -122,12 +123,56 @@ so one press can switch several things, and its own `when` is not read. Two or m
 that run together are decided together: if any of their targets is lit they all go off, and
 otherwise they all come on.
 
-`when` is one of `always`, `on`, `off`, `below` or `above`. The last two compare with `arg`, a
-percentage.
+`when` is one of `always`, `on`, `off`, `below`, `above` or `sun_down`. `below` and `above` compare
+with `arg`, a percentage. `sun_down` holds between sunset and sunrise at the location set for
+[Adaptive Lighting](lighting.md#adaptive-lighting), and needs no room or light. Without a location,
+or before the clock is set, it holds: a room is lit rather than left dark.
 
 `do` is one of `none`, `on`, `off`, `toggle`, `set`, `dim_up`, `dim_down`, `dim_cycle` or
 `adaptive`. `adaptive` (start [Adaptive Lighting](lighting.md#adaptive-lighting)) works on rooms
 only.
+
+## Delayed actions
+
+A rule's `delay` makes it wait that many seconds (up to 65535) after its event before it runs:
+"turn on the kitchen, and turn it off after 10 minutes". The other rules of the case run at once.
+The next event of the same button drops whatever it still has waiting, so a second press restarts
+the timer, and motion takes back an "off" that no motion scheduled. Saving or deleting the button
+drops them too, and so does a restart. A waiting `toggle` decides from its own target when it runs.
+A `dim_*` rule cannot wait: it only means something while the button is held.
+
+`/api/buttons` shows what a button has waiting as `delayed`: `count` and `next_ms`, or `null`.
+
+## Motion sensors
+
+A Zigbee sensor with the Occupancy Sensing cluster pairs like a remote and appears on the
+*Sensors* page: Xiaomi and Aqara (`lumi.sensor_motion`, `.aq2`), Philips Hue (SML00x), IKEA
+VALLHORN and others. IAS Zone sensors (most Sonoff and Tuya ones) are not supported yet. A sensor is
+set up by picking a room. That turns the room on with motion and off after two minutes without, and
+both can be changed from there.
+
+Its rules have two events, `motion` and `clear`. `motion` runs when the sensor reports motion in a
+quiet room; further reports only push the clear back. `clear` runs once nothing has moved for the
+sensor's `clear_s` (30 to 3600 seconds). Sensors disagree on how they say so:
+
+- A Xiaomi or Aqara sensor reports motion at most once a minute and never reports that it ended.
+  The time is counted from its last report, so anything under about two minutes can end while
+  somebody is still moving in the room.
+- A Hue or IKEA sensor reports the end of motion itself. The time is counted from that report. If it
+  is lost, the sensor's next periodic report (every five minutes) puts it right, and after 30 minutes
+  with no report at all the room is taken as clear anyway.
+
+The coordinator learns which kind a sensor is from the first "unoccupied" it hears, and keeps that
+(`reports_clear` on the endpoint in `/api/devices`).
+
+After a restart a sensor's `clear` rules run once, `clear_s` after the start, unless something moves
+first (which runs its `motion` rules as usual). A room the sensor lit before the restart therefore
+still goes dark.
+
+A sensor's rules never dim. Its `clear` rules always run when the time is up, even if somebody
+switched the room by hand in the meantime: a condition such as `"when":"on"` is the way to limit
+them. `/api/buttons` shows a sensor with `occupied` (null until it has been heard since the start)
+and `clear_in_ms`.
 
 ## Holding a button
 
@@ -150,8 +195,9 @@ default, 20 s at most), so the sweep and the stop that ends it run for real.
 
 ## Setting buttons up from a script
 
-A button's `source` is `"gpio"` or `"zigbee"`. A pin button has `gpio`, `pull` and `inverted`; a
-Zigbee one has `ieee`, `ep` and `key` instead. `PATCH /api/buttons/{id}` replaces the whole record.
+A button's `source` is `"gpio"`, `"zigbee"` or `"sensor"`. A pin button has `gpio`, `pull` and
+`inverted`; a Zigbee one has `ieee`, `ep` and `key` instead, and a sensor `ieee`, `ep` and `clear_s`.
+`PATCH /api/buttons/{id}` replaces the whole record.
 
 ```sh
 # a button on the board's own BOOT button: toggle on a click, hold to dim, and
@@ -176,6 +222,16 @@ curl -X PATCH http://zigbee.local/api/buttons/1 -d '{
               {"ieee":"0x00124b0001abcdef","ep":1,"and":true,"do":"off"}],
     "long":  [{"group":1,"when":"always","do":"dim_cycle","value":6},
               {"ieee":"0x00124b0001abcdef","ep":1,"and":true,"do":"dim_cycle","value":6}]}}'
+
+# a motion sensor: the hall on with motion after dark; after three minutes
+# without, down to 20 %, and off a minute later unless something moves
+curl -X POST http://zigbee.local/api/buttons -d '{"name":"Hall motion"}'
+curl -X PATCH http://zigbee.local/api/buttons/2 -d '{
+  "source": "sensor", "ieee": "0x00158d00014dc9e0", "ep": 1, "clear_s": 180,
+  "events": {
+    "motion": [{"group":2,"when":"sun_down","do":"on"}],
+    "clear":  [{"group":2,"when":"on","do":"set","value":20},
+               {"group":2,"and":true,"do":"off","delay":60}]}}'
 ```
 
 The button routes are listed in the [REST API reference](api.md#buttons-and-remotes).

@@ -12,17 +12,18 @@
 	import { navigate } from "$lib/router.svelte.ts";
 	import { stateLabel } from "$lib/format.ts";
 	import { lightColour, lampAttrs } from "$lib/glow.ts";
+	import { isSensorEp } from "$lib/sensors.ts";
 
 	/* A device that arrived while the page was open is "just joined" until the
 	 * page is next loaded; the poll fills the set on its first pass. */
 	const isNew = (ieee: string) => !app.firstLoad && !seenIeee.has(ieee);
 	let matterOpen = $state(false);
 
-	/* Remotes have a page of their own; here they would only be cards with
-	 * nothing to switch. A device still being interrogated has no endpoints yet
-	 * and is kept, because nobody knows yet whether it is a remote. */
+	/* Remotes and sensors have pages of their own; here they would only be
+	 * cards with nothing to switch. A device still being interrogated has no
+	 * endpoints yet and is kept, because nobody knows yet what it is. */
 	const lights = $derived(data.devices
-		.map((d) => ({ ...d, endpoints: d.endpoints.filter((e) => !isRemoteEp(e)) }))
+		.map((d) => ({ ...d, endpoints: d.endpoints.filter((e) => !isRemoteEp(e) && !isSensorEp(e)) }))
 		.filter((d, i) => d.endpoints.length || !data.devices[i].endpoints.length));
 </script>
 

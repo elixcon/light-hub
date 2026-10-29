@@ -398,6 +398,185 @@ static zbc_unlock_t unlock_level(zbc_unlock_fsm_t *st, int level, bool inverted,
 
 /* >>> end host-test region: unlock <<< */
 
+/* ------------------------------------------------------------ the motion machine */
+
+/* What a motion sensor's reports mean for its rules. Sensors disagree on what
+ * they send: a Xiaomi or Aqara reports "occupied" at most once a minute while
+ * there is motion and never reports the end of it, and a Hue or an IKEA
+ * VALLHORN reports "occupied" once and "unoccupied" when its own timer runs
+ * out. So the no-motion time is counted from the last motion for the first
+ * kind and from the sensor's own "unoccupied" for the second, which
+ * zb_coordinator learns from the first one it hears (`reports_clear`).
+ *
+ * Pure: a report or a tick and a timestamp in, an event out. Extracted by
+ * `test/Makefile` into test_motion.c, because a mistake here shows on hardware
+ * as a room that goes dark with somebody in it, or never does. */
+/* >>> host-test region: motion <<< */
+
+/* How long a sensor that reports the end of motion can go without saying
+ * anything at all before it is taken as clear anyway: its "unoccupied" was
+ * lost. A sensor configured to report repeats its value every five minutes
+ * (ZBC_REPORT_MAX_INTERVAL_S in zb_coordinator.c), so one in a room somebody is
+ * moving in is heard long before this. */
+#define ZBC_MOTION_BACKSTOP_US (30LL * 60 * 1000 * 1000)
+
+typedef struct {
+    uint8_t occupied;    /* motion ran its rules, and the no-motion ones are still due */
+    int64_t clear_at;    /* when they are; 0 when nothing is due */
+} zbc_motion_fsm_t;
+
+/* A sensor's button as it is first loaded - at boot, or when it is set up:
+ * clear, with the no-motion rules due a hold from now. A room the sensor lit
+ * before a restart then goes dark if nobody moves, as it would have without the
+ * restart; motion before then runs the motion rules as usual. */
+static void motion_start(zbc_motion_fsm_t *st, int64_t hold_us, int64_t now)
+{
+    st->occupied = 0;
+    st->clear_at = now + hold_us;
+}
+
+/* One report (1 occupied, 0 unoccupied) or one tick of the sampler (-1).
+ * MOTION for the first motion after a clear; repeats of it only push the clear
+ * back. CLEAR, once, when the hold has run out. */
+static zbc_btn_emit_t motion_step(zbc_motion_fsm_t *st, int report, bool reports_clear,
+                                  int64_t hold_us, int64_t now)
+{
+    if (report > 0) {
+        const bool fresh = !st->occupied;
+        st->occupied = 1;
+        st->clear_at = now + hold_us + (reports_clear ? ZBC_MOTION_BACKSTOP_US : 0);
+        return fresh ? ZBC_EMIT_MOTION : ZBC_EMIT_NONE;
+    }
+    if (report == 0) {
+        /* Only ever brought forward. A sensor configured to report repeats its
+         * "unoccupied" every few minutes, and counting the hold again from each
+         * repeat would put the clear off for ever once the hold is longer. */
+        const int64_t at = now + hold_us;
+        if (st->occupied && (st->clear_at == 0 || at < st->clear_at)) {
+            st->clear_at = at;
+        }
+        return ZBC_EMIT_NONE;
+    }
+    if (st->clear_at != 0 && now >= st->clear_at) {
+        st->occupied = 0;
+        st->clear_at = 0;
+        return ZBC_EMIT_CLEAR;
+    }
+    return ZBC_EMIT_NONE;
+}
+/* >>> end host-test region: motion <<< */
+
+/* ------------------------------------------------------------- delayed actions */
+
+/* The rules that wait: "and off after 10 minutes". Each is copied here when its
+ * event runs, and run by the buttons task when it is due. The next event of the
+ * same button drops whatever it still has waiting, so a second press restarts a
+ * timer and motion takes back the "off" that no motion scheduled. RAM only: a
+ * restart drops them all, which for a sensor its first clear after the boot
+ * makes up for (motion_start).
+ *
+ * Pure table functions, extracted by `test/Makefile` into test_delayed.c. */
+/* >>> host-test region: delayed <<< */
+
+/* More than any real house waits on at once: a few per button, and a sensor's
+ * no-motion rules. One more is refused, and logged. */
+#define ZBC_DELAYED_MAX 24
+
+typedef struct {
+    uint16_t       id;       /* the button that scheduled it; 0 = free */
+    uint32_t       seq;      /* order of scheduling, which breaks ties in `due` */
+    int64_t        due;
+    zbc_btn_rule_t rule;
+} zbc_delayed_t;
+
+typedef struct {
+    zbc_delayed_t slot[ZBC_DELAYED_MAX];
+    uint32_t      seq;
+} zbc_delayed_table_t;
+
+static bool delayed_add(zbc_delayed_table_t *t, uint16_t id, const zbc_btn_rule_t *rule, int64_t due)
+{
+    for (int i = 0; i < ZBC_DELAYED_MAX; i++) {
+        if (t->slot[i].id == 0) {
+            t->slot[i].id   = id;
+            t->slot[i].seq  = ++t->seq;
+            t->slot[i].due  = due;
+            t->slot[i].rule = *rule;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Everything the button has waiting; how many there were. */
+static int delayed_cancel(zbc_delayed_table_t *t, uint16_t id)
+{
+    int n = 0;
+    for (int i = 0; i < ZBC_DELAYED_MAX; i++) {
+        if (id != 0 && t->slot[i].id == id) {
+            t->slot[i].id = 0;
+            n++;
+        }
+    }
+    return n;
+}
+
+/* The one due first, in the order its rules were scheduled when several are
+ * due together - a case's rules run in the order they are written. -1 when the
+ * table is empty. */
+static int delayed_first(const zbc_delayed_table_t *t)
+{
+    int best = -1;
+    for (int i = 0; i < ZBC_DELAYED_MAX; i++) {
+        if (t->slot[i].id == 0) {
+            continue;
+        }
+        if (best < 0 || t->slot[i].due < t->slot[best].due ||
+            (t->slot[i].due == t->slot[best].due && (int32_t)(t->slot[i].seq - t->slot[best].seq) < 0)) {
+            best = i;
+        }
+    }
+    return best;
+}
+
+/* When the first one is due; 0 when nothing waits. */
+static int64_t delayed_next_due(const zbc_delayed_table_t *t)
+{
+    const int i = delayed_first(t);
+    return i < 0 ? 0 : t->slot[i].due;
+}
+
+/* Takes the first one that is due by `now` out of the table. */
+static bool delayed_take_due(zbc_delayed_table_t *t, int64_t now, uint16_t *id, zbc_btn_rule_t *rule)
+{
+    const int i = delayed_first(t);
+    if (i < 0 || t->slot[i].due > now) {
+        return false;
+    }
+    *id   = t->slot[i].id;
+    *rule = t->slot[i].rule;
+    t->slot[i].id = 0;
+    return true;
+}
+
+/* How many the button has waiting, and when the first is due (0 when none). */
+static int delayed_of(const zbc_delayed_table_t *t, uint16_t id, int64_t *first_due)
+{
+    int     n     = 0;
+    int64_t first = 0;
+    for (int i = 0; i < ZBC_DELAYED_MAX; i++) {
+        if (id != 0 && t->slot[i].id == id) {
+            if (n == 0 || t->slot[i].due < first) {
+                first = t->slot[i].due;
+            }
+            n++;
+        }
+    }
+    *first_due = first;
+    return n;
+}
+/* >>> end host-test region: delayed <<< */
+
 /* ------------------------------------------------------------------- live state */
 
 /* One light or room a held button is sweeping. A hold moves every dimming rule
@@ -456,10 +635,17 @@ typedef struct {
     /* While this is in the future the sampler reads the button as held, so a
      * test drives the same machine a finger does. */
     int64_t       sim_until;
+    /* Source: sensor. What its reports mean for its rules, and how long its
+     * no-motion time is (clear_s). */
+    zbc_motion_fsm_t mfsm;
+    int64_t       clear_us;
 } btn_live_t;
 
 static btn_live_t     s_live[CONFIG_ZBC_MAX_BUTTONS];
 static portMUX_TYPE   s_live_mux = portMUX_INITIALIZER_UNLOCKED;
+/* Under s_live_mux too: the buttons task schedules and runs them, the HTTP
+ * task reads them and drops a changed button's. */
+static zbc_delayed_table_t s_delayed;
 static QueueHandle_t  s_queue;
 static esp_timer_handle_t s_poll_timer;
 
@@ -587,7 +773,10 @@ void buttons_reload(void)
         next[i].zb_key      = cfg[i].zb_key;
         next[i].dim_dir     = -1;   /* the first hold flips this, so it dims up */
         next[i].hold_case   = -1;
+        next[i].clear_us    = (int64_t)cfg[i].clear_s * 1000000;
     }
+    const int64_t now = esp_timer_get_time();
+    bool          carried[CONFIG_ZBC_MAX_BUTTONS] = { false };
 
     portENTER_CRITICAL(&s_live_mux);
     for (size_t i = 0; i < n; i++) {
@@ -614,8 +803,26 @@ void buttons_reload(void)
                 memcpy(next[i].sweep, s_live[j].sweep, sizeof(next[i].sweep));
                 next[i].hold_case  = s_live[j].hold_case;
                 next[i].sim_until  = s_live[j].sim_until;
+                next[i].mfsm       = s_live[j].mfsm;
+                carried[i]         = true;
                 break;
             }
+        }
+    }
+    /* A sensor not carried over is new to this boot, or newly set up. */
+    for (size_t i = 0; i < n; i++) {
+        if (next[i].src == ZBC_BTN_SRC_SENSOR && !carried[i]) {
+            motion_start(&next[i].mfsm, next[i].clear_us, now);
+        }
+    }
+    /* What a deleted button scheduled goes with it. */
+    for (int k = 0; k < ZBC_DELAYED_MAX; k++) {
+        bool kept = false;
+        for (size_t i = 0; i < n && !kept; i++) {
+            kept = s_delayed.slot[k].id == next[i].id;
+        }
+        if (!kept) {
+            s_delayed.slot[k].id = 0;
         }
     }
     memcpy(s_live, next, sizeof(s_live));
@@ -644,6 +851,34 @@ static void poll_cb(void *arg)
         const bool     is_sw    = s_live[i].is_switch;
         const uint16_t id       = s_live[i].id;
         portEXIT_CRITICAL(&s_live_mux);
+
+        /* A sensor's tick is its no-motion time running out. A clear the queue
+         * had no room for is put back for the next tick: lost, it would leave
+         * the room lit until somebody next walked through it. */
+        if (used && src == ZBC_BTN_SRC_SENSOR) {
+            portENTER_CRITICAL(&s_live_mux);
+            zbc_btn_emit_t   memit  = ZBC_EMIT_NONE;
+            zbc_motion_fsm_t before = { 0 };
+            if (s_live[i].used && s_live[i].id == id && s_live[i].src == src) {
+                before = s_live[i].mfsm;
+                memit  = motion_step(&s_live[i].mfsm, -1, false, s_live[i].clear_us, now);
+            }
+            portEXIT_CRITICAL(&s_live_mux);
+            if (memit != ZBC_EMIT_NONE) {
+                const btn_msg_t msg = { .id = id, .emit = memit };
+                if (xQueueSend(s_queue, &msg, 0) == pdTRUE) {
+                    zbc_state_bump();
+                } else {
+                    portENTER_CRITICAL(&s_live_mux);
+                    if (s_live[i].used && s_live[i].id == id && !s_live[i].mfsm.occupied &&
+                        s_live[i].mfsm.clear_at == 0) {
+                        s_live[i].mfsm = before;
+                    }
+                    portEXIT_CRITICAL(&s_live_mux);
+                }
+            }
+            continue;
+        }
 
         /* A Zigbee button has no pin to read. All this tick does for one is give
          * zbtn_step a clock: the repeats during a hold, the hold that timed out,
@@ -771,7 +1006,8 @@ static bool case_runs(const zbc_btn_rule_t *rules, int head, int end)
 /* The first rule of the first case that applies, and in *end one past its last;
  * -1 when none does. The head's condition is asked of the head's own target, so
  * "always" needs no target at all - a case whose head's room was deleted still
- * runs the rules joined to it - and any other condition needs one. */
+ * runs the rules joined to it - and nor does the sun; any other condition needs
+ * one. */
 static int pick_case(const zbc_btn_rule_t *rules, int n,
                      bool (*holds)(const zbc_btn_rule_t *), int *end)
 {
@@ -779,7 +1015,8 @@ static int pick_case(const zbc_btn_rule_t *rules, int n,
         const int e = case_end(rules, n, head);
         if (case_runs(rules, head, e) &&
             (rules[head].cond == ZBC_COND_ALWAYS ||
-             (button_db_rule_assigned(&rules[head]) && holds(&rules[head])))) {
+             ((button_db_rule_assigned(&rules[head]) || !zbc_cond_needs_target(rules[head].cond)) &&
+              holds(&rules[head])))) {
             *end = e;
             return head;
         }
@@ -791,13 +1028,20 @@ static int pick_case(const zbc_btn_rule_t *rules, int n,
 /* What the case's toggles become. One toggle is left to its target, which
  * decides from its own state. Two or more are decided once, before anything is
  * sent: if any of them is lit they all go off, otherwise they all come on - the
- * way a room already toggles its lamps, so a half-lit set never swaps halves. */
+ * way a room already toggles its lamps, so a half-lit set never swaps halves.
+ * Only the ones that run now: a toggle that waits decides from its own target
+ * when it runs, by which time the others have long been switched. */
+static bool toggles_now(const zbc_btn_rule_t *r)
+{
+    return r->action == ZBC_ACT_TOGGLE && r->delay_s == 0 && button_db_rule_assigned(r);
+}
+
 static zb_onoff_cmd_t case_toggle(const zbc_btn_rule_t *rules, int n,
                                   bool (*lit)(const zbc_btn_rule_t *))
 {
     int toggles = 0;
     for (int r = 0; r < n; r++) {
-        if (rules[r].action == ZBC_ACT_TOGGLE && button_db_rule_assigned(&rules[r])) {
+        if (toggles_now(&rules[r])) {
             toggles++;
         }
     }
@@ -805,8 +1049,7 @@ static zb_onoff_cmd_t case_toggle(const zbc_btn_rule_t *rules, int n,
         return ZB_ONOFF_TOGGLE;
     }
     for (int r = 0; r < n; r++) {
-        if (rules[r].action == ZBC_ACT_TOGGLE && button_db_rule_assigned(&rules[r]) &&
-            lit(&rules[r])) {
+        if (toggles_now(&rules[r]) && lit(&rules[r])) {
             return ZB_ONOFF_OFF;
         }
     }
@@ -1171,6 +1414,14 @@ static void run_nudges(int slot, const zbc_btn_rule_t *rules, int n, int64_t now
 
 static bool cond_holds(const zbc_btn_rule_t *r)
 {
+    /* Not knowing where or when we are counts as night, as not knowing a
+     * light counts as off: a sensor lights the room rather than leave somebody
+     * in the dark until the clock is set. */
+    if (r->cond == ZBC_COND_SUN_DOWN) {
+        bool down = true;
+        lighting_sun_is_down(&down);
+        return down;
+    }
     bool on  = false;
     int  pct = -1;
     const lighting_target_t t = rule_target(r);
@@ -1199,8 +1450,66 @@ static bool rule_lit(const zbc_btn_rule_t *r)
     return lighting_target_state(&t, &on, NULL) && on;
 }
 
+/* One rule's action, of any kind but a dim. `toggle` is what the case decided
+ * its toggles become, or ZB_ONOFF_TOGGLE to leave it to the target. */
+static void run_action(const zbc_btn_rule_t *rule, zb_onoff_cmd_t toggle, uint16_t ds)
+{
+    const lighting_target_t t = rule_target(rule);
+    switch (rule->action) {
+    case ZBC_ACT_ON:     lighting_target_set_onoff(&t, ZB_ONOFF_ON, ds);  break;
+    case ZBC_ACT_OFF:    lighting_target_set_onoff(&t, ZB_ONOFF_OFF, ds); break;
+    case ZBC_ACT_TOGGLE: lighting_target_set_onoff(&t, toggle, ds);       break;
+    case ZBC_ACT_SET:    lighting_target_set_brightness(&t, rule->action_arg, ds); break;
+    /* A room's mode; refused, and nothing happens, for a group whose
+     * exposure is Off. button_db never stores one for a light. */
+    case ZBC_ACT_ADAPTIVE:
+        if (rule->ep == 0) {
+            lighting_group_start_adaptive(rule->group_id, ds);
+        }
+        break;
+    default: break;
+    }
+}
+
+/* A rule that waits, put in the table for the buttons task to run when due. */
+static void schedule_rule(uint16_t id, const zbc_btn_rule_t *rule, int64_t now)
+{
+    portENTER_CRITICAL(&s_live_mux);
+    const bool ok = delayed_add(&s_delayed, id, rule, now + (int64_t)rule->delay_s * 1000000);
+    portEXIT_CRITICAL(&s_live_mux);
+    if (!ok) {
+        ESP_LOGW(TAG, "Button %u: %d actions are waiting already; this one is dropped", id, ZBC_DELAYED_MAX);
+    }
+    zbc_state_bump();          /* the page shows what is waiting */
+}
+
+/* Whatever is due, in order. Not before Zigbee is up, for the reason dispatch
+ * gives; a rule due then is dropped. */
+static void run_delayed(void)
+{
+    const int64_t  now = esp_timer_get_time();
+    const uint16_t ds  = settings_transition_ds();
+    uint16_t       id;
+    zbc_btn_rule_t rule;
+    for (;;) {
+        portENTER_CRITICAL(&s_live_mux);
+        const bool due = delayed_take_due(&s_delayed, now, &id, &rule);
+        portEXIT_CRITICAL(&s_live_mux);
+        if (!due) {
+            return;
+        }
+        zbc_state_bump();
+        if (!zb_is_running() || !button_db_rule_assigned(&rule)) {
+            continue;
+        }
+        ESP_LOGI(TAG, "Button %u: running an action after %u s", id, rule.delay_s);
+        run_action(&rule, ZB_ONOFF_TOGGLE, ds);
+    }
+}
+
 /* One case - the rule that won and the rules joined to it - in order. */
-static void run_case(int slot, const zbc_btn_rule_t *rules, int n, zbc_btn_emit_t emit, int64_t now)
+static void run_case(int slot, uint16_t id, const zbc_btn_rule_t *rules, int n, zbc_btn_emit_t emit,
+                     int64_t now)
 {
     const uint16_t ds = settings_transition_ds();
 
@@ -1227,24 +1536,14 @@ static void run_case(int slot, const zbc_btn_rule_t *rules, int n, zbc_btn_emit_
 
     for (int r = 0; r < n; r++) {
         const zbc_btn_rule_t *rule = &rules[r];
-        if (!button_db_rule_assigned(rule)) {
+        if (!button_db_rule_assigned(rule) || rule->action == ZBC_ACT_NONE) {
             continue;          /* the room or the light it named was deleted */
         }
-        const lighting_target_t t = rule_target(rule);
-        switch (rule->action) {
-        case ZBC_ACT_ON:     lighting_target_set_onoff(&t, ZB_ONOFF_ON, ds);  break;
-        case ZBC_ACT_OFF:    lighting_target_set_onoff(&t, ZB_ONOFF_OFF, ds); break;
-        case ZBC_ACT_TOGGLE: lighting_target_set_onoff(&t, toggle, ds);       break;
-        case ZBC_ACT_SET:    lighting_target_set_brightness(&t, rule->action_arg, ds); break;
-        /* A room's mode; refused, and nothing happens, for a group whose
-         * exposure is Off. button_db never stores one for a light. */
-        case ZBC_ACT_ADAPTIVE:
-            if (rule->ep == 0) {
-                lighting_group_start_adaptive(rule->group_id, ds);
-            }
-            break;
-        default: break;
+        if (rule->delay_s != 0) {
+            schedule_rule(id, rule, now);
+            continue;
         }
+        run_action(rule, toggle, ds);
     }
 }
 
@@ -1257,6 +1556,8 @@ static const char *emit_name(zbc_btn_emit_t e)
     case ZBC_EMIT_LONG_RELEASE: return "long press released";
     case ZBC_EMIT_DOUBLE:       return "double press";
     case ZBC_EMIT_TRIPLE:       return "triple press";
+    case ZBC_EMIT_MOTION:       return "motion";
+    case ZBC_EMIT_CLEAR:        return "no motion";
     default:                   return "?";
     }
 }
@@ -1304,7 +1605,23 @@ static void dispatch(const btn_msg_t *msg)
     case ZBC_EMIT_SHORT:  ev = ZBC_EV_SHORT;  break;
     case ZBC_EMIT_DOUBLE: ev = ZBC_EV_DOUBLE; break;
     case ZBC_EMIT_TRIPLE: ev = ZBC_EV_TRIPLE; break;
+    case ZBC_EMIT_MOTION: ev = ZBC_EV_MOTION; break;
+    case ZBC_EMIT_CLEAR:  ev = ZBC_EV_CLEAR;  break;
     default:              ev = ZBC_EV_LONG;   break;
+    }
+
+    /* A new event takes back whatever the last one left waiting - the second
+     * press restarts the timer, motion cancels the "off" no motion scheduled -
+     * and then schedules its own. Not a hold's repeats, which are the same
+     * event. */
+    if (msg->emit != ZBC_EMIT_LONG_REPEAT) {
+        portENTER_CRITICAL(&s_live_mux);
+        const int dropped = delayed_cancel(&s_delayed, msg->id);
+        portEXIT_CRITICAL(&s_live_mux);
+        if (dropped) {
+            ESP_LOGI(TAG, "'%s': %d waiting action(s) dropped", b.name, dropped);
+            zbc_state_bump();
+        }
     }
 
     /* A repeat during a sweep would otherwise put four lines a second in the log
@@ -1358,14 +1675,37 @@ static void dispatch(const btn_msg_t *msg)
         return;
     }
 
-    run_case(slot, &rules[head], end - head, msg->emit, esp_timer_get_time());
+    run_case(slot, msg->id, &rules[head], end - head, msg->emit, esp_timer_get_time());
+}
+
+/* How long the task may sleep before the first waiting action is due: never
+ * past it, and never more than a minute, so a tick count cannot overflow. */
+static TickType_t delayed_wait(void)
+{
+    portENTER_CRITICAL(&s_live_mux);
+    const int64_t due = delayed_next_due(&s_delayed);
+    portEXIT_CRITICAL(&s_live_mux);
+    if (due == 0) {
+        return portMAX_DELAY;
+    }
+    const int64_t left_ms = (due - esp_timer_get_time() + 999) / 1000;
+    if (left_ms <= 0) {
+        return 0;
+    }
+    const TickType_t t = pdMS_TO_TICKS(left_ms < 60000 ? left_ms : 60000);
+    return t ? t : 1;
 }
 
 static void buttons_task(void *arg)
 {
     (void)arg;
     btn_msg_t msg;
-    while (xQueueReceive(s_queue, &msg, portMAX_DELAY) == pdTRUE) {
+    for (;;) {
+        const bool got = xQueueReceive(s_queue, &msg, delayed_wait()) == pdTRUE;
+        run_delayed();
+        if (!got) {
+            continue;
+        }
         if (msg.unlock == UNLOCK_HOTSPOT) {
             ESP_LOGW(TAG, "Ten presses on %s %d: restarting into the setup hotspot, keeping the stored Wi-Fi",
                      msg.id ? "button" : "GPIO", msg.id ? (int)msg.id : CONFIG_ZBC_UNLOCK_GPIO);
@@ -1429,6 +1769,7 @@ esp_err_t buttons_start(void)
      * into it, and a call back the other way would close the loop. So it offers
      * a handler to register, the way the SDK's own ZCL action handler does. */
     zb_set_remote_handler(buttons_remote_event);
+    zb_set_sensor_handler(buttons_sensor_event);
 
     /* Periodic rather than the re-arm-from-the-callback pattern used everywhere
      * else here. That pattern exists so a job can choose its next interval -
@@ -1531,10 +1872,104 @@ void buttons_remote_event(const uint8_t ieee[ZBC_BTN_IEEE_LEN], uint8_t ep, uint
     }
 }
 
-/* How long ago this button last heard from its remote, in milliseconds, or -1
- * when it is not a Zigbee button or has never been heard from. The pin dot is
- * the only way to tell a wiring mistake from a configuration one; this is the
- * same thing for a remote nobody has pressed yet. */
+/* Same contract as buttons_remote_event: Zigbee task, spinlock and a post. A
+ * motion the queue had no room for is forgotten as motion, so the sensor's
+ * next report - a minute later at most - runs the motion rules after all. */
+void buttons_sensor_event(const uint8_t ieee[ZBC_BTN_IEEE_LEN], uint8_t ep, bool occupied,
+                          bool reports_clear)
+{
+    if (!s_queue || !ieee) {
+        return;
+    }
+    const int64_t now = esp_timer_get_time();
+    for (int i = 0; i < CONFIG_ZBC_MAX_BUTTONS; i++) {
+        portENTER_CRITICAL(&s_live_mux);
+        zbc_btn_emit_t emit = ZBC_EMIT_NONE;
+        uint16_t       id   = 0;
+        if (s_live[i].used && s_live[i].src == ZBC_BTN_SRC_SENSOR && s_live[i].zb_ep == ep &&
+            memcmp(s_live[i].ieee, ieee, ZBC_BTN_IEEE_LEN) == 0) {
+            id   = s_live[i].id;
+            s_live[i].last_event_us = now;
+            emit = motion_step(&s_live[i].mfsm, occupied ? 1 : 0, reports_clear, s_live[i].clear_us, now);
+        }
+        portEXIT_CRITICAL(&s_live_mux);
+        if (!id) {
+            continue;
+        }
+        zbc_state_bump();             /* "motion now" on the page */
+        if (emit != ZBC_EMIT_NONE) {
+            const btn_msg_t msg = { .id = id, .emit = emit };
+            if (xQueueSend(s_queue, &msg, 0) != pdTRUE) {
+                portENTER_CRITICAL(&s_live_mux);
+                if (s_live[i].used && s_live[i].id == id) {
+                    s_live[i].mfsm.occupied = 0;
+                }
+                portEXIT_CRITICAL(&s_live_mux);
+            }
+        }
+    }
+}
+
+bool buttons_sensor_state(uint16_t id, bool *occupied, int64_t *clear_in_ms)
+{
+    bool    sensor = false, occ = false;
+    int64_t at     = 0;
+    portENTER_CRITICAL(&s_live_mux);
+    for (int i = 0; i < CONFIG_ZBC_MAX_BUTTONS; i++) {
+        if (s_live[i].used && s_live[i].id == id) {
+            sensor = s_live[i].src == ZBC_BTN_SRC_SENSOR;
+            occ    = s_live[i].mfsm.occupied != 0;
+            at     = s_live[i].mfsm.clear_at;
+            break;
+        }
+    }
+    portEXIT_CRITICAL(&s_live_mux);
+    if (!sensor) {
+        return false;
+    }
+    if (occupied) {
+        *occupied = occ;
+    }
+    if (clear_in_ms) {
+        const int64_t left = at - esp_timer_get_time();
+        *clear_in_ms = at == 0 ? -1 : (left > 0 ? left / 1000 : 0);
+    }
+    return true;
+}
+
+bool buttons_delayed(uint16_t id, int *count, int64_t *next_ms)
+{
+    int64_t first = 0;
+    portENTER_CRITICAL(&s_live_mux);
+    const int n = delayed_of(&s_delayed, id, &first);
+    portEXIT_CRITICAL(&s_live_mux);
+    if (n == 0) {
+        return false;
+    }
+    if (count) {
+        *count = n;
+    }
+    if (next_ms) {
+        const int64_t left = first - esp_timer_get_time();
+        *next_ms = left > 0 ? left / 1000 : 0;
+    }
+    return true;
+}
+
+void buttons_forget_delayed(uint16_t id)
+{
+    portENTER_CRITICAL(&s_live_mux);
+    const int n = delayed_cancel(&s_delayed, id);
+    portEXIT_CRITICAL(&s_live_mux);
+    if (n) {
+        zbc_state_bump();
+    }
+}
+
+/* How long ago this button last heard from its remote or its sensor, in
+ * milliseconds, or -1 when it is neither or has never been heard from. The pin
+ * dot is the only way to tell a wiring mistake from a configuration one; this is
+ * the same thing for a remote nobody has pressed yet. */
 int64_t buttons_last_event_ms(uint16_t id)
 {
     int64_t seen = 0;
@@ -1542,7 +1977,7 @@ int64_t buttons_last_event_ms(uint16_t id)
     portENTER_CRITICAL(&s_live_mux);
     for (int i = 0; i < CONFIG_ZBC_MAX_BUTTONS; i++) {
         if (s_live[i].used && s_live[i].id == id) {
-            zigbee = s_live[i].src == ZBC_BTN_SRC_ZIGBEE;
+            zigbee = s_live[i].src == ZBC_BTN_SRC_ZIGBEE || s_live[i].src == ZBC_BTN_SRC_SENSOR;
             seen   = s_live[i].last_event_us;
             break;
         }
@@ -1564,7 +1999,7 @@ bool buttons_pin_state(uint16_t id, bool *pressed, int *level)
         if (s_live[i].used && s_live[i].id == id) {
             /* A Zigbee button has no pin to read, and reporting one would be a
              * wiring diagnosis of a button with no wiring. */
-            pin    = s_live[i].src == ZBC_BTN_SRC_ZIGBEE ? -1 : s_live[i].gpio;
+            pin    = s_live[i].src != ZBC_BTN_SRC_GPIO ? -1 : s_live[i].gpio;
             stable = s_live[i].fsm.stable != 0;
             break;
         }
@@ -1598,7 +2033,18 @@ esp_err_t buttons_fire(uint16_t id, zbc_btn_event_t ev, int hold_ms)
     }
     portENTER_CRITICAL(&s_live_mux);
     const bool zigbee = s_live[slot].src == ZBC_BTN_SRC_ZIGBEE;
+    const bool sensor = s_live[slot].src == ZBC_BTN_SRC_SENSOR;
     portEXIT_CRITICAL(&s_live_mux);
+
+    /* A sensor's test runs the event's rules and nothing else: what the sensor
+     * itself last said, and when its no-motion time runs out, stay as they are. */
+    if (sensor) {
+        if (ev != ZBC_EV_MOTION && ev != ZBC_EV_CLEAR) {
+            return ESP_ERR_INVALID_ARG;
+        }
+        const btn_msg_t msg = { .id = id, .emit = ev == ZBC_EV_MOTION ? ZBC_EMIT_MOTION : ZBC_EMIT_CLEAR };
+        return xQueueSend(s_queue, &msg, 0) == pdTRUE ? ESP_OK : ESP_ERR_NO_MEM;
+    }
 
     if (ev == ZBC_EV_LONG) {
         if (hold_ms <= 0) {

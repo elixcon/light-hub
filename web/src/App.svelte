@@ -15,6 +15,8 @@
 	import RemotesView from "./views/RemotesView.svelte";
 	import RemoteView from "./views/RemoteView.svelte";
 	import ButtonView from "./views/ButtonView.svelte";
+	import SensorsView from "./views/SensorsView.svelte";
+	import SensorView from "./views/SensorView.svelte";
 	import SettingsView from "./views/SettingsView.svelte";
 	import AccessView from "./views/AccessView.svelte";
 	import MatterView from "./views/MatterView.svelte";
@@ -55,6 +57,10 @@
 			<RemoteView ieee={route.params.ieee} />
 		{:else if route.name === "remote-button"}
 			<ButtonView id={Number(route.params.id)} />
+		{:else if route.name === "sensors"}
+			<SensorsView />
+		{:else if route.name === "sensor"}
+			<SensorView ieee={route.params.ieee} />
 		{:else if route.name === "settings"}
 			<SettingsView />
 		{:else if route.name === "access"}

@@ -214,6 +214,15 @@ typedef void (*zb_remote_cb_t)(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, uin
                                zb_remote_ev_t ev);
 void zb_set_remote_handler(zb_remote_cb_t cb);
 
+/* What a motion sensor reported on its Occupancy Sensing cluster: `occupied`
+ * as the sensor sent it, and `reports_clear` whether this sensor has ever been
+ * heard saying "unoccupied" itself - a Xiaomi never does, a Hue does, and the
+ * no-motion time is counted from different reports for the two (buttons.c).
+ * Same contract as the remote handler: Zigbee task, stack lock held. */
+typedef void (*zb_sensor_cb_t)(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, bool occupied,
+                               bool reports_clear);
+void zb_set_sensor_handler(zb_sensor_cb_t cb);
+
 /* The last few presses from any remote, newest first, for the web UI's "press
  * the button you want" capture. A remote cannot be configured from its cluster
  * list - an Aqara switch advertises no client clusters at all, and a rocker's
@@ -408,7 +417,7 @@ void      zb_get_ent_stats(zb_ent_stats_t *out);
 typedef struct {
     int count;
     struct {
-        const char *cluster;      /* "onoff", "level", "switch" */
+        const char *cluster;      /* "onoff", "level", "switch", "occupancy" */
         bool        bound;
         bool        bind_refused;
         bool        configured;

@@ -25,8 +25,10 @@ static const char *TAG = "button_db";
  * 2 -> 3 added the input type (push button or switch) and reserved bytes.
  * 3 -> 4 added the triple press; every rule keeps its gesture.
  * 4 -> 5 made a rule 16 bytes (a light as a target, and "and") and put every
- *        gesture's rules in one pool; every rule keeps its room and gesture. */
-#define BUTTON_BLOB_VERSION  5
+ *        gesture's rules in one pool; every rule keeps its room and gesture.
+ * 5 -> 6 gave a rule its delay and a button its no-motion time (sensors); every
+ *        rule runs at once, as it did. */
+#define BUTTON_BLOB_VERSION  6
 
 /* How many gestures versions 1 to 3 stored. A literal, not ZBC_EV_COUNT: the
  * frozen records below describe bytes already in flash, and sized by the live
@@ -57,6 +59,18 @@ typedef struct {
     uint8_t  action;
     uint8_t  action_arg;
 } zbc_btn_rule_v4_t;
+
+/* Frozen copy of the rule version 5 stored: as now, less the delay. */
+typedef struct {
+    uint16_t group_id;
+    uint8_t  cond;
+    uint8_t  cond_arg;
+    uint8_t  action;
+    uint8_t  action_arg;
+    uint8_t  flags;
+    uint8_t  ep;
+    uint8_t  ieee[ZBC_BTN_IEEE_LEN];
+} zbc_btn_rule_v5_t;
 
 /* Frozen copy of the version-1 record, so the migration below reads what was
  * actually written rather than what zbc_button_t happens to look like now.
@@ -123,6 +137,26 @@ typedef struct {
     uint8_t  input;
     uint8_t  reserved[7];
 } zbc_button_v4_t;
+
+/* Frozen copy of the version-5 record - see zbc_button_v1_t. Its pool was
+ * CONFIG_ZBC_BUTTON_RULES long, as the current one is: changing that option
+ * always changed the stored size. */
+typedef struct {
+    bool     in_use;
+    uint16_t id;
+    char     name[ZBC_BUTTON_NAME_LEN];
+    uint8_t  src;
+    int8_t   gpio;
+    bool     inverted;
+    uint8_t  pull;
+    uint8_t  ieee[ZBC_BTN_IEEE_LEN];
+    uint8_t  zb_ep;
+    uint8_t  zb_key;
+    uint8_t  rule_count[OLD_EV_COUNT_V4];
+    zbc_btn_rule_v5_t rules[CONFIG_ZBC_BUTTON_RULES];
+    uint8_t  input;
+    uint8_t  reserved[7];
+} zbc_button_v5_t;
 
 /* The gestures an older record had, into a current one: each gesture's rules in
  * turn into the pool, each a room rule joined to nothing, which is what every
@@ -233,6 +267,7 @@ bool button_db_blob_ok(const void *blob, size_t len)
     size_t rec;
     switch (hdr.version) {
     case BUTTON_BLOB_VERSION: rec = sizeof(zbc_button_t);    break;
+    case 5:                   rec = sizeof(zbc_button_v5_t); break;
     case 4:                   rec = sizeof(zbc_button_v4_t); break;
     case 3:                   rec = sizeof(zbc_button_v3_t); break;
     case 2:                   rec = sizeof(zbc_button_v2_t); break;
@@ -280,6 +315,7 @@ static void bdb_load(void)
     size_t expected_v2 = sizeof(hdr) + (size_t)hdr.count * sizeof(zbc_button_v2_t);
     size_t expected_v3 = sizeof(hdr) + (size_t)hdr.count * sizeof(zbc_button_v3_t);
     size_t expected_v4 = sizeof(hdr) + (size_t)hdr.count * sizeof(zbc_button_v4_t);
+    size_t expected_v5 = sizeof(hdr) + (size_t)hdr.count * sizeof(zbc_button_v5_t);
 
     int loaded = 0;
     if (hdr.version == BUTTON_BLOB_VERSION && blob_size == expected) {
@@ -294,6 +330,35 @@ static void bdb_load(void)
             }
             loaded++;
         }
+    } else if (hdr.version == 5 && blob_size == expected_v5) {
+        /* The same record less the delays and the no-motion time; version 5 had
+         * no sensors, so every clear_s stays zero. */
+        const zbc_button_v5_t *in = (const zbc_button_v5_t *)(blob + sizeof(hdr));
+        for (int i = 0; i < hdr.count && loaded < CONFIG_ZBC_MAX_BUTTONS; i++) {
+            zbc_button_t *b = &s_buttons[loaded];
+            memset(b, 0, sizeof(*b));
+            COPY_V2_FIELDS(b, in[i]);
+            memcpy(b->rule_count, in[i].rule_count, sizeof(b->rule_count));
+            for (int r = 0; r < CONFIG_ZBC_BUTTON_RULES; r++) {
+                const zbc_btn_rule_v5_t *o = &in[i].rules[r];
+                zbc_btn_rule_t          *n = &b->rules[r];
+                n->group_id   = o->group_id;
+                n->cond       = o->cond;
+                n->cond_arg   = o->cond_arg;
+                n->action     = o->action;
+                n->action_arg = o->action_arg;
+                n->flags      = o->flags;
+                n->ep         = o->ep;
+                memcpy(n->ieee, o->ieee, sizeof(n->ieee));
+            }
+            if (button_db_rule_total(b) > CONFIG_ZBC_BUTTON_RULES) {
+                memset(b->rule_count, 0, sizeof(b->rule_count));
+            }
+            b->input = in[i].input;
+            loaded++;
+        }
+        ESP_LOGI(TAG, "Converted %d button(s) from the previous format", loaded);
+        s_migrated = true;
     } else if (hdr.version == 4 && blob_size == expected_v4) {
         const zbc_button_v4_t *in = (const zbc_button_v4_t *)(blob + sizeof(hdr));
         for (int i = 0; i < hdr.count && loaded < CONFIG_ZBC_MAX_BUTTONS; i++) {
@@ -448,7 +513,18 @@ static bool valid_button(const zbc_button_t *in)
         if (in->gpio != -1 || in->zb_key >= ZB_REMOTE_KEY_MAX) {
             return false;
         }
+    } else if (in->src == ZBC_BTN_SRC_SENSOR) {
+        /* A sensor has a motion and a no-motion event and nothing else, and a
+         * time for the second. */
+        if (in->gpio != -1 || in->zb_key != 0 || in->clear_s < ZBC_SENSOR_CLEAR_MIN_S ||
+            in->clear_s > ZBC_SENSOR_CLEAR_MAX_S || in->rule_count[ZBC_EV_DOUBLE] != 0 ||
+            in->rule_count[ZBC_EV_TRIPLE] != 0) {
+            return false;
+        }
     } else if (in->zb_ep != 0 || in->zb_key != 0) {
+        return false;
+    }
+    if (in->src != ZBC_BTN_SRC_SENSOR && in->clear_s != 0) {
         return false;
     }
     if (button_db_rule_total(in) > CONFIG_ZBC_BUTTON_RULES) {
@@ -469,6 +545,11 @@ static bool valid_button(const zbc_button_t *in)
             }
             /* A step of zero would hold the light still however long you press. */
             if (is_dim(rule->action) && rule->action_arg == 0) {
+                return false;
+            }
+            /* A dim moves while a button is held, and a sensor is never held;
+             * a dim that waits would start after the hold that meant it. */
+            if (is_dim(rule->action) && (rule->delay_s != 0 || in->src == ZBC_BTN_SRC_SENSOR)) {
                 return false;
             }
             if (rule->action == ZBC_ACT_SET && rule->action_arg == 0) {
@@ -592,7 +673,7 @@ bool button_db_has_source(const zbc_button_t *b)
     if (!b) {
         return false;
     }
-    if (b->src == ZBC_BTN_SRC_ZIGBEE) {
+    if (b->src == ZBC_BTN_SRC_ZIGBEE || b->src == ZBC_BTN_SRC_SENSOR) {
         for (int i = 0; i < ZBC_BTN_IEEE_LEN; i++) {
             if (b->ieee[i]) {
                 return b->zb_ep != 0;
@@ -603,7 +684,7 @@ bool button_db_has_source(const zbc_button_t *b)
     return b->gpio >= 0;
 }
 
-bool button_db_key_taken(const uint8_t ieee[ZBC_BTN_IEEE_LEN], uint8_t ep, uint8_t key,
+static bool source_taken(uint8_t src, const uint8_t ieee[ZBC_BTN_IEEE_LEN], uint8_t ep, uint8_t key,
                          uint16_t except_id)
 {
     if (!ieee || ep == 0) {
@@ -613,12 +694,23 @@ bool button_db_key_taken(const uint8_t ieee[ZBC_BTN_IEEE_LEN], uint8_t ep, uint8
     BDB_LOCK();
     for (int i = 0; i < CONFIG_ZBC_MAX_BUTTONS && !taken; i++) {
         taken = s_buttons[i].in_use && s_buttons[i].id != except_id &&
-                s_buttons[i].src == ZBC_BTN_SRC_ZIGBEE && s_buttons[i].zb_ep == ep &&
+                s_buttons[i].src == src && s_buttons[i].zb_ep == ep &&
                 s_buttons[i].zb_key == key &&
                 memcmp(s_buttons[i].ieee, ieee, ZBC_BTN_IEEE_LEN) == 0;
     }
     BDB_UNLOCK();
     return taken;
+}
+
+bool button_db_key_taken(const uint8_t ieee[ZBC_BTN_IEEE_LEN], uint8_t ep, uint8_t key,
+                         uint16_t except_id)
+{
+    return source_taken(ZBC_BTN_SRC_ZIGBEE, ieee, ep, key, except_id);
+}
+
+bool button_db_sensor_taken(const uint8_t ieee[ZBC_BTN_IEEE_LEN], uint8_t ep, uint16_t except_id)
+{
+    return source_taken(ZBC_BTN_SRC_SENSOR, ieee, ep, 0, except_id);
 }
 
 void button_db_forget_device(const uint8_t ieee[ZBC_BTN_IEEE_LEN])
@@ -633,7 +725,8 @@ void button_db_forget_device(const uint8_t ieee[ZBC_BTN_IEEE_LEN])
         if (!b->in_use) {
             continue;
         }
-        if (b->src == ZBC_BTN_SRC_ZIGBEE && memcmp(b->ieee, ieee, ZBC_BTN_IEEE_LEN) == 0) {
+        if ((b->src == ZBC_BTN_SRC_ZIGBEE || b->src == ZBC_BTN_SRC_SENSOR) &&
+            memcmp(b->ieee, ieee, ZBC_BTN_IEEE_LEN) == 0) {
             memset(b->ieee, 0, ZBC_BTN_IEEE_LEN);
             b->zb_ep  = 0;
             b->zb_key = 0;
