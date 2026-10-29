@@ -115,8 +115,8 @@ Rooms are called groups in the API.
 |---|---|---|
 | `GET` | `/api/remotes` | the last few presses from any paired remote, for learning which key a button means, and the last decoded command `frames` |
 | `GET` | `/api/buttons` | every button, its source, its rules and its live pin reading; each rule's `delay` in seconds; `delayed` (`count`, `next_ms`, or `null`) for what its last event left waiting; a sensor's `clear_s`, `occupied` (null until heard since the start) and `clear_in_ms` |
-| `POST` | `/api/buttons` | `{"name":"Kitchen switch"}` creates one, answers with its id |
-| `PATCH` | `/api/buttons/{id}` | replaces the whole record: name, source (`gpio`, `zigbee` or `sensor`) and every gesture, or a sensor's `motion` and `clear` and its `clear_s` (30-3600); drops what the button had waiting (see [delayed actions](buttons-and-remotes.md#delayed-actions)) |
+| `POST` | `/api/buttons` | `{"name":"Kitchen switch"}` creates one, answers with its id; `507` when there are `CONFIG_ZBC_MAX_BUTTONS` (32) |
+| `PATCH` | `/api/buttons/{id}` | replaces the whole record: name, source (`gpio`, `zigbee` or `sensor`) and every gesture, or a sensor's `motion` and `clear` and its `clear_s` (30-3600); drops what the button had waiting (see [delayed actions](buttons-and-remotes.md#delayed-actions)); `507` when all buttons together would have more than `CONFIG_ZBC_BUTTON_POOL` (192) rules, with how many this one can have |
 | `DELETE` | `/api/buttons/{id}` | deletes it and gives the pin back |
 | `POST` | `/api/buttons/{id}/test` | `{"event":"short"\|"long"\|"double"\|"triple"}` runs a gesture with no finger on the pin; a long press takes `hold_ms`. A sensor takes `"motion"\|"clear"`, which runs those rules and leaves the sensor's state alone |
 

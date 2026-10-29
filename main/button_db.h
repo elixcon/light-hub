@@ -21,6 +21,11 @@
  * recursive mutex, hands out copies, own NVS blob with its own version. Its own
  * blob is the point - adding buttons must not bump DB_BLOB_VERSION and throw
  * away the names the user gave their lights.
+ *
+ * Unlike them it does not keep the records it hands out. A copy carries room
+ * for CONFIG_ZBC_BUTTON_RULES rules, while the table keeps each button's rules
+ * in one pool all buttons share (CONFIG_ZBC_BUTTON_POOL), so a remote key with
+ * one rule costs one rule and not twelve.
  */
 #pragma once
 
@@ -33,6 +38,8 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* >>> host-test region: bdb-types <<< */
 
 #define ZBC_BUTTON_NAME_LEN 32
 
@@ -165,8 +172,8 @@ typedef struct {
  * does, and more belong in a room. */
 #define ZBC_BTN_MAX_SWEEPS 4
 
+/* One button as the table hands it out and takes it back. */
 typedef struct {
-    bool     in_use;
     uint16_t id;                      /* primary key, assigned here */
     char     name[ZBC_BUTTON_NAME_LEN];
     uint8_t  src;                     /* zbc_btn_src_t */
@@ -179,20 +186,16 @@ typedef struct {
     uint8_t  ieee[ZBC_BTN_IEEE_LEN];
     uint8_t  zb_ep;
     uint8_t  zb_key;                  /* which button of that endpoint; 0 for a sensor */
-    /* One pool for every gesture: the short press's rules first, then the long
+    /* One list for every gesture: the short press's rules first, then the long
      * press's, and so on - see button_db_rules(). A wall switch has one gesture
-     * and may use the whole pool. */
+     * and may use all of them. */
     uint8_t  rule_count[ZBC_EV_COUNT];
     zbc_btn_rule_t rules[CONFIG_ZBC_BUTTON_RULES];
     /* Source: GPIO. zbc_btn_input_t. */
     uint8_t  input;
-    uint8_t  pad;                     /* zero */
     /* Source: sensor. Seconds without motion before the no-motion rules run,
      * ZBC_SENSOR_CLEAR_MIN_S to _MAX_S; zero for any other source. */
     uint16_t clear_s;
-    /* Zero. A field added in here later changes nothing stored, where one added
-     * after it would bump BUTTON_BLOB_VERSION. */
-    uint8_t  reserved[6];
 } zbc_button_t;
 
 /* One gesture's rules: where they start in the pool, and how many (n may be
@@ -225,6 +228,8 @@ static inline bool button_db_rule_assigned(const zbc_btn_rule_t *r)
     return r->ep != 0 || r->group_id != 0;
 }
 
+/* >>> end host-test region: bdb-types <<< */
+
 /* True when this button has a source it can actually fire from. */
 bool button_db_has_source(const zbc_button_t *b);
 
@@ -232,15 +237,21 @@ esp_err_t button_db_init(void);
 
 esp_err_t button_db_create(const char *name, uint16_t *out_id);
 /* Whole-record update: the editor saves name, wiring and every gesture at
- * once, so there is no per-field setter. id, in_use and the stored id are kept. */
+ * once, so there is no per-field setter. The stored id is kept.
+ * ESP_ERR_NO_MEM when the pool has no room for the button's rules (see
+ * button_db_rules_room); the button is left as it was then. */
 esp_err_t button_db_set(uint16_t id, const zbc_button_t *in);
 esp_err_t button_db_remove(uint16_t id);
 
 bool      button_db_get(uint16_t id, zbc_button_t *out);
-size_t    button_db_snapshot(zbc_button_t *buf, size_t max);
 /* The ids alone, for a caller that copies one button at a time rather than
- * holding the whole table - see stream_buttons in http_server.c. */
+ * holding the whole table - see stream_buttons in http_server.c. In the order
+ * the buttons were made. */
 size_t    button_db_list_ids(uint16_t *ids, size_t max);
+
+/* How many rules button `id` could have: its own and the pool's free ones,
+ * up to CONFIG_ZBC_BUTTON_RULES. 0 for an unknown id. */
+int       button_db_rules_room(uint16_t id);
 
 /* True when some other button already claims this pin, so two buttons cannot
  * fight over one line. Pass id 0 to ask about every button. */
@@ -271,6 +282,9 @@ esp_err_t button_db_erase(void);
  * discards. The one statement of that, shared with the configuration restore
  * (config_backup.c), which refuses a file whose table the load would throw away. */
 bool      button_db_blob_ok(const void *blob, size_t len);
+
+/* The longest blob that load takes, for the restore's line length. */
+size_t    button_db_blob_max(void);
 
 #ifdef __cplusplus
 }

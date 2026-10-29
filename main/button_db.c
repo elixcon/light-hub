@@ -1,6 +1,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stddef.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -19,6 +20,9 @@ static const char *TAG = "button_db";
 #define BUTTON_NVS_NAMESPACE "zbc"
 /* In config_backup.c's list too: a backup carries this table under this key. */
 #define BUTTON_NVS_KEY       "buttons"
+
+/* >>> host-test region: bdb-table <<< */
+
 /* Each version is migrated, never discarded: a button is configuration somebody
  * typed in by hand, and a new version arrives over the air with nobody watching.
  * 1 -> 2 added the source (version 1 buttons are all pins).
@@ -27,28 +31,46 @@ static const char *TAG = "button_db";
  * 4 -> 5 made a rule 16 bytes (a light as a target, and "and") and put every
  *        gesture's rules in one pool; every rule keeps its room and gesture.
  * 5 -> 6 gave a rule its delay and a button its no-motion time (sensors); every
- *        rule runs at once, as it did. */
-#define BUTTON_BLOB_VERSION  6
+ *        rule runs at once, as it did.
+ * 6 -> 7 stores each button's rules alone, all buttons' in one pool behind
+ *        the buttons, rather than room for twelve in every button; every button
+ *        keeps its rules. */
+#define BUTTON_BLOB_VERSION  7
 
 /* How many gestures versions 1 to 3 stored. A literal, not ZBC_EV_COUNT: the
  * frozen records below describe bytes already in flash, and sized by the live
  * count they would change whenever a gesture is added. */
 #define OLD_EV_COUNT 3
-/* And how many gestures version 4 stored. */
+/* And how many gestures versions 4 to 7 store. */
 #define OLD_EV_COUNT_V4 4
 /* How many rules one gesture held in versions 1 to 4: CONFIG_ZBC_MAX_BUTTON_RULES,
  * which was 3 in every build that shipped. A literal for the same reason. */
 #define OLD_RULES 3
+/* How many rules one button held in versions 5 and 6: CONFIG_ZBC_BUTTON_RULES,
+ * which was 12 in every build that shipped. */
+#define OLD_POOL 12
+/* The most buttons a build before version 7 could hold: the top of
+ * CONFIG_ZBC_MAX_BUTTONS's range then. */
+#define OLD_MAX_BUTTONS 16
 
-/* Every rule a version-4 button could hold has to fit, or converting one would
+/* Every rule an older button could hold has to fit, or converting one would
  * drop some - see the range of CONFIG_ZBC_BUTTON_RULES. */
-_Static_assert(CONFIG_ZBC_BUTTON_RULES >= OLD_EV_COUNT_V4 * OLD_RULES,
-               "a converted version-4 button must keep every rule");
+_Static_assert(CONFIG_ZBC_BUTTON_RULES >= OLD_EV_COUNT_V4 * OLD_RULES &&
+               CONFIG_ZBC_BUTTON_RULES >= OLD_POOL,
+               "a converted button must keep every rule");
+/* And one button with every rule it may have has to fit in the pool. */
+_Static_assert(CONFIG_ZBC_BUTTON_POOL >= CONFIG_ZBC_BUTTON_RULES,
+               "the pool must hold one full button");
+_Static_assert(ZBC_EV_COUNT == OLD_EV_COUNT_V4,
+               "a gesture added needs a new BUTTON_BLOB_VERSION");
+/* Versions 6 and 7 store the rule as it is. One of another shape needs a frozen
+ * copy of this one for them, and a new version. */
+_Static_assert(sizeof(zbc_btn_rule_t) == 18, "the stored rule changed");
 
 typedef struct {
     uint32_t version;
-    uint16_t count;
-    uint16_t reserved;
+    uint16_t count;      /* buttons */
+    uint16_t rules;      /* version 7 on: rules in the pool behind them; zero before */
 } button_blob_header_t;
 
 /* Frozen copy of the rule versions 1 to 4 stored: a room and nothing else. */
@@ -138,9 +160,7 @@ typedef struct {
     uint8_t  reserved[7];
 } zbc_button_v4_t;
 
-/* Frozen copy of the version-5 record - see zbc_button_v1_t. Its pool was
- * CONFIG_ZBC_BUTTON_RULES long, as the current one is: changing that option
- * always changed the stored size. */
+/* Frozen copy of the version-5 record - see zbc_button_v1_t. */
 typedef struct {
     bool     in_use;
     uint16_t id;
@@ -153,10 +173,55 @@ typedef struct {
     uint8_t  zb_ep;
     uint8_t  zb_key;
     uint8_t  rule_count[OLD_EV_COUNT_V4];
-    zbc_btn_rule_v5_t rules[CONFIG_ZBC_BUTTON_RULES];
+    zbc_btn_rule_v5_t rules[OLD_POOL];
     uint8_t  input;
     uint8_t  reserved[7];
 } zbc_button_v5_t;
+
+/* Frozen copy of the version-6 record - see zbc_button_v1_t: version 5's with
+ * each rule's delay and a sensor's no-motion time. */
+typedef struct {
+    bool     in_use;
+    uint16_t id;
+    char     name[ZBC_BUTTON_NAME_LEN];
+    uint8_t  src;
+    int8_t   gpio;
+    bool     inverted;
+    uint8_t  pull;
+    uint8_t  ieee[ZBC_BTN_IEEE_LEN];
+    uint8_t  zb_ep;
+    uint8_t  zb_key;
+    uint8_t  rule_count[OLD_EV_COUNT_V4];
+    zbc_btn_rule_t rules[OLD_POOL];
+    uint8_t  input;
+    uint8_t  pad;
+    uint16_t clear_s;
+    uint8_t  reserved[6];
+} zbc_button_v6_t;
+_Static_assert(sizeof(zbc_button_v6_t) == 280, "version 6 stored 280 bytes a button");
+
+/* A button as the table keeps it, and as version 7 stores it: everything but
+ * its rules, which are in the pool. Frozen like the records above, since it is
+ * a description of bytes in flash; zbc_button_t is free to change. */
+typedef struct {
+    uint16_t id;
+    char     name[ZBC_BUTTON_NAME_LEN];
+    uint8_t  src;
+    int8_t   gpio;
+    bool     inverted;
+    uint8_t  pull;
+    uint8_t  ieee[ZBC_BTN_IEEE_LEN];
+    uint8_t  zb_ep;
+    uint8_t  zb_key;
+    uint8_t  rule_count[OLD_EV_COUNT_V4];
+    uint8_t  input;
+    uint8_t  pad;
+    uint16_t clear_s;
+    /* Zero. A field added in here later changes nothing stored, where one added
+     * after it would bump BUTTON_BLOB_VERSION. */
+    uint8_t  reserved[8];
+} bdb_head_t;
+_Static_assert(sizeof(bdb_head_t) == 64, "version 7 stores 64 bytes a button");
 
 /* The gestures an older record had, into a current one: each gesture's rules in
  * turn into the pool, each a room rule joined to nothing, which is what every
@@ -180,10 +245,9 @@ static void copy_old_rules(zbc_button_t *b, int events, const uint8_t *count,
     }
 }
 
-/* The fields every version from 2 on has, alike. */
+/* The fields every version from 2 on has, alike - and the table's heads. */
 #define COPY_V2_FIELDS(b, in)                              \
     do {                                                   \
-        (b)->in_use   = true;                              \
         (b)->id       = (in).id;                           \
         memcpy((b)->name, (in).name, sizeof((b)->name));   \
         (b)->src      = (in).src;                          \
@@ -195,23 +259,298 @@ static void copy_old_rules(zbc_button_t *b, int events, const uint8_t *count,
         (b)->zb_key   = (in).zb_key;                       \
     } while (0)
 
-static zbc_button_t      s_buttons[CONFIG_ZBC_MAX_BUTTONS];
-/* Set by a version-1 load, so the converted table is written back once rather
- * than being converted again at every boot. */
+/* The table, laid out as version 7 stores it: the header, the heads of the
+ * buttons in the order they were made, and then every rule of every button -
+ * the first button's, the second's and so on, as its rule_count says. The
+ * first hdr.count heads and the first hdr.rules rules are in use. Stored, the
+ * rules follow the last head in use; here they start after the last head
+ * there is room for, so neither moves the other, and bdb_save_locked closes
+ * the gap for the write. */
+static struct {
+    button_blob_header_t hdr;
+    bdb_head_t           head[CONFIG_ZBC_MAX_BUTTONS];
+    zbc_btn_rule_t       rule[CONFIG_ZBC_BUTTON_POOL];
+} s_table;
+_Static_assert(offsetof(__typeof__(s_table), head) == sizeof(button_blob_header_t),
+               "the heads must follow the header, as they are stored");
+
+
+static int find_index(uint16_t id)
+{
+    for (int i = 0; i < s_table.hdr.count; i++) {
+        if (s_table.head[i].id == id) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int head_total(const bdb_head_t *h)
+{
+    int total = 0;
+    for (int e = 0; e < OLD_EV_COUNT_V4; e++) {
+        total += h->rule_count[e];
+    }
+    return total;
+}
+
+/* Where button i's rules start in the pool. */
+static int rules_at(int i)
+{
+    int at = 0;
+    for (int j = 0; j < i; j++) {
+        at += head_total(&s_table.head[j]);
+    }
+    return at;
+}
+
+static void head_from(bdb_head_t *h, const zbc_button_t *b)
+{
+    memset(h, 0, sizeof(*h));
+    COPY_V2_FIELDS(h, *b);
+    memcpy(h->rule_count, b->rule_count, sizeof(h->rule_count));
+    h->input   = b->input;
+    h->clear_s = b->clear_s;
+}
+
+/* Button i whole, as the table hands it out. */
+static void copy_out(int i, zbc_button_t *out)
+{
+    const bdb_head_t *h = &s_table.head[i];
+    memset(out, 0, sizeof(*out));
+    COPY_V2_FIELDS(out, *h);
+    memcpy(out->rule_count, h->rule_count, sizeof(out->rule_count));
+    out->input   = h->input;
+    out->clear_s = h->clear_s;
+    memcpy(out->rules, &s_table.rule[rules_at(i)], (size_t)head_total(h) * sizeof(out->rules[0]));
+}
+
+/* Makes the `have` rules at `at` into `want`, moving the ones behind them;
+ * false, with nothing moved, when the pool cannot hold them. */
+static bool resize_rules(int at, int have, int want)
+{
+    const int used = s_table.hdr.rules;
+    if (used - have + want > CONFIG_ZBC_BUTTON_POOL) {
+        return false;
+    }
+    memmove(&s_table.rule[at + want], &s_table.rule[at + have],
+            (size_t)(used - at - have) * sizeof(s_table.rule[0]));
+    s_table.hdr.rules = (uint16_t)(used - have + want);
+    return true;
+}
+
+/* A button behind the last one, for the load; false when the table or the
+ * pool is full. */
+static bool append_locked(const zbc_button_t *b)
+{
+    const int n = button_db_rule_total(b);
+    if (s_table.hdr.count >= CONFIG_ZBC_MAX_BUTTONS || s_table.hdr.rules + n > CONFIG_ZBC_BUTTON_POOL) {
+        return false;
+    }
+    head_from(&s_table.head[s_table.hdr.count], b);
+    memcpy(&s_table.rule[s_table.hdr.rules], b->rules, (size_t)n * sizeof(b->rules[0]));
+    s_table.hdr.count++;
+    s_table.hdr.rules = (uint16_t)(s_table.hdr.rules + n);
+    return true;
+}
+
+
+/* Every version bdb_load converts, at the size its record had. Version 7's
+ * counts must add up to the rules stored behind it, or no button's rules
+ * could be found. */
+bool button_db_blob_ok(const void *blob, size_t len)
+{
+    button_blob_header_t hdr;
+    if (!blob || len < sizeof(hdr)) {
+        return false;
+    }
+    memcpy(&hdr, blob, sizeof(hdr));
+    size_t rec;
+    switch (hdr.version) {
+    case BUTTON_BLOB_VERSION: {
+        if (len != sizeof(hdr) + (size_t)hdr.count * sizeof(bdb_head_t) +
+                   (size_t)hdr.rules * sizeof(zbc_btn_rule_t)) {
+            return false;
+        }
+        size_t total = 0;
+        for (int i = 0; i < hdr.count; i++) {
+            bdb_head_t h;
+            memcpy(&h, (const uint8_t *)blob + sizeof(hdr) + (size_t)i * sizeof(h), sizeof(h));
+            total += (size_t)head_total(&h);
+        }
+        return total == hdr.rules;
+    }
+    case 6: rec = sizeof(zbc_button_v6_t); break;
+    case 5: rec = sizeof(zbc_button_v5_t); break;
+    case 4: rec = sizeof(zbc_button_v4_t); break;
+    case 3: rec = sizeof(zbc_button_v3_t); break;
+    case 2: rec = sizeof(zbc_button_v2_t); break;
+    case 1: rec = sizeof(zbc_button_v1_t); break;
+    default: return false;
+    }
+    return len == sizeof(hdr) + (size_t)hdr.count * rec;
+}
+
+size_t button_db_blob_max(void)
+{
+    const size_t now = sizeof(button_blob_header_t) + sizeof(s_table.head) + sizeof(s_table.rule);
+    const size_t v6  = sizeof(button_blob_header_t) + OLD_MAX_BUTTONS * sizeof(zbc_button_v6_t);
+    return now > v6 ? now : v6;
+}
+
+/* Record i of a blob that button_db_blob_ok passed, as a current button.
+ * `pool` is where version 7's next rules are; each version 7 record takes its
+ * own from there. */
+static void decode_record(uint32_t version, const uint8_t *recs, int i, const uint8_t **pool,
+                          zbc_button_t *b)
+{
+    memset(b, 0, sizeof(*b));
+    if (version == BUTTON_BLOB_VERSION) {
+        bdb_head_t h;
+        memcpy(&h, recs + (size_t)i * sizeof(h), sizeof(h));
+        COPY_V2_FIELDS(b, h);
+        b->input   = h.input;
+        b->clear_s = h.clear_s;
+        const int n = head_total(&h);
+        /* From a build that let a button have more: it keeps its name and its
+         * source, and loses its rules. */
+        if (n <= CONFIG_ZBC_BUTTON_RULES) {
+            memcpy(b->rule_count, h.rule_count, sizeof(b->rule_count));
+            memcpy(b->rules, *pool, (size_t)n * sizeof(b->rules[0]));
+        }
+        *pool += (size_t)n * sizeof(zbc_btn_rule_t);
+    } else if (version == 6) {
+        /* As now, but stored with room for twelve. */
+        const zbc_button_v6_t *in = (const zbc_button_v6_t *)recs + i;
+        COPY_V2_FIELDS(b, *in);
+        memcpy(b->rule_count, in->rule_count, sizeof(b->rule_count));
+        memcpy(b->rules, in->rules, sizeof(in->rules));
+        b->input   = in->input;
+        b->clear_s = in->clear_s;
+    } else if (version == 5) {
+        /* The same record less the delays and the no-motion time; version 5 had
+         * no sensors, so every clear_s stays zero. */
+        const zbc_button_v5_t *in = (const zbc_button_v5_t *)recs + i;
+        COPY_V2_FIELDS(b, *in);
+        memcpy(b->rule_count, in->rule_count, sizeof(b->rule_count));
+        for (int r = 0; r < OLD_POOL; r++) {
+            const zbc_btn_rule_v5_t *o = &in->rules[r];
+            zbc_btn_rule_t          *n = &b->rules[r];
+            n->group_id   = o->group_id;
+            n->cond       = o->cond;
+            n->cond_arg   = o->cond_arg;
+            n->action     = o->action;
+            n->action_arg = o->action_arg;
+            n->flags      = o->flags;
+            n->ep         = o->ep;
+            memcpy(n->ieee, o->ieee, sizeof(n->ieee));
+        }
+        b->input = in->input;
+    } else if (version == 4) {
+        const zbc_button_v4_t *in = (const zbc_button_v4_t *)recs + i;
+        COPY_V2_FIELDS(b, *in);
+        copy_old_rules(b, OLD_EV_COUNT_V4, in->rule_count, in->rules);
+        b->input = in->input;
+    } else if (version == 3) {
+        const zbc_button_v3_t *in = (const zbc_button_v3_t *)recs + i;
+        COPY_V2_FIELDS(b, *in);
+        copy_old_rules(b, OLD_EV_COUNT, in->rule_count, in->rules);
+        b->input = in->input;
+    } else if (version == 2) {
+        /* Every button before version 3 was a push button. */
+        const zbc_button_v2_t *in = (const zbc_button_v2_t *)recs + i;
+        COPY_V2_FIELDS(b, *in);
+        copy_old_rules(b, OLD_EV_COUNT, in->rule_count, in->rules);
+        b->input = ZBC_INPUT_BUTTON;
+    } else {
+        /* Every button that existed before remotes did was a pin. */
+        const zbc_button_v1_t *in = (const zbc_button_v1_t *)recs + i;
+        b->id       = in->id;
+        memcpy(b->name, in->name, sizeof(b->name));
+        b->src      = ZBC_BTN_SRC_GPIO;
+        b->gpio     = in->gpio;
+        b->inverted = in->inverted;
+        b->pull     = in->pull;
+        copy_old_rules(b, OLD_EV_COUNT, in->rule_count, in->rules);
+    }
+    /* button_db_rules() trusts the counts; a version 5 or 6 record whose counts
+     * run past its twelve keeps its name and source and loses its rules. */
+    if (version < BUTTON_BLOB_VERSION && button_db_rule_total(b) > OLD_POOL) {
+        memset(b->rule_count, 0, sizeof(b->rule_count));
+    }
+}
+
+/* A blob that button_db_blob_ok passed, into the empty table, one current
+ * button at a time through `b`, whatever its version. A table from a build
+ * with more room keeps the buttons that fit here; returns how many did not. */
+static int table_load(const uint8_t *blob, zbc_button_t *b)
+{
+    button_blob_header_t hdr;
+    memcpy(&hdr, blob, sizeof(hdr));
+    const uint8_t *recs = blob + sizeof(hdr);
+    const uint8_t *pool = recs + (size_t)hdr.count * sizeof(bdb_head_t);
+    int dropped = 0;
+    for (int i = 0; i < hdr.count; i++) {
+        decode_record(hdr.version, recs, i, &pool, b);
+        if (!append_locked(b)) {
+            dropped++;
+        }
+    }
+    return dropped;
+}
+
+/* Button i becomes `in`, its rules where its old ones were; false, with
+ * nothing changed, when the pool has no room for them. */
+static bool table_set(int i, const zbc_button_t *in)
+{
+    const uint16_t id   = s_table.head[i].id;
+    const int      at   = rules_at(i);
+    const int      want = button_db_rule_total(in);
+    if (!resize_rules(at, head_total(&s_table.head[i]), want)) {
+        return false;
+    }
+    memcpy(&s_table.rule[at], in->rules, (size_t)want * sizeof(in->rules[0]));
+    head_from(&s_table.head[i], in);
+    s_table.head[i].id = id;           /* the key is ours, not the caller's */
+    return true;
+}
+
+static void table_remove(int i)
+{
+    resize_rules(rules_at(i), head_total(&s_table.head[i]), 0);
+    memmove(&s_table.head[i], &s_table.head[i + 1],
+            (size_t)(s_table.hdr.count - i - 1) * sizeof(s_table.head[0]));
+    s_table.hdr.count--;
+}
+
+/* The table is the blob, once its rules follow the last head in use: they
+ * are moved down for `write` and back after it, which costs no copy of it.
+ * Nothing reads the heads past hdr.count, and the caller's lock keeps
+ * everyone else out meanwhile. */
+static int table_write(int (*write)(void *ctx, const void *blob, size_t len), void *ctx)
+{
+    s_table.hdr.version = BUTTON_BLOB_VERSION;
+    uint8_t     *gap   = (uint8_t *)&s_table.head[s_table.hdr.count];
+    const size_t rules = (size_t)s_table.hdr.rules * sizeof(s_table.rule[0]);
+    memmove(gap, s_table.rule, rules);
+    const int err = write(ctx, &s_table, (size_t)(gap - (uint8_t *)&s_table) + rules);
+    memmove(s_table.rule, gap, rules);
+    return err;
+}
+
+/* >>> end host-test region: bdb-table <<< */
+
+/* Set by a load of an older version, so the converted table is written back
+ * once rather than being converted again at every boot. */
 static bool              s_migrated;
 static SemaphoreHandle_t s_lock;
 
 #define BDB_LOCK()   xSemaphoreTakeRecursive(s_lock, portMAX_DELAY)
 #define BDB_UNLOCK() xSemaphoreGiveRecursive(s_lock)
 
-static zbc_button_t *find_by_id(uint16_t id)
+static int nvs_write(void *ctx, const void *blob, size_t len)
 {
-    for (int i = 0; i < CONFIG_ZBC_MAX_BUTTONS; i++) {
-        if (s_buttons[i].in_use && s_buttons[i].id == id) {
-            return &s_buttons[i];
-        }
-    }
-    return NULL;
+    return nvs_set_blob(*(nvs_handle_t *)ctx, BUTTON_NVS_KEY, blob, len);
 }
 
 static esp_err_t bdb_save_locked(void)
@@ -222,59 +561,12 @@ static esp_err_t bdb_save_locked(void)
     if (err != ESP_OK) {
         return err;
     }
-
-    size_t used = 0;
-    for (int i = 0; i < CONFIG_ZBC_MAX_BUTTONS; i++) {
-        if (s_buttons[i].in_use) {
-            used++;
-        }
-    }
-
-    size_t blob_size = sizeof(button_blob_header_t) + used * sizeof(zbc_button_t);
-    uint8_t *blob = calloc(1, blob_size);
-    if (!blob) {
-        nvs_close(nvs);
-        return ESP_ERR_NO_MEM;
-    }
-
-    button_blob_header_t hdr = { .version = BUTTON_BLOB_VERSION, .count = (uint16_t)used };
-    memcpy(blob, &hdr, sizeof(hdr));
-
-    zbc_button_t *out = (zbc_button_t *)(blob + sizeof(hdr));
-    for (int i = 0; i < CONFIG_ZBC_MAX_BUTTONS; i++) {
-        if (s_buttons[i].in_use) {
-            *out++ = s_buttons[i];
-        }
-    }
-
-    err = nvs_set_blob(nvs, BUTTON_NVS_KEY, blob, blob_size);
+    err = table_write(nvs_write, &nvs);
     if (err == ESP_OK) {
         err = nvs_commit(nvs);
     }
-    free(blob);
     nvs_close(nvs);
     return err;
-}
-
-/* Every version bdb_load converts, at the size its record had. */
-bool button_db_blob_ok(const void *blob, size_t len)
-{
-    button_blob_header_t hdr;
-    if (!blob || len < sizeof(hdr)) {
-        return false;
-    }
-    memcpy(&hdr, blob, sizeof(hdr));
-    size_t rec;
-    switch (hdr.version) {
-    case BUTTON_BLOB_VERSION: rec = sizeof(zbc_button_t);    break;
-    case 5:                   rec = sizeof(zbc_button_v5_t); break;
-    case 4:                   rec = sizeof(zbc_button_v4_t); break;
-    case 3:                   rec = sizeof(zbc_button_v3_t); break;
-    case 2:                   rec = sizeof(zbc_button_v2_t); break;
-    case 1:                   rec = sizeof(zbc_button_v1_t); break;
-    default:                  return false;
-    }
-    return len == sizeof(hdr) + (size_t)hdr.count * rec;
 }
 
 static void bdb_load(void)
@@ -291,136 +583,38 @@ static void bdb_load(void)
         return;
     }
 
-    uint8_t *blob = malloc(blob_size);
-    if (!blob) {
+    uint8_t      *blob = malloc(blob_size);
+    zbc_button_t *b    = malloc(sizeof(*b));
+    if (!blob || !b) {
+        free(blob);
+        free(b);
         nvs_close(nvs);
         return;
     }
     err = nvs_get_blob(nvs, BUTTON_NVS_KEY, blob, &blob_size);
     nvs_close(nvs);
-    if (err != ESP_OK) {
+    if (err != ESP_OK || !button_db_blob_ok(blob, blob_size)) {
+        if (err == ESP_OK) {
+            ESP_LOGW(TAG, "Stored buttons are from an incompatible build, discarding");
+        }
         free(blob);
-        return;
-    }
-
-    if (!button_db_blob_ok(blob, blob_size)) {
-        ESP_LOGW(TAG, "Stored buttons are from an incompatible build, discarding");
-        free(blob);
+        free(b);
         return;
     }
     button_blob_header_t hdr;
     memcpy(&hdr, blob, sizeof(hdr));
-    size_t expected    = sizeof(hdr) + (size_t)hdr.count * sizeof(zbc_button_t);
-    size_t expected_v1 = sizeof(hdr) + (size_t)hdr.count * sizeof(zbc_button_v1_t);
-    size_t expected_v2 = sizeof(hdr) + (size_t)hdr.count * sizeof(zbc_button_v2_t);
-    size_t expected_v3 = sizeof(hdr) + (size_t)hdr.count * sizeof(zbc_button_v3_t);
-    size_t expected_v4 = sizeof(hdr) + (size_t)hdr.count * sizeof(zbc_button_v4_t);
-    size_t expected_v5 = sizeof(hdr) + (size_t)hdr.count * sizeof(zbc_button_v5_t);
-
-    int loaded = 0;
-    if (hdr.version == BUTTON_BLOB_VERSION && blob_size == expected) {
-        const zbc_button_t *in = (const zbc_button_t *)(blob + sizeof(hdr));
-        for (int i = 0; i < hdr.count && loaded < CONFIG_ZBC_MAX_BUTTONS; i++) {
-            s_buttons[loaded]        = in[i];
-            s_buttons[loaded].in_use = true;
-            /* button_db_rules() trusts the counts; a record whose counts run past
-             * the pool keeps its name and source and loses its rules. */
-            if (button_db_rule_total(&s_buttons[loaded]) > CONFIG_ZBC_BUTTON_RULES) {
-                memset(s_buttons[loaded].rule_count, 0, sizeof(s_buttons[loaded].rule_count));
-            }
-            loaded++;
-        }
-    } else if (hdr.version == 5 && blob_size == expected_v5) {
-        /* The same record less the delays and the no-motion time; version 5 had
-         * no sensors, so every clear_s stays zero. */
-        const zbc_button_v5_t *in = (const zbc_button_v5_t *)(blob + sizeof(hdr));
-        for (int i = 0; i < hdr.count && loaded < CONFIG_ZBC_MAX_BUTTONS; i++) {
-            zbc_button_t *b = &s_buttons[loaded];
-            memset(b, 0, sizeof(*b));
-            COPY_V2_FIELDS(b, in[i]);
-            memcpy(b->rule_count, in[i].rule_count, sizeof(b->rule_count));
-            for (int r = 0; r < CONFIG_ZBC_BUTTON_RULES; r++) {
-                const zbc_btn_rule_v5_t *o = &in[i].rules[r];
-                zbc_btn_rule_t          *n = &b->rules[r];
-                n->group_id   = o->group_id;
-                n->cond       = o->cond;
-                n->cond_arg   = o->cond_arg;
-                n->action     = o->action;
-                n->action_arg = o->action_arg;
-                n->flags      = o->flags;
-                n->ep         = o->ep;
-                memcpy(n->ieee, o->ieee, sizeof(n->ieee));
-            }
-            if (button_db_rule_total(b) > CONFIG_ZBC_BUTTON_RULES) {
-                memset(b->rule_count, 0, sizeof(b->rule_count));
-            }
-            b->input = in[i].input;
-            loaded++;
-        }
-        ESP_LOGI(TAG, "Converted %d button(s) from the previous format", loaded);
-        s_migrated = true;
-    } else if (hdr.version == 4 && blob_size == expected_v4) {
-        const zbc_button_v4_t *in = (const zbc_button_v4_t *)(blob + sizeof(hdr));
-        for (int i = 0; i < hdr.count && loaded < CONFIG_ZBC_MAX_BUTTONS; i++) {
-            zbc_button_t *b = &s_buttons[loaded];
-            memset(b, 0, sizeof(*b));
-            COPY_V2_FIELDS(b, in[i]);
-            copy_old_rules(b, OLD_EV_COUNT_V4, in[i].rule_count, in[i].rules);
-            b->input    = in[i].input;
-            loaded++;
-        }
-        ESP_LOGI(TAG, "Converted %d button(s) from the previous format", loaded);
-        s_migrated = true;
-    } else if (hdr.version == 3 && blob_size == expected_v3) {
-        const zbc_button_v3_t *in = (const zbc_button_v3_t *)(blob + sizeof(hdr));
-        for (int i = 0; i < hdr.count && loaded < CONFIG_ZBC_MAX_BUTTONS; i++) {
-            zbc_button_t *b = &s_buttons[loaded];
-            memset(b, 0, sizeof(*b));
-            COPY_V2_FIELDS(b, in[i]);
-            copy_old_rules(b, OLD_EV_COUNT, in[i].rule_count, in[i].rules);
-            b->input    = in[i].input;
-            loaded++;
-        }
-        ESP_LOGI(TAG, "Converted %d button(s) from the previous format", loaded);
-        s_migrated = true;
-    } else if (hdr.version == 2 && blob_size == expected_v2) {
-        /* Every button before version 3 was a push button. */
-        const zbc_button_v2_t *in = (const zbc_button_v2_t *)(blob + sizeof(hdr));
-        for (int i = 0; i < hdr.count && loaded < CONFIG_ZBC_MAX_BUTTONS; i++) {
-            zbc_button_t *b = &s_buttons[loaded];
-            memset(b, 0, sizeof(*b));
-            COPY_V2_FIELDS(b, in[i]);
-            copy_old_rules(b, OLD_EV_COUNT, in[i].rule_count, in[i].rules);
-            b->input    = ZBC_INPUT_BUTTON;
-            loaded++;
-        }
-        ESP_LOGI(TAG, "Converted %d button(s) from the previous format", loaded);
-        s_migrated = true;
-    } else if (hdr.version == 1 && blob_size == expected_v1) {
-        /* Every button that existed before remotes did was a pin. */
-        const zbc_button_v1_t *in = (const zbc_button_v1_t *)(blob + sizeof(hdr));
-        for (int i = 0; i < hdr.count && loaded < CONFIG_ZBC_MAX_BUTTONS; i++) {
-            zbc_button_t *b = &s_buttons[loaded];
-            memset(b, 0, sizeof(*b));
-            b->in_use   = true;
-            b->id       = in[i].id;
-            memcpy(b->name, in[i].name, sizeof(b->name));
-            b->src      = ZBC_BTN_SRC_GPIO;
-            b->gpio     = in[i].gpio;
-            b->inverted = in[i].inverted;
-            b->pull     = in[i].pull;
-            copy_old_rules(b, OLD_EV_COUNT, in[i].rule_count, in[i].rules);
-            loaded++;
-        }
-        ESP_LOGI(TAG, "Converted %d button(s) from the previous format", loaded);
-        s_migrated = true;
-    } else {
-        ESP_LOGW(TAG, "Stored buttons are from an incompatible build, discarding");
-        free(blob);
-        return;
-    }
+    const int dropped = table_load(blob, b);
     free(blob);
-    ESP_LOGI(TAG, "Restored %d button(s) from NVS", loaded);
+    free(b);
+    if (hdr.version != BUTTON_BLOB_VERSION) {
+        ESP_LOGI(TAG, "Converted %d button(s) from the previous format", s_table.hdr.count);
+        s_migrated = true;
+    }
+    if (dropped) {
+        ESP_LOGW(TAG, "%d stored button(s) did not fit: %d buttons and %d rules at most",
+                 dropped, CONFIG_ZBC_MAX_BUTTONS, CONFIG_ZBC_BUTTON_POOL);
+    }
+    ESP_LOGI(TAG, "Restored %d button(s) with %d rule(s) from NVS", s_table.hdr.count, s_table.hdr.rules);
 }
 
 esp_err_t button_db_init(void)
@@ -432,7 +626,7 @@ esp_err_t button_db_init(void)
     if (!s_lock) {
         return ESP_ERR_NO_MEM;
     }
-    memset(s_buttons, 0, sizeof(s_buttons));
+    memset(&s_table, 0, sizeof(s_table));
     BDB_LOCK();
     bdb_load();
     if (s_migrated) {
@@ -450,33 +644,29 @@ esp_err_t button_db_create(const char *name, uint16_t *out_id)
     }
 
     BDB_LOCK();
-    zbc_button_t *slot = NULL;
-    uint16_t      next = 1;
-    for (int i = 0; i < CONFIG_ZBC_MAX_BUTTONS; i++) {
-        if (!s_buttons[i].in_use) {
-            if (!slot) {
-                slot = &s_buttons[i];
-            }
-        } else if (s_buttons[i].id >= next) {
-            next = s_buttons[i].id + 1;
-        }
-    }
-    if (!slot) {
+    if (s_table.hdr.count >= CONFIG_ZBC_MAX_BUTTONS) {
         BDB_UNLOCK();
         ESP_LOGE(TAG, "Button table full (%d)", CONFIG_ZBC_MAX_BUTTONS);
         return ESP_ERR_NO_MEM;
     }
+    uint16_t next = 1;
+    for (int i = 0; i < s_table.hdr.count; i++) {
+        if (s_table.head[i].id >= next) {
+            next = s_table.head[i].id + 1;
+        }
+    }
 
-    memset(slot, 0, sizeof(*slot));
-    slot->in_use = true;
-    slot->id     = next;
-    slot->gpio   = -1;                 /* not wired up until someone picks a pin */
-    slot->pull   = ZBC_PULL_UP;        /* a button to GND is what almost everyone wires */
-    slot->inverted = true;
-    strlcpy(slot->name, name, sizeof(slot->name));
+    /* No rules yet, so nothing in the pool moves. */
+    bdb_head_t *h = &s_table.head[s_table.hdr.count++];
+    memset(h, 0, sizeof(*h));
+    h->id       = next;
+    h->gpio     = -1;                  /* not wired up until someone picks a pin */
+    h->pull     = ZBC_PULL_UP;         /* a button to GND is what almost everyone wires */
+    h->inverted = true;
+    strlcpy(h->name, name, sizeof(h->name));
 
     if (out_id) {
-        *out_id = slot->id;
+        *out_id = h->id;
     }
     esp_err_t err = bdb_save_locked();
     BDB_UNLOCK();
@@ -588,14 +778,17 @@ esp_err_t button_db_set(uint16_t id, const zbc_button_t *in)
         return ESP_ERR_INVALID_ARG;
     }
     BDB_LOCK();
-    zbc_button_t *b = find_by_id(id);
-    if (!b) {
+    const int i = find_index(id);
+    if (i < 0) {
         BDB_UNLOCK();
         return ESP_ERR_NOT_FOUND;
     }
-    *b        = *in;
-    b->in_use = true;
-    b->id     = id;                    /* the key is ours, not the caller's */
+    if (!table_set(i, in)) {
+        ESP_LOGW(TAG, "No room for %d rule(s) on button %u: %d of %d in use",
+                 button_db_rule_total(in), id, s_table.hdr.rules, CONFIG_ZBC_BUTTON_POOL);
+        BDB_UNLOCK();
+        return ESP_ERR_NO_MEM;
+    }
     esp_err_t err = bdb_save_locked();
     BDB_UNLOCK();
     return err;
@@ -604,12 +797,12 @@ esp_err_t button_db_set(uint16_t id, const zbc_button_t *in)
 esp_err_t button_db_remove(uint16_t id)
 {
     BDB_LOCK();
-    zbc_button_t *b = find_by_id(id);
-    if (!b) {
+    const int i = find_index(id);
+    if (i < 0) {
         BDB_UNLOCK();
         return ESP_ERR_NOT_FOUND;
     }
-    memset(b, 0, sizeof(*b));
+    table_remove(i);
     esp_err_t err = bdb_save_locked();
     BDB_UNLOCK();
     return err;
@@ -618,39 +811,35 @@ esp_err_t button_db_remove(uint16_t id)
 bool button_db_get(uint16_t id, zbc_button_t *out)
 {
     BDB_LOCK();
-    zbc_button_t *b = find_by_id(id);
-    if (b && out) {
-        *out = *b;
-    }
-    bool found = b != NULL;
-    BDB_UNLOCK();
-    return found;
-}
-
-size_t button_db_snapshot(zbc_button_t *buf, size_t max)
-{
-    size_t n = 0;
-    BDB_LOCK();
-    for (int i = 0; i < CONFIG_ZBC_MAX_BUTTONS && n < max; i++) {
-        if (s_buttons[i].in_use) {
-            buf[n++] = s_buttons[i];
-        }
+    const int i = find_index(id);
+    if (i >= 0 && out) {
+        copy_out(i, out);
     }
     BDB_UNLOCK();
-    return n;
+    return i >= 0;
 }
 
 size_t button_db_list_ids(uint16_t *ids, size_t max)
 {
     size_t n = 0;
     BDB_LOCK();
-    for (int i = 0; i < CONFIG_ZBC_MAX_BUTTONS && n < max; i++) {
-        if (s_buttons[i].in_use) {
-            ids[n++] = s_buttons[i].id;
-        }
+    for (int i = 0; i < s_table.hdr.count && n < max; i++) {
+        ids[n++] = s_table.head[i].id;
     }
     BDB_UNLOCK();
     return n;
+}
+
+int button_db_rules_room(uint16_t id)
+{
+    int room = 0;
+    BDB_LOCK();
+    const int i = find_index(id);
+    if (i >= 0) {
+        room = CONFIG_ZBC_BUTTON_POOL - s_table.hdr.rules + head_total(&s_table.head[i]);
+    }
+    BDB_UNLOCK();
+    return room < CONFIG_ZBC_BUTTON_RULES ? room : CONFIG_ZBC_BUTTON_RULES;
 }
 
 bool button_db_pin_taken(int gpio, uint16_t except_id)
@@ -660,9 +849,8 @@ bool button_db_pin_taken(int gpio, uint16_t except_id)
     }
     bool taken = false;
     BDB_LOCK();
-    for (int i = 0; i < CONFIG_ZBC_MAX_BUTTONS && !taken; i++) {
-        taken = s_buttons[i].in_use && s_buttons[i].id != except_id &&
-                s_buttons[i].gpio == gpio;
+    for (int i = 0; i < s_table.hdr.count && !taken; i++) {
+        taken = s_table.head[i].id != except_id && s_table.head[i].gpio == gpio;
     }
     BDB_UNLOCK();
     return taken;
@@ -692,11 +880,10 @@ static bool source_taken(uint8_t src, const uint8_t ieee[ZBC_BTN_IEEE_LEN], uint
     }
     bool taken = false;
     BDB_LOCK();
-    for (int i = 0; i < CONFIG_ZBC_MAX_BUTTONS && !taken; i++) {
-        taken = s_buttons[i].in_use && s_buttons[i].id != except_id &&
-                s_buttons[i].src == src && s_buttons[i].zb_ep == ep &&
-                s_buttons[i].zb_key == key &&
-                memcmp(s_buttons[i].ieee, ieee, ZBC_BTN_IEEE_LEN) == 0;
+    for (int i = 0; i < s_table.hdr.count && !taken; i++) {
+        const bdb_head_t *h = &s_table.head[i];
+        taken = h->id != except_id && h->src == src && h->zb_ep == ep && h->zb_key == key &&
+                memcmp(h->ieee, ieee, ZBC_BTN_IEEE_LEN) == 0;
     }
     BDB_UNLOCK();
     return taken;
@@ -720,29 +907,26 @@ void button_db_forget_device(const uint8_t ieee[ZBC_BTN_IEEE_LEN])
     }
     bool changed = false;
     BDB_LOCK();
-    for (int i = 0; i < CONFIG_ZBC_MAX_BUTTONS; i++) {
-        zbc_button_t *b = &s_buttons[i];
-        if (!b->in_use) {
-            continue;
-        }
-        if ((b->src == ZBC_BTN_SRC_ZIGBEE || b->src == ZBC_BTN_SRC_SENSOR) &&
-            memcmp(b->ieee, ieee, ZBC_BTN_IEEE_LEN) == 0) {
-            memset(b->ieee, 0, ZBC_BTN_IEEE_LEN);
-            b->zb_ep  = 0;
-            b->zb_key = 0;
+    for (int i = 0; i < s_table.hdr.count; i++) {
+        bdb_head_t *h = &s_table.head[i];
+        if ((h->src == ZBC_BTN_SRC_ZIGBEE || h->src == ZBC_BTN_SRC_SENSOR) &&
+            memcmp(h->ieee, ieee, ZBC_BTN_IEEE_LEN) == 0) {
+            memset(h->ieee, 0, ZBC_BTN_IEEE_LEN);
+            h->zb_ep  = 0;
+            h->zb_key = 0;
             changed = true;
         }
-        /* A light that is gone leaves its rules unassigned rather than deleted,
-         * as a room does - and never pointing at the address, which a wired
-         * light or a Matter lamp made later may be given again. */
-        const int total = button_db_rule_total(b);
-        for (int r = 0; r < total; r++) {
-            zbc_btn_rule_t *rule = &b->rules[r];
-            if (rule->ep != 0 && memcmp(rule->ieee, ieee, ZBC_BTN_IEEE_LEN) == 0) {
-                memset(rule->ieee, 0, ZBC_BTN_IEEE_LEN);
-                rule->ep = 0;
-                changed = true;
-            }
+    }
+    /* A light that is gone leaves its rules unassigned rather than deleted,
+     * as a room does - and never pointing at the address, which a wired
+     * light or a Matter lamp made later may be given again. Every rule in the
+     * pool is some button's. */
+    for (int r = 0; r < s_table.hdr.rules; r++) {
+        zbc_btn_rule_t *rule = &s_table.rule[r];
+        if (rule->ep != 0 && memcmp(rule->ieee, ieee, ZBC_BTN_IEEE_LEN) == 0) {
+            memset(rule->ieee, 0, ZBC_BTN_IEEE_LEN);
+            rule->ep = 0;
+            changed = true;
         }
     }
     if (changed) {
@@ -755,17 +939,11 @@ void button_db_forget_group(uint16_t group_id)
 {
     bool changed = false;
     BDB_LOCK();
-    for (int i = 0; i < CONFIG_ZBC_MAX_BUTTONS; i++) {
-        if (!s_buttons[i].in_use) {
-            continue;
-        }
-        const int total = button_db_rule_total(&s_buttons[i]);
-        for (int r = 0; r < total; r++) {
-            zbc_btn_rule_t *rule = &s_buttons[i].rules[r];
-            if (rule->ep == 0 && rule->group_id == group_id) {
-                rule->group_id = 0;
-                changed = true;
-            }
+    for (int r = 0; r < s_table.hdr.rules; r++) {
+        zbc_btn_rule_t *rule = &s_table.rule[r];
+        if (rule->ep == 0 && rule->group_id == group_id) {
+            rule->group_id = 0;
+            changed = true;
         }
     }
     if (changed) {
@@ -777,7 +955,7 @@ void button_db_forget_group(uint16_t group_id)
 esp_err_t button_db_erase(void)
 {
     BDB_LOCK();
-    memset(s_buttons, 0, sizeof(s_buttons));
+    memset(&s_table, 0, sizeof(s_table));
     nvs_handle_t nvs;
     esp_err_t err = nvs_open(BUTTON_NVS_NAMESPACE, NVS_READWRITE, &nvs);
     if (err == ESP_OK) {

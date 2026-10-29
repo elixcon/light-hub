@@ -62,7 +62,7 @@ on its double and triple press, and `dim_up` / `dim_down` on the long press of k
 
 The page shows the buttons of one remote as one card (`web/src/lib/remotes.ts` holds the table of
 known remotes). The API and the firmware still see one button per key, at most
-`CONFIG_ZBC_MAX_BUTTONS` (16) in all.
+`CONFIG_ZBC_MAX_BUTTONS` (32) in all, motion sensors included.
 
 The BILRESA never says when the wheel stops. Its hold ends after one and a half times the gap it has
 been leaving between frames (0.35-1.5 s; about 0.5 s while turning). While it turns, the dimming
@@ -111,7 +111,9 @@ to tell a wiring mistake from a configuration mistake.
 A button has four gestures: `short`, `long`, `double` and `triple`. The triple press only comes from
 a remote that counts its own presses. Each gesture has a list of rules, tried in order, and the
 first one whose `when` matches is the one that runs. A final `"when":"always"` therefore reads as
-"otherwise". A button holds twelve rules across all its gestures.
+"otherwise". A button holds twelve rules across all its gestures, and all buttons together 192
+(`CONFIG_ZBC_BUTTON_POOL`), so a remote key with one rule leaves the rest to the others. A save that
+would go past 192 is refused with `507`, saying how many rules that button can have.
 
 <img src="images/button-rules.jpg" width="320" alt="A button's rules: a short press toggles the living room, a hold dims it, and a double press lifts a dim room to 80 % or otherwise sets it to 30 %">
 

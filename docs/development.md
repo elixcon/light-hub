@@ -165,7 +165,7 @@ main/
   device_db.c        device registry, keyed by IEEE address, persisted in NVS
   group_db.c         named groups of (device, endpoint) members, persisted in NVS
   al_db.c            how each group exposes Adaptive Lighting, and which run it, in NVS
-  button_db.c        buttons: their source and the rules on each gesture, in NVS
+  button_db.c        buttons: their source, and all their rules in one pool, in NVS
   light_db.c         wired lights and their wiring, in NVS
   mlight_db.c        Matter lamps: the device and endpoint each one is, in NVS
   remote.c           what a Zigbee remote's frames mean, as a press; no dependencies

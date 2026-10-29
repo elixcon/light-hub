@@ -680,17 +680,35 @@ static void note_unlock(uint16_t id, zbc_unlock_t what)
 
 /* ---------------------------------------------------------------- pin ownership */
 
+/* What buttons_reload takes from each button: how it is wired, which decides
+ * whether its slot's live state carries over, and what the sampler reads. A
+ * few dozen bytes a button, where a whole record with room for its rules is
+ * a few hundred. */
+typedef struct {
+    uint16_t id;
+    uint8_t  src;
+    int8_t   gpio;
+    bool     inverted;
+    uint8_t  pull;
+    bool     is_switch;
+    bool     want_double;
+    uint8_t  ieee[ZBC_BTN_IEEE_LEN];
+    uint8_t  zb_ep;
+    uint8_t  zb_key;
+    int64_t  clear_us;
+} btn_wiring_t;
+
 /* Pins we configured, so one that stops being used is handed back rather than
  * left pulled in whatever direction it happened to have. */
 static bool s_owned[SOC_GPIO_PIN_COUNT];
 
 /* Returns whether the failsafe pin is left to the sampler to watch on its own. */
-static bool apply_pins(const zbc_button_t *cfg, size_t n)
+static bool apply_pins(const btn_wiring_t *w, size_t n)
 {
     bool wanted[SOC_GPIO_PIN_COUNT] = { 0 };
 
     for (size_t i = 0; i < n; i++) {
-        const int pin = cfg[i].gpio;
+        const int pin = w[i].gpio;
         if (pin < 0 || pin >= SOC_GPIO_PIN_COUNT) {
             continue;
         }
@@ -699,8 +717,8 @@ static bool apply_pins(const zbc_button_t *cfg, size_t n)
         gpio_config_t io = {
             .pin_bit_mask = 1ULL << pin,
             .mode         = GPIO_MODE_INPUT,
-            .pull_up_en   = cfg[i].pull == ZBC_PULL_UP   ? GPIO_PULLUP_ENABLE   : GPIO_PULLUP_DISABLE,
-            .pull_down_en = cfg[i].pull == ZBC_PULL_DOWN ? GPIO_PULLDOWN_ENABLE : GPIO_PULLDOWN_DISABLE,
+            .pull_up_en   = w[i].pull == ZBC_PULL_UP   ? GPIO_PULLUP_ENABLE   : GPIO_PULLUP_DISABLE,
+            .pull_down_en = w[i].pull == ZBC_PULL_DOWN ? GPIO_PULLDOWN_ENABLE : GPIO_PULLDOWN_DISABLE,
             .intr_type    = GPIO_INTR_DISABLE,
         };
         esp_err_t err = gpio_config(&io);
@@ -739,97 +757,129 @@ static bool apply_pins(const zbc_button_t *cfg, size_t n)
     return false;
 }
 
+/* Matching on the source as well as the pin: a button switched from a pin to
+ * a remote is a different button as far as a half-finished gesture is
+ * concerned, and carrying one over would invent a press. */
+static bool same_wiring(const btn_live_t *l, const btn_wiring_t *w)
+{
+    return l->src == w->src && l->gpio == w->gpio && l->inverted == w->inverted &&
+           l->is_switch == w->is_switch && l->zb_ep == w->zb_ep && l->zb_key == w->zb_key &&
+           memcmp(l->ieee, w->ieee, ZBC_BTN_IEEE_LEN) == 0;
+}
+
+/* A slot for a button new to it: at boot, newly made, or wired anew. A sensor
+ * starts clear with its no-motion rules due a hold from now - see
+ * motion_start(). */
+static void live_init(btn_live_t *l, const btn_wiring_t *w, int64_t now)
+{
+    memset(l, 0, sizeof(*l));
+    l->used        = true;
+    l->id          = w->id;
+    l->src         = w->src;
+    l->gpio        = w->gpio;
+    l->inverted    = w->inverted;
+    l->is_switch   = w->is_switch;
+    l->want_double = w->want_double;
+    memcpy(l->ieee, w->ieee, ZBC_BTN_IEEE_LEN);
+    l->zb_ep       = w->zb_ep;
+    l->zb_key      = w->zb_key;
+    l->dim_dir     = -1;   /* the first hold flips this, so it dims up */
+    l->hold_case   = -1;
+    l->clear_us    = w->clear_us;
+    if (l->src == ZBC_BTN_SRC_SENSOR) {
+        motion_start(&l->mfsm, l->clear_us, now);
+    }
+}
+
 void buttons_reload(void)
 {
-    /* On the heap, not the stack. Both tables are CONFIG_ZBC_MAX_BUTTONS long,
-     * about 4 KB at 16, and this runs on whatever task calls it - app_main's
-     * 5120-byte stack at boot, which they would overflow, and an HTTP handler's
-     * afterwards. */
-    zbc_button_t *cfg  = calloc(CONFIG_ZBC_MAX_BUTTONS, sizeof(*cfg));
-    btn_live_t   *next = calloc(CONFIG_ZBC_MAX_BUTTONS, sizeof(*next));
-    if (!cfg || !next) {
+    /* One record at a time, as stream_buttons reads them, keeping only the
+     * wiring: a copy of the whole table with room for every rule would be
+     * several kilobytes, on whatever task calls this - app_main's 5120-byte
+     * stack at boot, an HTTP handler's afterwards. */
+    uint16_t      ids[CONFIG_ZBC_MAX_BUTTONS];
+    const size_t  count = button_db_list_ids(ids, CONFIG_ZBC_MAX_BUTTONS);
+    btn_wiring_t *w     = calloc(CONFIG_ZBC_MAX_BUTTONS, sizeof(*w));
+    zbc_button_t *b     = malloc(sizeof(*b));
+    if (!w || !b) {
         ESP_LOGE(TAG, "No memory to reload the buttons; keeping the ones already loaded");
-        free(cfg);
-        free(next);
+        free(w);
+        free(b);
         return;
     }
-    const size_t n = button_db_snapshot(cfg, CONFIG_ZBC_MAX_BUTTONS);
-
-    const bool unlock_self = apply_pins(cfg, n);
-
-    /* Rebuilt rather than patched, but the gesture state of a button whose pin
-     * and polarity did not change is carried over: reloading while someone has a
-     * finger on a button must not read as a fresh press. */
-    for (size_t i = 0; i < n; i++) {
-        next[i].used        = true;
-        next[i].id          = cfg[i].id;
-        next[i].src         = cfg[i].src;
-        next[i].gpio        = cfg[i].gpio;
-        next[i].inverted    = cfg[i].inverted;
-        next[i].is_switch   = cfg[i].src == ZBC_BTN_SRC_GPIO && cfg[i].input == ZBC_INPUT_SWITCH;
-        next[i].want_double = !next[i].is_switch && cfg[i].rule_count[ZBC_EV_DOUBLE] > 0;
-        memcpy(next[i].ieee, cfg[i].ieee, ZBC_BTN_IEEE_LEN);
-        next[i].zb_ep       = cfg[i].zb_ep;
-        next[i].zb_key      = cfg[i].zb_key;
-        next[i].dim_dir     = -1;   /* the first hold flips this, so it dims up */
-        next[i].hold_case   = -1;
-        next[i].clear_us    = (int64_t)cfg[i].clear_s * 1000000;
+    size_t n = 0;
+    for (size_t k = 0; k < count; k++) {
+        /* Deleted since the ids were taken: whoever deleted it reloads next. */
+        if (!button_db_get(ids[k], b)) {
+            continue;
+        }
+        btn_wiring_t *x = &w[n++];
+        x->id          = b->id;
+        x->src         = b->src;
+        x->gpio        = b->gpio;
+        x->inverted    = b->inverted;
+        x->pull        = b->pull;
+        x->is_switch   = b->src == ZBC_BTN_SRC_GPIO && b->input == ZBC_INPUT_SWITCH;
+        x->want_double = !x->is_switch && b->rule_count[ZBC_EV_DOUBLE] > 0;
+        memcpy(x->ieee, b->ieee, ZBC_BTN_IEEE_LEN);
+        x->zb_ep       = b->zb_ep;
+        x->zb_key      = b->zb_key;
+        x->clear_us    = (int64_t)b->clear_s * 1000000;
     }
-    const int64_t now = esp_timer_get_time();
-    bool          carried[CONFIG_ZBC_MAX_BUTTONS] = { false };
+    free(b);
+
+    const bool    unlock_self = apply_pins(w, n);
+    const int64_t now         = esp_timer_get_time();
+    bool          placed[CONFIG_ZBC_MAX_BUTTONS] = { false };
 
     portENTER_CRITICAL(&s_live_mux);
-    for (size_t i = 0; i < n; i++) {
-        for (int j = 0; j < CONFIG_ZBC_MAX_BUTTONS; j++) {
-            /* Matching on the source as well as the pin: a button switched from
-             * a pin to a remote is a different button as far as a half-finished
-             * gesture is concerned, and carrying one over would invent a press. */
-            if (s_live[j].used && s_live[j].id == next[i].id && s_live[j].src == next[i].src &&
-                s_live[j].gpio == next[i].gpio && s_live[j].inverted == next[i].inverted &&
-                s_live[j].is_switch == next[i].is_switch &&
-                s_live[j].zb_ep == next[i].zb_ep && s_live[j].zb_key == next[i].zb_key &&
-                memcmp(s_live[j].ieee, next[i].ieee, ZBC_BTN_IEEE_LEN) == 0) {
-                /* The whole live block, not just the gesture state: a reload
-                 * in the middle of a sweep must not restart it or lose the
-                 * lights it has to stop. */
-                next[i].fsm        = s_live[j].fsm;
-                next[i].zfsm       = s_live[j].zfsm;
-                next[i].unlock     = s_live[j].unlock;
-                next[i].sim_hold_until = s_live[j].sim_hold_until;
-                next[i].last_nudge_us  = s_live[j].last_nudge_us;
-                next[i].last_event_us = s_live[j].last_event_us;
-                next[i].dim_dir    = s_live[j].dim_dir;
-                next[i].ramp_since = s_live[j].ramp_since;
-                memcpy(next[i].sweep, s_live[j].sweep, sizeof(next[i].sweep));
-                next[i].hold_case  = s_live[j].hold_case;
-                next[i].sim_until  = s_live[j].sim_until;
-                next[i].mfsm       = s_live[j].mfsm;
-                carried[i]         = true;
-                break;
-            }
+    /* In place: a button keeps its slot, and a slot whose button is wired as it
+     * was keeps its whole live block - reloading while someone has a finger on
+     * a button must not read as a fresh press, and a reload in the middle of a
+     * sweep must not restart it or lose the lights it has to stop. Only what
+     * the rules decide is taken anew. */
+    for (int j = 0; j < CONFIG_ZBC_MAX_BUTTONS; j++) {
+        btn_live_t *l = &s_live[j];
+        if (!l->used) {
+            continue;
+        }
+        size_t i = 0;
+        while (i < n && w[i].id != l->id) {
+            i++;
+        }
+        if (i == n) {
+            memset(l, 0, sizeof(*l));      /* deleted */
+            continue;
+        }
+        placed[i] = true;
+        if (same_wiring(l, &w[i])) {
+            l->want_double = w[i].want_double;
+            l->clear_us    = w[i].clear_us;
+        } else {
+            live_init(l, &w[i], now);
         }
     }
-    /* A sensor not carried over is new to this boot, or newly set up. */
     for (size_t i = 0; i < n; i++) {
-        if (next[i].src == ZBC_BTN_SRC_SENSOR && !carried[i]) {
-            motion_start(&next[i].mfsm, next[i].clear_us, now);
+        for (int j = 0; j < CONFIG_ZBC_MAX_BUTTONS && !placed[i]; j++) {
+            if (!s_live[j].used) {
+                live_init(&s_live[j], &w[i], now);
+                placed[i] = true;
+            }
         }
     }
     /* What a deleted button scheduled goes with it. */
     for (int k = 0; k < ZBC_DELAYED_MAX; k++) {
         bool kept = false;
         for (size_t i = 0; i < n && !kept; i++) {
-            kept = s_delayed.slot[k].id == next[i].id;
+            kept = s_delayed.slot[k].id == w[i].id;
         }
         if (!kept) {
             s_delayed.slot[k].id = 0;
         }
     }
-    memcpy(s_live, next, sizeof(s_live));
     s_unlock_self = unlock_self;
     portEXIT_CRITICAL(&s_live_mux);
-    free(next);
-    free(cfg);
+    free(w);
 }
 
 /* -------------------------------------------------------------------- sampling */

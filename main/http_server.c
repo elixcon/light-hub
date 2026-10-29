@@ -2058,8 +2058,9 @@ static cJSON *button_to_json(const zbc_button_t *b)
 }
 
 /* False when the table could not be copied; nothing was written then. One
- * button at a time, as the devices are: the whole table is about 4 KB, and
- * this runs inside the deepest request the page makes. */
+ * button at a time, as the devices are: a copy of every button with room for
+ * its rules is several kilobytes, and this runs inside the deepest request the
+ * page makes. */
 static bool stream_buttons(json_stream_t *js)
 {
     uint16_t     ids[CONFIG_ZBC_MAX_BUTTONS];
@@ -2469,6 +2470,13 @@ static esp_err_t button_patch(httpd_req_t *req, uint16_t id)
     esp_err_t err = button_db_set(id, &b);
     if (err == ESP_ERR_INVALID_ARG) {
         return send_error(req, "400 Bad Request", "that button configuration does not make sense");
+    }
+    if (err == ESP_ERR_NO_MEM) {
+        /* The pool all buttons share is full. */
+        char msg[96];
+        snprintf(msg, sizeof(msg), "the buttons are out of room for rules: this one can have %d",
+                 button_db_rules_room(id));
+        return send_error(req, "507 Insufficient Storage", msg);
     }
     if (err != ESP_OK) {
         return send_error(req, "500 Internal Server Error", "could not store the button");

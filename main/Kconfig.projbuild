@@ -43,8 +43,12 @@ menu "Elixcon Light Hub"
 
     config ZBC_MAX_BUTTONS
         int "Maximum number of buttons, counting every button of every remote and every motion sensor"
-        range 1 16
-        default 16
+        range 1 64
+        default 32
+        help
+            Changing it changes nothing stored: the table is kept by count. Each
+            button costs about 380 bytes of RAM, most of it the state of its
+            presses and holds. Its rules are counted in ZBC_BUTTON_POOL.
 
     config ZBC_MAX_LIGHTS
         int "Maximum number of lights wired to a pin"
@@ -81,11 +85,21 @@ menu "Elixcon Light Hub"
             order until one matches, and a rule can bring others along with "and".
             The gestures of one button share this many, so a wall switch with one
             gesture can use them all. Not below 12: that is what a button stored
-            before the pool held (four gestures of three), and converting one must
-            not lose a rule.
-            Changing it changes the size of a stored button and discards the
-            stored buttons unless BUTTON_BLOB_VERSION in button_db.c is bumped
-            with it.
+            by older builds held, and converting one must not lose a rule.
+            Changing it changes nothing stored. Each one costs 18 bytes of stack
+            wherever a button is copied, and the web UI's MAX_RULES says the same.
+
+    config ZBC_BUTTON_POOL
+        int "Rules of all buttons together"
+        range 32 512
+        default 192
+        help
+            The buttons keep their rules in one pool, so a remote key with one
+            rule takes one and a wall switch with twelve takes twelve. 18 bytes
+            of RAM each. The default is what 16 buttons of 12 rules took before
+            the pool, so every table an older build stored converts whole.
+            Changing it changes nothing stored: a table with more rules than
+            this keeps the buttons that fit.
 
     config ZBC_MAX_AUTH_KEYS
         int "Maximum number of access keys"

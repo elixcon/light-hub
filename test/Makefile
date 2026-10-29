@@ -5,7 +5,7 @@
 # main/settings.c, for the WLED interface's packets in main/wled.c, for the key
 # format in main/auth.c, for the bootloader's ESP-IDF check in main/ota.c, for
 # what a configuration backup carries and restores in
-# main/config_backup.c, for the stack scan of a
+# main/config_backup.c, for the button table in main/button_db.c, for the stack scan of a
 # crash record in main/crash_log.c, for the leaf modules
 # main/remote.c, main/sun.c, main/tz.c, main/ntc.c and main/zb_ota_file.c, and for the updater's boot
 # decision and partition table plans in updater/main/.
@@ -50,10 +50,11 @@ TESTS    = test_gate test_settle test_sweep test_zremote test_remote test_matter
            test_unlock test_btnstep test_authkey test_switchpoint test_prewarm test_lightaddr test_cwww test_ramp test_updater test_convert \
            test_sun test_tz test_ntc test_alstate test_linkgap test_reach test_zbota test_fadein \
            test_mctl_gate test_mctl_disc test_clause test_parent test_crash test_ent test_stream test_wled \
-           test_config_backup test_idfver test_motion test_delayed
+           test_config_backup test_idfver test_motion test_delayed test_bdbpool
 REGIONS  = gate-types gate-body settle-types settle-body sweep zremote btnstep motion delayed levels matter slug \
            unlock authkey switchpoint prewarm fadein lightaddr cwww ramp pchip updater-decide convert-plan alstate linkgap reach zota-wake \
-           mctl-gate mctl-disc clause parent crash-scan ent-frame stream wled-parse cfg-plan idf-ver
+           mctl-gate mctl-disc clause parent crash-scan ent-frame stream wled-parse cfg-plan idf-ver \
+           bdb-types bdb-table
 INCS     = $(REGIONS:%=%.inc)
 
 .PHONY: all clean FORCE
@@ -103,6 +104,8 @@ FROM_stream       = $(SRC_LIGHT)
 FROM_wled-parse   = ../main/wled.c
 FROM_cfg-plan     = ../main/config_backup.c
 FROM_idf-ver      = ../main/ota.c
+FROM_bdb-types    = ../main/button_db.h
+FROM_bdb-table    = ../main/button_db.c
 
 # FORCE rather than a plain mtime dependency: make compares timestamps to the
 # second, so an edit and a re-run inside the same second leaves the extracted
@@ -161,6 +164,11 @@ test_motion: test_motion.c motion.inc
 	@$(CC) $(CFLAGS) -o $@ $<
 
 test_delayed: test_delayed.c delayed.inc
+	@$(CC) $(CFLAGS) -o $@ $<
+
+# The button types come from the header's region, so the stored records and the
+# table are tested against the real zbc_button_t.
+test_bdbpool: test_bdbpool.c bdb-types.inc bdb-table.inc
 	@$(CC) $(CFLAGS) -o $@ $<
 
 test_slug:   test_slug.c   slug.inc

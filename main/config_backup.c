@@ -239,10 +239,13 @@ static size_t blob_max(void)
     CB_TABLE(zbc_device_t, CONFIG_ZBC_MAX_DEVICES);
     CB_TABLE(zbc_group_t, CONFIG_ZBC_MAX_GROUPS);
     CB_TABLE(zbc_curveset_t, CONFIG_ZBC_MAX_CURVES);
-    CB_TABLE(zbc_button_t, CONFIG_ZBC_MAX_BUTTONS);
     CB_TABLE(zbc_light_t, CONFIG_ZBC_MAX_LIGHTS);
     CB_TABLE(zbc_mlight_t, CONFIG_ZBC_MAX_MATTER_LIGHTS);
 #undef CB_TABLE
+    /* Its records are not all one size: the table says. */
+    if (button_db_blob_max() > m) {
+        m = button_db_blob_max();
+    }
     return m;
 }
 
