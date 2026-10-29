@@ -15,13 +15,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* From button_db.h. */
-typedef struct {
-    uint16_t group_id;
-    uint8_t  cond, cond_arg, action, action_arg, flags, ep;
-    uint8_t  ieee[8];
-    uint16_t delay_s;
-} zbc_btn_rule_t;
+/* The rule, from button_db.h. */
+#define CONFIG_ZBC_BUTTON_RULES 12
+#include "bdb-types.inc"
 
 #include "delayed.inc"
 

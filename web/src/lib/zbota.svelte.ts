@@ -197,11 +197,12 @@ async function run(d: Device, work: () => Promise<void>) {
   }
 }
 
-/* A device whose endpoints are all remote keys sleeps. The coordinator sends
- * it the notify again whenever it is heard from in the next ten minutes, so a
- * press is what delivers it. The same test as device_listens in
- * zb_coordinator.c. */
-export const isSleepy = (d: Device) => d.endpoints.length > 0 && d.endpoints.every((e) => e.features.includes("switch"));
+/* A device whose endpoints are all remote keys or motion sensors sleeps. The
+ * coordinator sends it the notify again whenever it is heard from in the next
+ * ten minutes, so a press or a motion is what delivers it. The same test as
+ * device_listens in zb_coordinator.c. */
+export const isSleepy = (d: Device) =>
+  d.endpoints.length > 0 && d.endpoints.every((e) => e.features.includes("switch") || e.features.includes("motion"));
 
 export function installEntry(d: Device, entry: IndexEntry) {
   return run(d, async () => {

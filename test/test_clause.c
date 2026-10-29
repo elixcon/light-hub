@@ -15,32 +15,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define ZBC_RULE_AND 0x01
-
-typedef enum {
-    ZBC_COND_ALWAYS = 0, ZBC_COND_OFF, ZBC_COND_ON, ZBC_COND_BELOW, ZBC_COND_ABOVE, ZBC_COND_SUN_DOWN,
-} zbc_btn_cond_t;
-
-static bool zbc_cond_needs_target(uint8_t cond)
-{
-    return cond != ZBC_COND_ALWAYS && cond != ZBC_COND_SUN_DOWN;
-}
-
-typedef enum {
-    ZBC_ACT_NONE = 0, ZBC_ACT_ON, ZBC_ACT_OFF, ZBC_ACT_TOGGLE,
-    ZBC_ACT_SET, ZBC_ACT_DIM_UP, ZBC_ACT_DIM_DOWN, ZBC_ACT_DIM_CYCLE, ZBC_ACT_ADAPTIVE,
-} zbc_btn_action_t;
+/* The rules, their conditions and which conditions need a target, from
+ * button_db.h. */
+#define CONFIG_ZBC_BUTTON_RULES 12
+#include "bdb-types.inc"
 
 typedef enum { ZB_ONOFF_OFF = 0, ZB_ONOFF_ON = 1, ZB_ONOFF_TOGGLE = 2 } zb_onoff_cmd_t;
-
-typedef struct {
-    uint16_t group_id;
-    uint8_t  cond, cond_arg, action, action_arg, flags, ep;
-    uint8_t  ieee[8];
-    uint16_t delay_s;
-} zbc_btn_rule_t;
-
-static bool button_db_rule_assigned(const zbc_btn_rule_t *r) { return r->ep != 0 || r->group_id != 0; }
 
 #include "clause.inc"
 

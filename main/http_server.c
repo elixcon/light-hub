@@ -1924,7 +1924,7 @@ _Static_assert(sizeof(SOURCE_NAMES) / sizeof(SOURCE_NAMES[0]) == ZBC_BTN_SRC_COU
 static const char *event_name(uint8_t src, int ev)
 {
     if (src == ZBC_BTN_SRC_SENSOR) {
-        return ev < 2 ? SENSOR_EVENT_NAMES[ev] : NULL;
+        return ev <= ZBC_EV_CLEAR ? SENSOR_EVENT_NAMES[ev] : NULL;
     }
     return EVENT_NAMES[ev];
 }
@@ -1950,7 +1950,7 @@ static cJSON *button_to_json(const zbc_button_t *b)
     cJSON_AddNumberToObject(obj, "id", b->id);
     cJSON_AddStringToObject(obj, "name", b->name);
     cJSON_AddStringToObject(obj, "source", SOURCE_NAMES[b->src < ZBC_BTN_SRC_COUNT ? b->src : 0]);
-    if ((b->src == ZBC_BTN_SRC_ZIGBEE || b->src == ZBC_BTN_SRC_SENSOR) && button_db_has_source(b)) {
+    if (zbc_btn_src_is_device(b->src) && button_db_has_source(b)) {
         char ieee[19];
         zbc_ieee_to_str(b->ieee, ieee);
         cJSON_AddStringToObject(obj, "ieee", ieee);
@@ -2127,6 +2127,21 @@ static esp_err_t buttons_post(httpd_req_t *req)
     return send_json(req, button_to_json(&b), "201 Created");
 }
 
+/* "ieee" and "ep" naming one endpoint of a device, the way /api/devices names
+ * it: NULL, or why not. */
+static const char *endpoint_from_json(const cJSON *jieee, const cJSON *jep, uint8_t ieee[ZBC_IEEE_LEN],
+                                      uint8_t *ep)
+{
+    if (!cJSON_IsString(jieee) || !zbc_str_to_ieee(jieee->valuestring, ieee)) {
+        return "ieee has to be a 0x-prefixed 64-bit address";
+    }
+    if (!cJSON_IsNumber(jep) || jep->valueint < 1 || jep->valueint > 240) {
+        return "ep has to be an endpoint number";
+    }
+    *ep = (uint8_t)jep->valueint;
+    return NULL;
+}
+
 /* One rule from the request body. `first` says it opens its gesture, which has
  * nothing before it to join; `sensor` that the button is a motion sensor, which
  * is never held and so never dims. Returns a reason on refusal, NULL on
@@ -2144,19 +2159,15 @@ static const char *rule_from_json(const cJSON *item, zbc_btn_rule_t *r, bool fir
     /* One light instead of a room, named the way the Lights page names it. */
     const cJSON *jieee = cJSON_GetObjectItem(item, "ieee");
     if (jieee && !cJSON_IsNull(jieee)) {
-        const cJSON *jep = cJSON_GetObjectItem(item, "ep");
-        uint8_t      ieee[ZBC_IEEE_LEN];
+        uint8_t ieee[ZBC_IEEE_LEN];
         if (r->group_id != 0) {
             return "a rule acts on a room or on one light, not both";
         }
-        if (!cJSON_IsString(jieee) || !zbc_str_to_ieee(jieee->valuestring, ieee)) {
-            return "ieee has to be a 0x-prefixed 64-bit address";
-        }
-        if (!cJSON_IsNumber(jep) || jep->valueint < 1 || jep->valueint > 240) {
-            return "ep has to be an endpoint number";
+        const char *why = endpoint_from_json(jieee, cJSON_GetObjectItem(item, "ep"), ieee, &r->ep);
+        if (why) {
+            return why;
         }
         memcpy(r->ieee, ieee, ZBC_BTN_IEEE_LEN);
-        r->ep = (uint8_t)jep->valueint;
     }
 
     /* A rule with no condition always applies - the way a rule joined with
@@ -2190,7 +2201,7 @@ static const char *rule_from_json(const cJSON *item, zbc_btn_rule_t *r, bool fir
     r->cond_arg   = (uint8_t)argv;
     r->action_arg = (uint8_t)valv;
 
-    const bool   dim   = act == ZBC_ACT_DIM_UP || act == ZBC_ACT_DIM_DOWN || act == ZBC_ACT_DIM_CYCLE;
+    const bool   dim   = zbc_act_is_dim((uint8_t)act);
     const cJSON *delay = cJSON_GetObjectItem(item, "delay");
     if (delay && !cJSON_IsNull(delay)) {
         if (!cJSON_IsNumber(delay) || delay->valuedouble < 0 || delay->valuedouble > 65535) {
@@ -2274,21 +2285,18 @@ static const char *button_from_json(const cJSON *json, zbc_button_t *out, uint16
             memset(out->ieee, 0, ZBC_BTN_IEEE_LEN);
             out->zb_ep = 0;
         } else if (jieee || jep) {
-            uint8_t ieee[ZBC_IEEE_LEN];
-            if (!cJSON_IsString(jieee) || !zbc_str_to_ieee(jieee->valuestring, ieee)) {
-                return "ieee has to be a 0x-prefixed 64-bit address";
-            }
-            if (!cJSON_IsNumber(jep) || jep->valueint < 1 || jep->valueint > 240) {
-                return "ep has to be an endpoint number";
+            uint8_t     ieee[ZBC_IEEE_LEN], ep = 0;
+            const char *why = endpoint_from_json(jieee, jep, ieee, &ep);
+            if (why) {
+                return why;
             }
             zbc_device_t          dev;
-            const zbc_endpoint_t *e = device_db_get(ieee, &dev) ? lighting_find_endpoint(&dev, (uint8_t)jep->valueint)
-                                                                : NULL;
+            const zbc_endpoint_t *e = device_db_get(ieee, &dev) ? lighting_find_endpoint(&dev, ep) : NULL;
             if (!e || !(e->features & ZBC_FEAT_MOTION)) {
                 return "that is not a paired motion sensor";
             }
             memcpy(out->ieee, ieee, ZBC_BTN_IEEE_LEN);
-            out->zb_ep = (uint8_t)jep->valueint;
+            out->zb_ep = ep;
             if (button_db_sensor_taken(out->ieee, out->zb_ep, id)) {
                 return "another button already uses that sensor";
             }
@@ -2314,19 +2322,17 @@ static const char *button_from_json(const cJSON *json, zbc_button_t *out, uint16
             out->zb_ep  = 0;
             out->zb_key = 0;
         } else if (jieee || jep || jkey) {
-            uint8_t ieee[ZBC_IEEE_LEN];
-            if (!cJSON_IsString(jieee) || !zbc_str_to_ieee(jieee->valuestring, ieee)) {
-                return "ieee has to be a 0x-prefixed 64-bit address";
-            }
-            if (!cJSON_IsNumber(jep) || jep->valueint < 1 || jep->valueint > 240) {
-                return "ep has to be an endpoint number";
+            uint8_t     ieee[ZBC_IEEE_LEN], ep = 0;
+            const char *why = endpoint_from_json(jieee, jep, ieee, &ep);
+            if (why) {
+                return why;
             }
             const int key = cJSON_IsNumber(jkey) ? jkey->valueint : 0;
             if (key < 0 || key >= ZB_REMOTE_KEY_MAX) {
                 return "key is out of range";
             }
             memcpy(out->ieee, ieee, ZBC_BTN_IEEE_LEN);
-            out->zb_ep  = (uint8_t)jep->valueint;
+            out->zb_ep  = ep;
             out->zb_key = (uint8_t)key;
             if (!device_db_get(ieee, NULL)) {
                 return "that button names a remote that is not paired";
@@ -2422,10 +2428,7 @@ static const char *button_from_json(const cJSON *json, zbc_button_t *out, uint16
                 if (!(r->flags & ZBC_RULE_AND)) {
                     sweeps = 0;
                 }
-                if (out->src != ZBC_BTN_SRC_SENSOR && e == ZBC_EV_LONG &&
-                    (r->action == ZBC_ACT_DIM_UP || r->action == ZBC_ACT_DIM_DOWN ||
-                     r->action == ZBC_ACT_DIM_CYCLE) &&
-                    ++sweeps > ZBC_BTN_MAX_SWEEPS) {
+                if (e == ZBC_EV_LONG && zbc_act_is_dim(r->action) && ++sweeps > ZBC_BTN_MAX_SWEEPS) {
                     return "one long press can dim at most four rooms or lights";
                 }
                 out->rule_count[e]++;
@@ -2505,7 +2508,7 @@ static esp_err_t button_test_post(httpd_req_t *req, uint16_t id)
     }
     int ev = ZBC_EV_SHORT, hold_ms = 0;
     if (json) {
-        ev = sensor ? name_index(SENSOR_EVENT_NAMES, 2, cJSON_GetObjectItem(json, "event"))
+        ev = sensor ? name_index(SENSOR_EVENT_NAMES, ZBC_EV_CLEAR + 1, cJSON_GetObjectItem(json, "event"))
                     : name_index(EVENT_NAMES, ZBC_EV_COUNT, cJSON_GetObjectItem(json, "event"));
         /* How long to hold, for a long press. The sweep and the stop that ends
          * it are the whole of what a long press does, so a test that does not
@@ -2563,8 +2566,7 @@ static esp_err_t button_dispatch(httpd_req_t *req)
         if (button_db_remove((uint16_t)id) == ESP_ERR_NOT_FOUND) {
             return send_error(req, "404 Not Found", "unknown button");
         }
-        buttons_forget_delayed((uint16_t)id);
-        buttons_reload();                  /* hands the pin back */
+        buttons_reload();                  /* hands the pin back, drops what it had waiting */
         return send_ok(req, "200 OK");
     }
     return send_error(req, "404 Not Found", "no such button route");

@@ -148,10 +148,10 @@ test_mctl_gate: test_mctl_gate.c mctl-gate.inc
 test_mctl_disc: test_mctl_disc.c mctl-disc.inc
 	@$(CC) $(CFLAGS) -o $@ $<
 
-test_sweep:  test_sweep.c  sweep.inc
+test_sweep:  test_sweep.c  sweep.inc bdb-types.inc
 	@$(CC) $(CFLAGS) -o $@ $<
 
-test_clause: test_clause.c clause.inc
+test_clause: test_clause.c clause.inc bdb-types.inc
 	@$(CC) $(CFLAGS) -o $@ $<
 
 test_btnstep: test_btnstep.c btnstep.inc
@@ -163,7 +163,7 @@ test_zremote: test_zremote.c zremote.inc
 test_motion: test_motion.c motion.inc
 	@$(CC) $(CFLAGS) -o $@ $<
 
-test_delayed: test_delayed.c delayed.inc
+test_delayed: test_delayed.c delayed.inc bdb-types.inc
 	@$(CC) $(CFLAGS) -o $@ $<
 
 # The button types come from the header's region, so the stored records and the

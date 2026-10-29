@@ -221,7 +221,12 @@ export async function refresh() {
           if (d.ota && d.ota.queried_s_ago != null) d.ota.queried_s_ago += dtS;
         }
         for (const e of data.remotes) e.ago_ms += dtS * 1000;
-        for (const b of data.buttons) if (b.last_event_ms != null) b.last_event_ms += dtS * 1000;
+        for (const b of data.buttons) {
+          if (b.last_event_ms != null) b.last_event_ms += dtS * 1000;
+          /* And the countdowns run down: a sensor's no-motion time, a rule waiting. */
+          if (b.clear_in_ms != null) b.clear_in_ms = Math.max(0, b.clear_in_ms - dtS * 1000);
+          if (b.delayed) b.delayed.next_ms = Math.max(0, b.delayed.next_ms - dtS * 1000);
+        }
         dataAt += dtS * 1000;
       }
       const cutoff = now - PENDING_TTL_MS;

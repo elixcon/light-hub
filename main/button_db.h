@@ -58,6 +58,13 @@ typedef enum {
     ZBC_BTN_SRC_COUNT,
 } zbc_btn_src_t;
 
+/* Whether the source is an endpoint of a paired Zigbee device - a remote's key
+ * or a sensor - named by ieee and zb_ep rather than by a pin. */
+static inline bool zbc_btn_src_is_device(uint8_t src)
+{
+    return src == ZBC_BTN_SRC_ZIGBEE || src == ZBC_BTN_SRC_SENSOR;
+}
+
 typedef enum {
     ZBC_PULL_NONE = 0,
     ZBC_PULL_UP,
@@ -138,6 +145,12 @@ typedef enum {
     ZBC_ACT_ADAPTIVE,
     ZBC_ACT_COUNT,
 } zbc_btn_action_t;
+
+/* The actions that move while a button is held. */
+static inline bool zbc_act_is_dim(uint8_t action)
+{
+    return action == ZBC_ACT_DIM_UP || action == ZBC_ACT_DIM_DOWN || action == ZBC_ACT_DIM_CYCLE;
+}
 
 #define ZBC_BTN_IEEE_LEN 8
 

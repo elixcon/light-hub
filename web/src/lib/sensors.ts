@@ -4,15 +4,16 @@
  * together: one card per sensor endpoint, with its record or none yet. */
 import type { ButtonDef, Device, Endpoint, Rule, SensorEvent } from "./types.ts";
 import { mmss } from "./format.ts";
+import { blankRule } from "./buttons.ts";
 
 export const isSensorEp = (e: Endpoint) => (e.features || []).includes("motion");
 export const isSensor = (d: Device) => d.endpoints.some(isSensorEp);
 
 export const SENSOR_EVENTS: [SensorEvent, string][] = [["motion", "When motion is detected"], ["clear", "When there has been no motion"]];
 
-/* Mirrors ZBC_SENSOR_CLEAR_MIN_S / _MAX_S / _DEFAULT_S. The page offers whole
- * minutes from one: a Xiaomi or Aqara sensor reports at most once a minute. */
-export const CLEAR_MIN_S = 30;
+/* Mirrors ZBC_SENSOR_CLEAR_MAX_S / _DEFAULT_S. The page offers whole minutes
+ * from one, above the firmware's 30 s: a Xiaomi or Aqara sensor reports at most
+ * once a minute. */
 export const CLEAR_MAX_S = 3600;
 export const CLEAR_DEFAULT_S = 120;
 
@@ -63,6 +64,6 @@ export function waitingText(b: ButtonDef | null, elapsed = 0): string | null {
 
 /* The rules a sensor is set up with: the room on with motion, off without. */
 export function setupRules(group: number): Record<SensorEvent, Rule[]> {
-  const rule = (d: "on" | "off"): Rule => ({ group, ieee: null, ep: null, and: false, when: "always", arg: 0, do: d, value: 60, delay: 0 });
+  const rule = (d: "on" | "off"): Rule => ({ ...blankRule(), group, arg: 0, do: d });
   return { motion: [rule("on")], clear: [rule("off")] };
 }

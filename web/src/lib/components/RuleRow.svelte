@@ -95,7 +95,7 @@
 			<option value="custom">after…</option>
 		</select>
 		{#if delayChoice === "custom"}
-			<input class="num" type="number" min="1" max="1092" step="1" value={Math.round(delay / 60) || 1} aria-label="Minutes to wait"
+			<input class="num" type="number" min="1" max={Math.floor(MAX_DELAY_S / 60)} step="1" value={Math.round(delay / 60) || 1} aria-label="Minutes to wait"
 				oninput={(e) => setMinutes(e.currentTarget.value)} /><span class="text-muted-foreground text-xs">min</span>
 		{/if}
 	{/if}

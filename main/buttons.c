@@ -342,11 +342,11 @@ zbc_btn_emit_t zbtn_step(zbc_zbtn_fsm_t *st, zb_remote_ev_t ev, bool want_double
 #define UNLOCK_GAP_MAX_US  (2500 * 1000)
 
 typedef struct {
+    int64_t raw_since;   /* the 64-bit fields first, so the bytes after them pack */
+    int64_t last_tap_us;
     uint8_t raw;         /* last raw reading, already un-inverted */
     uint8_t stable;      /* debounced: 1 = pressed */
-    int64_t raw_since;
     uint8_t count;       /* presses so far in this series */
-    int64_t last_tap_us;
 } zbc_unlock_fsm_t;
 
 typedef enum {
@@ -483,9 +483,9 @@ static zbc_btn_emit_t motion_step(zbc_motion_fsm_t *st, int report, bool reports
 #define ZBC_DELAYED_MAX 24
 
 typedef struct {
-    uint16_t       id;       /* the button that scheduled it; 0 = free */
+    int64_t        due;      /* first, so the narrower fields after it pack */
     uint32_t       seq;      /* order of scheduling, which breaks ties in `due` */
-    int64_t        due;
+    uint16_t       id;       /* the button that scheduled it; 0 = free */
     zbc_btn_rule_t rule;
 } zbc_delayed_t;
 
@@ -862,7 +862,9 @@ void buttons_reload(void)
             i++;
         }
         if (i == n) {
-            memset(l, 0, sizeof(*l));      /* deleted */
+            /* Deleted, and what it scheduled goes with it. */
+            delayed_cancel(&s_delayed, l->id);
+            memset(l, 0, sizeof(*l));
             continue;
         }
         placed[i] = true;
@@ -883,22 +885,21 @@ void buttons_reload(void)
             }
         }
     }
-    /* What a deleted button scheduled goes with it. */
-    for (int k = 0; k < ZBC_DELAYED_MAX; k++) {
-        bool kept = false;
-        for (size_t i = 0; i < n && !kept; i++) {
-            kept = s_delayed.slot[k].id == w[i].id;
-        }
-        if (!kept) {
-            s_delayed.slot[k].id = 0;
-        }
-    }
     s_unlock_self = unlock_self;
     portEXIT_CRITICAL(&s_live_mux);
     free(w);
 }
 
 /* -------------------------------------------------------------------- sampling */
+
+/* Under s_live_mux: the slot still holds this button, from this source. A
+ * reload between looking a slot up and using it may have given the slot to
+ * another button or the button another source, and the source's state is
+ * where the other's lies (see btn_live_t). */
+static bool still_is(int slot, uint16_t id, uint8_t src)
+{
+    return s_live[slot].used && s_live[slot].id == id && s_live[slot].src == src;
+}
 
 /* Runs in the esp_timer task: no locks, no blocking, no lighting calls. All it
  * does is decide that something happened and post it. */
@@ -917,15 +918,18 @@ static void poll_cb(void *arg)
         const bool     is_sw    = s_live[i].is_switch;
         const uint16_t id       = s_live[i].id;
         portEXIT_CRITICAL(&s_live_mux);
+        if (!used) {
+            continue;
+        }
 
         /* A sensor's tick is its no-motion time running out. A clear the queue
          * had no room for is put back for the next tick: lost, it would leave
          * the room lit until somebody next walked through it. */
-        if (used && src == ZBC_BTN_SRC_SENSOR) {
+        if (src == ZBC_BTN_SRC_SENSOR) {
             portENTER_CRITICAL(&s_live_mux);
             zbc_btn_emit_t   memit  = ZBC_EMIT_NONE;
             zbc_motion_fsm_t before = { 0 };
-            if (s_live[i].used && s_live[i].id == id && s_live[i].src == src) {
+            if (still_is(i, id, src)) {
                 before = s_live[i].mfsm;
                 memit  = motion_step(&s_live[i].mfsm, -1, false, s_live[i].clear_us, now);
             }
@@ -936,8 +940,7 @@ static void poll_cb(void *arg)
                     zbc_state_bump();
                 } else {
                     portENTER_CRITICAL(&s_live_mux);
-                    if (s_live[i].used && s_live[i].id == id && s_live[i].src == src &&
-                        !s_live[i].mfsm.occupied && s_live[i].mfsm.clear_at == 0) {
+                    if (still_is(i, id, src) && !s_live[i].mfsm.occupied && s_live[i].mfsm.clear_at == 0) {
                         s_live[i].mfsm = before;
                     }
                     portEXIT_CRITICAL(&s_live_mux);
@@ -949,10 +952,10 @@ static void poll_cb(void *arg)
         /* A Zigbee button has no pin to read. All this tick does for one is give
          * zbtn_step a clock: the repeats during a hold, the hold that timed out,
          * and the short press at the end of the double-press window. */
-        if (used && src == ZBC_BTN_SRC_ZIGBEE) {
+        if (src == ZBC_BTN_SRC_ZIGBEE) {
             portENTER_CRITICAL(&s_live_mux);
             zbc_btn_emit_t zemit = ZBC_EMIT_NONE;
-            if (s_live[i].used && s_live[i].id == id && s_live[i].src == src) {
+            if (still_is(i, id, src)) {
                 zb_remote_ev_t ev = ZB_REMOTE_NONE;
                 if (s_live[i].sim_hold_until && s_live[i].sim_hold_until <= now) {
                     s_live[i].sim_hold_until = 0;
@@ -975,8 +978,7 @@ static void poll_cb(void *arg)
          * up: no release, the hold left open with its sweeps, and the next test
          * a string of repeats of the old one. */
         portENTER_CRITICAL(&s_live_mux);
-        const bool pinned = used && s_live[i].used && s_live[i].id == id &&
-                            s_live[i].src == ZBC_BTN_SRC_GPIO;
+        const bool pinned = still_is(i, id, ZBC_BTN_SRC_GPIO);
         const bool sim  = pinned && s_live[i].sim_until > now;
         const bool busy = pinned && (s_live[i].fsm.stable || s_live[i].fsm.raw ||
                                      s_live[i].fsm.pending_short);
@@ -997,8 +999,7 @@ static void poll_cb(void *arg)
         zbc_btn_emit_t emit     = ZBC_EMIT_NONE;
         zbc_unlock_t   unlocked = UNLOCK_NONE;
         bool           edge     = false;
-        if (s_live[i].used && s_live[i].id == id && s_live[i].src == ZBC_BTN_SRC_GPIO &&
-            s_live[i].gpio == pin) {
+        if (still_is(i, id, ZBC_BTN_SRC_GPIO) && s_live[i].gpio == pin) {
             const uint8_t was = s_live[i].fsm.stable;
             emit     = is_sw ? btn_switch_step(&s_live[i].fsm, level, inverted, now)
                              : btn_step(&s_live[i].fsm, level, inverted, want_dbl, now);
@@ -1144,12 +1145,6 @@ static zb_onoff_cmd_t case_toggle(const zbc_btn_rule_t *rules, int n,
  */
 /* >>> host-test region: sweep <<< */
 
-static bool is_dim(uint8_t action)
-{
-    return action == ZBC_ACT_DIM_UP || action == ZBC_ACT_DIM_DOWN ||
-           action == ZBC_ACT_DIM_CYCLE;
-}
-
 /* A rule's target as lighting.c takes it: a room, or one light. */
 static lighting_target_t rule_target(const zbc_btn_rule_t *r)
 {
@@ -1241,7 +1236,7 @@ static void run_hold(int slot, const zbc_btn_rule_t *rules, int n, bool first, i
         int  k      = 0;
         memset(s_live[slot].sweep, 0, sizeof(s_live[slot].sweep));
         for (int r = 0; r < n && k < ZBC_BTN_MAX_SWEEPS; r++) {
-            if (!is_dim(rules[r].action) || !button_db_rule_assigned(&rules[r])) {
+            if (!zbc_act_is_dim(rules[r].action) || !button_db_rule_assigned(&rules[r])) {
                 continue;
             }
             /* The editor's number is a step every BTN_STEP_US; as a speed that
@@ -1439,7 +1434,7 @@ static void run_nudges(int slot, const zbc_btn_rule_t *rules, int n, int64_t now
 {
     bool any = false, cycles = false;
     for (int r = 0; r < n; r++) {
-        if (is_dim(rules[r].action) && button_db_rule_assigned(&rules[r])) {
+        if (zbc_act_is_dim(rules[r].action) && button_db_rule_assigned(&rules[r])) {
             any    = true;
             cycles = cycles || rules[r].action == ZBC_ACT_DIM_CYCLE;
         }
@@ -1464,7 +1459,7 @@ static void run_nudges(int slot, const zbc_btn_rule_t *rules, int n, int64_t now
     bool turned = false;
     for (int r = 0; r < n; r++) {
         const zbc_btn_rule_t *rule = &rules[r];
-        if (!is_dim(rule->action) || !button_db_rule_assigned(rule)) {
+        if (!zbc_act_is_dim(rule->action) || !button_db_rule_assigned(rule)) {
             continue;
         }
         const int8_t dir = rule->action == ZBC_ACT_DIM_CYCLE ? cyc
@@ -1644,15 +1639,6 @@ static int slot_of(uint16_t id)
     }
     portEXIT_CRITICAL(&s_live_mux);
     return slot;
-}
-
-/* Under s_live_mux: the slot still holds this button, from this source. A
- * reload between looking a slot up and using it may have given the slot to
- * another button or the button another source, and the source's state is
- * where the other's lies (see btn_live_t). */
-static bool still_is(int slot, uint16_t id, uint8_t src)
-{
-    return s_live[slot].used && s_live[slot].id == id && s_live[slot].src == src;
 }
 
 static void dispatch(const btn_msg_t *msg)
@@ -1980,12 +1966,13 @@ void buttons_sensor_event(const uint8_t ieee[ZBC_BTN_IEEE_LEN], uint8_t ep, bool
             const btn_msg_t msg = { .id = id, .emit = emit };
             if (xQueueSend(s_queue, &msg, 0) != pdTRUE) {
                 portENTER_CRITICAL(&s_live_mux);
-                if (s_live[i].used && s_live[i].id == id && s_live[i].src == ZBC_BTN_SRC_SENSOR) {
+                if (still_is(i, id, ZBC_BTN_SRC_SENSOR)) {
                     s_live[i].mfsm.occupied = 0;
                 }
                 portEXIT_CRITICAL(&s_live_mux);
             }
         }
+        break;                        /* one record per sensor: button_db_sensor_taken */
     }
 }
 
@@ -2058,7 +2045,7 @@ int64_t buttons_last_event_ms(uint16_t id)
     portENTER_CRITICAL(&s_live_mux);
     for (int i = 0; i < CONFIG_ZBC_MAX_BUTTONS; i++) {
         if (s_live[i].used && s_live[i].id == id) {
-            zigbee = s_live[i].src == ZBC_BTN_SRC_ZIGBEE || s_live[i].src == ZBC_BTN_SRC_SENSOR;
+            zigbee = zbc_btn_src_is_device(s_live[i].src);
             seen   = s_live[i].last_event_us;
             break;
         }

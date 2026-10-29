@@ -17,8 +17,6 @@ export const MAX_SWEEPS = 4;
  * "When under 30 %  ·  Kitchen  ·  Set to 80 %". */
 export const WHENS: [When, string][] = [["always", "Always"], ["off", "When off"], ["on", "When on"],
   ["below", "When under"], ["above", "When over"], ["sun_down", "When the sun is down"]];
-/* Conditions asked of the rule's own room or light; the sun is asked of none. */
-export const whenNeedsTarget = (w: When) => w !== "always" && w !== "sun_down";
 
 /* How long a rule can wait, as offered; any other number of seconds the API
  * holds shows as itself. "at once" is 0. Mirrors delay_s in button_db.h. */

@@ -313,16 +313,24 @@ static void head_from(bdb_head_t *h, const zbc_button_t *b)
     h->clear_s = b->clear_s;
 }
 
+/* A button from its head and the rules it counts, which may be unaligned
+ * bytes of a blob; NULL leaves it without rules. */
+static void head_to(zbc_button_t *out, const bdb_head_t *h, const void *rules)
+{
+    memset(out, 0, sizeof(*out));
+    COPY_V2_FIELDS(out, *h);
+    out->input   = h->input;
+    out->clear_s = h->clear_s;
+    if (rules) {
+        memcpy(out->rule_count, h->rule_count, sizeof(out->rule_count));
+        memcpy(out->rules, rules, (size_t)head_total(h) * sizeof(out->rules[0]));
+    }
+}
+
 /* Button i whole, as the table hands it out. */
 static void copy_out(int i, zbc_button_t *out)
 {
-    const bdb_head_t *h = &s_table.head[i];
-    memset(out, 0, sizeof(*out));
-    COPY_V2_FIELDS(out, *h);
-    memcpy(out->rule_count, h->rule_count, sizeof(out->rule_count));
-    out->input   = h->input;
-    out->clear_s = h->clear_s;
-    memcpy(out->rules, &s_table.rule[rules_at(i)], (size_t)head_total(h) * sizeof(out->rules[0]));
+    head_to(out, &s_table.head[i], &s_table.rule[rules_at(i)]);
 }
 
 /* Makes the `have` rules at `at` into `want`, moving the ones behind them;
@@ -408,16 +416,10 @@ static void decode_record(uint32_t version, const uint8_t *recs, int i, const ui
     if (version == BUTTON_BLOB_VERSION) {
         bdb_head_t h;
         memcpy(&h, recs + (size_t)i * sizeof(h), sizeof(h));
-        COPY_V2_FIELDS(b, h);
-        b->input   = h.input;
-        b->clear_s = h.clear_s;
         const int n = head_total(&h);
         /* From a build that let a button have more: it keeps its name and its
          * source, and loses its rules. */
-        if (n <= CONFIG_ZBC_BUTTON_RULES) {
-            memcpy(b->rule_count, h.rule_count, sizeof(b->rule_count));
-            memcpy(b->rules, *pool, (size_t)n * sizeof(b->rules[0]));
-        }
+        head_to(b, &h, n <= CONFIG_ZBC_BUTTON_RULES ? *pool : NULL);
         *pool += (size_t)n * sizeof(zbc_btn_rule_t);
     } else if (version == 6) {
         /* As now, but stored with room for twelve. */
@@ -673,11 +675,6 @@ esp_err_t button_db_create(const char *name, uint16_t *out_id)
     return err;
 }
 
-static bool is_dim(uint8_t action)
-{
-    return action == ZBC_ACT_DIM_UP || action == ZBC_ACT_DIM_DOWN || action == ZBC_ACT_DIM_CYCLE;
-}
-
 static bool ieee_is_zero(const uint8_t ieee[ZBC_BTN_IEEE_LEN])
 {
     for (int i = 0; i < ZBC_BTN_IEEE_LEN; i++) {
@@ -734,12 +731,12 @@ static bool valid_button(const zbc_button_t *in)
                 return false;
             }
             /* A step of zero would hold the light still however long you press. */
-            if (is_dim(rule->action) && rule->action_arg == 0) {
+            if (zbc_act_is_dim(rule->action) && rule->action_arg == 0) {
                 return false;
             }
             /* A dim moves while a button is held, and a sensor is never held;
              * a dim that waits would start after the hold that meant it. */
-            if (is_dim(rule->action) && (rule->delay_s != 0 || in->src == ZBC_BTN_SRC_SENSOR)) {
+            if (zbc_act_is_dim(rule->action) && (rule->delay_s != 0 || in->src == ZBC_BTN_SRC_SENSOR)) {
                 return false;
             }
             if (rule->action == ZBC_ACT_SET && rule->action_arg == 0) {
@@ -764,7 +761,7 @@ static bool valid_button(const zbc_button_t *in)
             if (!(rule->flags & ZBC_RULE_AND)) {
                 sweeps = 0;
             }
-            if (e == ZBC_EV_LONG && is_dim(rule->action) && ++sweeps > ZBC_BTN_MAX_SWEEPS) {
+            if (e == ZBC_EV_LONG && zbc_act_is_dim(rule->action) && ++sweeps > ZBC_BTN_MAX_SWEEPS) {
                 return false;
             }
         }
@@ -861,7 +858,7 @@ bool button_db_has_source(const zbc_button_t *b)
     if (!b) {
         return false;
     }
-    if (b->src == ZBC_BTN_SRC_ZIGBEE || b->src == ZBC_BTN_SRC_SENSOR) {
+    if (zbc_btn_src_is_device(b->src)) {
         for (int i = 0; i < ZBC_BTN_IEEE_LEN; i++) {
             if (b->ieee[i]) {
                 return b->zb_ep != 0;
@@ -909,8 +906,7 @@ void button_db_forget_device(const uint8_t ieee[ZBC_BTN_IEEE_LEN])
     BDB_LOCK();
     for (int i = 0; i < s_table.hdr.count; i++) {
         bdb_head_t *h = &s_table.head[i];
-        if ((h->src == ZBC_BTN_SRC_ZIGBEE || h->src == ZBC_BTN_SRC_SENSOR) &&
-            memcmp(h->ieee, ieee, ZBC_BTN_IEEE_LEN) == 0) {
+        if (zbc_btn_src_is_device(h->src) && memcmp(h->ieee, ieee, ZBC_BTN_IEEE_LEN) == 0) {
             memset(h->ieee, 0, ZBC_BTN_IEEE_LEN);
             h->zb_ep  = 0;
             h->zb_key = 0;

@@ -18,7 +18,7 @@
 	import { confirm } from "$lib/confirm.svelte.ts";
 	import { MAX_RULES, blankRule, cleanRules, rowsUsed } from "$lib/buttons.ts";
 	import { CLEAR_DEFAULT_S, CLEAR_MAX_S, SENSOR_EVENTS, sensorCards, setupRules } from "$lib/sensors.ts";
-	import type { Rule, SensorEvent } from "$lib/types.ts";
+	import type { Rule, SensorEvent, Settings } from "$lib/types.ts";
 
 	let { ieee }: { ieee: string } = $props();
 
@@ -49,12 +49,14 @@
 	const usesSun = $derived(Object.values(w.events).some((rules) => rules.some((r) => r.when === "sun_down")));
 
 	/* Whether "when the sun is down" can be answered: it needs the location the
-	 * Adaptive Lighting settings hold. Asked once per sensor shown: going from one
-	 * sensor to the next keeps this page, and the location may have changed. */
+	 * Adaptive Lighting settings hold. Asked only once a rule uses the sun, and
+	 * again for each sensor shown: going from one sensor to the next keeps this
+	 * page, and the location may have changed. */
 	let located = $state(true);
 	$effect(() => {
 		void ieee;
-		api<{ location: unknown }>("/api/settings").then((s) => (located = !!s.location)).catch(() => {});
+		if (!usesSun) return;
+		api<Settings>("/api/settings").then((s) => (located = !!s.location)).catch(() => {});
 	});
 	/* A sensor that says "unoccupied" itself has none of the Xiaomi's minute. */
 	const reportsClear = $derived(!!c?.device?.endpoints.find((e) => e.ep === c.ep)?.reports_clear);
