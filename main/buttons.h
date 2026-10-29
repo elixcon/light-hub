@@ -178,9 +178,16 @@ bool buttons_sensor_state(uint16_t id, bool *occupied, int64_t *clear_in_ms);
  * milliseconds until the first. False when there are none. */
 bool buttons_delayed(uint16_t id, int *count, int64_t *next_ms);
 
-/* Drops the button's waiting actions: it was changed or deleted, and what it
- * scheduled belongs to rules that may no longer exist. */
+/* Drops the button's waiting actions: it was changed, and what it scheduled
+ * belongs to rules that may no longer exist. */
 void buttons_forget_delayed(uint16_t id);
+
+/* A room or a device is being deleted: the rules that name it lose it
+ * (button_db_forget_group / _device), and whatever they left waiting for it is
+ * dropped. Call these, not button_db's: the id or address goes to the next
+ * room or light made, and a waiting rule would act on that. */
+void buttons_forget_group(uint16_t group_id);
+void buttons_forget_device(const uint8_t ieee[8]);
 
 /* Starts the sampler and the task that runs the actions. Safe to call before
  * Zigbee is up: the pins are read either way, so wiring can be checked from the

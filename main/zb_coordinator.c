@@ -416,6 +416,39 @@ static bool runs_on_a_battery(const uint8_t ieee[ZBC_IEEE_LEN])
     return false;
 }
 
+/* An endpoint that sends presses and has nothing of a lamp: a remote's. */
+static bool ep_presses_only(uint16_t features)
+{
+    return (features & ZBC_FEAT_SWITCH) && !(features & ZBC_FEAT_ONOFF);
+}
+
+static bool senses_motion(const zbc_device_t *dev)
+{
+    for (int i = 0; i < dev->ep_count; i++) {
+        if (dev->eps[i].features & ZBC_FEAT_MOTION) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* A device that senses motion on one endpoint is a sensor on the others too. A
+ * Hue SML lists On/Off, Level and Scenes as outputs on its ZLL endpoint 1, for
+ * a bridge to bind lamps to it directly, and nothing on it can be pressed. As a
+ * remote that endpoint would be bound, and sought on every neighbour scan, for
+ * frames that never come. Its descriptor usually arrives before the sensor's,
+ * so the sensor's takes it out of the record, and one that arrives after is not
+ * put in (see simple_desc_result). Zigbee task. */
+static void drop_presses_beside_motion(const uint8_t ieee[ZBC_IEEE_LEN], const zbc_device_t *dev)
+{
+    for (int i = 0; i < dev->ep_count; i++) {
+        if (ep_presses_only(dev->eps[i].features)) {
+            ESP_LOGI(TAG, "Endpoint %d of a motion sensor is not a remote", dev->eps[i].ep);
+            device_db_remove_endpoint(ieee, dev->eps[i].ep);
+        }
+    }
+}
+
 static void simple_desc_result(const ezb_zdo_simple_desc_req_result_t *result, void *user_ctx)
 {
     (void)user_ctx;
@@ -516,7 +549,8 @@ static void simple_desc_result(const ezb_zdo_simple_desc_req_result_t *result, v
     zbc_device_t known;
     bool     have_model = false, have_color = false;
     uint16_t recorded   = features;
-    if (device_db_get(ieee, &known)) {
+    const bool have_known = device_db_get(ieee, &known);
+    if (have_known) {
         have_model = known.model[0] != '\0';
         for (int i = 0; i < known.ep_count; i++) {
             if (known.eps[i].ep == desc->ep_id) {
@@ -533,6 +567,13 @@ static void simple_desc_result(const ezb_zdo_simple_desc_req_result_t *result, v
         }
     }
 
+    if (have_known && ep_presses_only(features) && senses_motion(&known)) {
+        /* See drop_presses_beside_motion; a record of it from before goes. */
+        ESP_LOGI(TAG, "Device 0x%04x endpoint %d: a motion sensor's, not a remote", saddr, desc->ep_id);
+        device_db_remove_endpoint(ieee, desc->ep_id);
+        return;
+    }
+
     ESP_LOGI(TAG, "Device 0x%04x endpoint %d is a %s (device id 0x%04x, features 0x%02x)",
              saddr, desc->ep_id,
              is_sensor ? "motion sensor"
@@ -544,6 +585,9 @@ static void simple_desc_result(const ezb_zdo_simple_desc_req_result_t *result, v
          * was recorded as goes, but not what its reports taught us. */
         device_db_clear_features(ieee, desc->ep_id,
                                  (uint16_t)~(ZBC_FEAT_MOTION | ZBC_FEAT_MOTION_CLEARS));
+        if (have_known) {
+            drop_presses_beside_motion(ieee, &known);
+        }
     } else if (is_switch && !is_light) {
         /* device_db_add_endpoint only adds bits, so clear them first: the simple
          * descriptor is the authority on what an endpoint is. The colour bits,
@@ -1304,7 +1348,7 @@ static int wanted_reports(uint16_t features, zbc_report_want_t *out)
                                         EZB_ZCL_ATTR_MULTISTATE_INPUT_PRESENT_VALUE_ID,
                                         EZB_ZCL_ATTR_TYPE_UINT16, ZBC_REPORT_MIN_ONOFF_S, true };
     }
-    if ((features & ZBC_FEAT_SWITCH) && !(features & ZBC_FEAT_ONOFF)) {
+    if (ep_presses_only(features)) {
         /* Nothing else applies to a remote, and a sleepy device would not answer
          * it. */
         out[n++] = (zbc_report_want_t){ EZB_ZCL_CLUSTER_ID_ON_OFF, "onoff", 0, 0, 0, false };
@@ -2843,6 +2887,10 @@ static void note_occupancy(uint16_t short_addr, uint8_t ep, bool occupied)
             return;
         }
         features = ZBC_FEAT_MOTION;
+        zbc_device_t dev;
+        if (device_db_get(ieee, &dev)) {
+            drop_presses_beside_motion(ieee, &dev);
+        }
     }
     if (!(features & ZBC_FEAT_MOTION)) {
         return;
@@ -6712,7 +6760,7 @@ esp_err_t zb_remove_device(const uint8_t ieee[ZBC_IEEE_LEN])
         remote = true;
         for (int i = 0; i < dev.ep_count; i++) {
             const uint16_t f = dev.eps[i].features;
-            remote &= ((f & ZBC_FEAT_SWITCH) && !(f & ZBC_FEAT_ONOFF)) || (f & ZBC_FEAT_MOTION);
+            remote &= ep_presses_only(f) || (f & ZBC_FEAT_MOTION);
         }
     }
     if (remote) {

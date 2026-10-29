@@ -100,12 +100,48 @@ static void test_a_full_table_refuses(void)
     ok(delayed_add(&t, 9, &r, 1), "room again once a button's are dropped");
 }
 
+static zbc_btn_rule_t light(uint8_t dev, uint8_t ep)
+{
+    return (zbc_btn_rule_t){ .ep = ep, .ieee = { 0x00, 0x17, 0x88, 0x01, 0, 0, 0, dev } };
+}
+
+/* A room or a device that is deleted takes what waits to act on it, and
+ * nothing else: its id or address may be the next one's. */
+static void test_a_deleted_target_takes_its_waiting_actions(void)
+{
+    zbc_delayed_table_t t;
+    memset(&t, 0, sizeof(t));
+    zbc_btn_rule_t r3 = room(3), r4 = room(4), a11 = light(0xa, 11), a12 = light(0xa, 12), b1 = light(0xb, 1);
+    delayed_add(&t, 1, &r3, 100);
+    delayed_add(&t, 1, &a11, 110);
+    delayed_add(&t, 2, &r4, 120);
+    delayed_add(&t, 2, &a12, 130);
+    delayed_add(&t, 3, &b1, 140);
+    int64_t first;
+
+    ok(delayed_forget_group(&t, 3) == 1, "the room's one action");
+    ok(delayed_of(&t, 1, &first) == 1 && first == 110, "the same button's light rule stays");
+    ok(delayed_forget_group(&t, 3) == 0, "and nothing the second time");
+    ok(delayed_forget_group(&t, 0) == 0, "a room of 0 is none: no unassigned rule goes with it");
+
+    const uint8_t a[8] = { 0x00, 0x17, 0x88, 0x01, 0, 0, 0, 0xa };
+    ok(delayed_forget_device(&t, a) == 2, "every endpoint of the device, from both buttons");
+    ok(delayed_of(&t, 1, &first) == 0, "button 1 has nothing left");
+    ok(delayed_of(&t, 2, &first) == 1 && first == 120, "button 2 its room");
+    ok(delayed_of(&t, 3, &first) == 1 && first == 140, "and the other device's light stays");
+
+    /* A room rule names no device, even one whose bytes happen to be zero. */
+    const uint8_t zero[8] = { 0 };
+    ok(delayed_forget_device(&t, zero) == 0, "a room rule is not a light");
+}
+
 int main(void)
 {
     test_they_come_out_when_due();
     test_a_tie_keeps_the_order_they_were_scheduled_in();
     test_cancel_is_per_button();
     test_a_full_table_refuses();
+    test_a_deleted_target_takes_its_waiting_actions();
     printf("all %d checks passed\n", s_checks);
     return 0;
 }

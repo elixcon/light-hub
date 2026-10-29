@@ -521,6 +521,36 @@ static int delayed_cancel(zbc_delayed_table_t *t, uint16_t id)
     return n;
 }
 
+/* Everything waiting to act on a room that is being deleted, or on a light of a
+ * device that is; how many there were. Gone with the rules' targets, not left
+ * to run: a room's id is given out again, and so is the address of a wired
+ * light or a Matter lamp, and a waiting rule would act on whatever gets it. */
+static int delayed_forget_group(zbc_delayed_table_t *t, uint16_t group_id)
+{
+    int n = 0;
+    for (int i = 0; i < ZBC_DELAYED_MAX; i++) {
+        const zbc_btn_rule_t *r = &t->slot[i].rule;
+        if (group_id != 0 && t->slot[i].id != 0 && r->ep == 0 && r->group_id == group_id) {
+            t->slot[i].id = 0;
+            n++;
+        }
+    }
+    return n;
+}
+
+static int delayed_forget_device(zbc_delayed_table_t *t, const uint8_t ieee[ZBC_BTN_IEEE_LEN])
+{
+    int n = 0;
+    for (int i = 0; i < ZBC_DELAYED_MAX; i++) {
+        const zbc_btn_rule_t *r = &t->slot[i].rule;
+        if (t->slot[i].id != 0 && r->ep != 0 && memcmp(r->ieee, ieee, ZBC_BTN_IEEE_LEN) == 0) {
+            t->slot[i].id = 0;
+            n++;
+        }
+    }
+    return n;
+}
+
 /* The one due first, in the order its rules were scheduled when several are
  * due together - a case's rules run in the order they are written. -1 when the
  * table is empty. */
@@ -2022,6 +2052,33 @@ bool buttons_delayed(uint16_t id, int *count, int64_t *next_ms)
         *next_ms = left > 0 ? left / 1000 : 0;
     }
     return true;
+}
+
+void buttons_forget_group(uint16_t group_id)
+{
+    button_db_forget_group(group_id);
+    portENTER_CRITICAL(&s_live_mux);
+    const int n = delayed_forget_group(&s_delayed, group_id);
+    portEXIT_CRITICAL(&s_live_mux);
+    if (n) {
+        ESP_LOGI(TAG, "%d waiting action(s) for room %u dropped with it", n, group_id);
+        zbc_state_bump();
+    }
+}
+
+void buttons_forget_device(const uint8_t ieee[ZBC_BTN_IEEE_LEN])
+{
+    if (!ieee) {
+        return;
+    }
+    button_db_forget_device(ieee);
+    portENTER_CRITICAL(&s_live_mux);
+    const int n = delayed_forget_device(&s_delayed, ieee);
+    portEXIT_CRITICAL(&s_live_mux);
+    if (n) {
+        ESP_LOGI(TAG, "%d waiting action(s) for a deleted light dropped", n);
+        zbc_state_bump();
+    }
 }
 
 void buttons_forget_delayed(uint16_t id)

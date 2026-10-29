@@ -140,7 +140,8 @@ A rule's `delay` makes it wait that many seconds (up to 65535) after its event b
 "turn on the kitchen, and turn it off after 10 minutes". The other rules of the case run at once.
 The next event of the same button drops whatever it still has waiting, so a second press restarts
 the timer, and motion takes back an "off" that no motion scheduled. Saving or deleting the button
-drops them too, and so does a restart. A waiting `toggle` decides from its own target when it runs.
+drops them too, and so does a restart. Deleting a room or a light drops what waits to act on it:
+its id or address can go to the next one made. A waiting `toggle` decides from its own target when it runs.
 A `dim_*` rule cannot wait: it only means something while the button is held.
 
 `/api/buttons` shows what a button has waiting as `delayed`: `count` and `next_ms`, or `null`.

@@ -1474,8 +1474,9 @@ static esp_err_t device_delete(httpd_req_t *req, const uint8_t ieee[ZBC_IEEE_LEN
     lighting_forget_device(ieee);
     /* A button whose source is a remote names the device, and one left pointing
      * at a device that is gone would fire at nothing - it keeps its name and
-     * its rules and loses only its source. */
-    button_db_forget_device(ieee);
+     * its rules and loses only its source. Rules that act on it lose it, and
+     * what they left waiting goes. */
+    buttons_forget_device(ieee);
     return send_ok(req, "200 OK");
 }
 
@@ -3700,8 +3701,8 @@ static esp_err_t group_dispatch(httpd_req_t *req)
         }
         /* The rules that named it stay, but unassigned: a button keeps its
          * shape and the UI says "pick a room" rather than silently losing the
-         * work someone did setting it up. */
-        button_db_forget_group((uint16_t)id);
+         * work someone did setting it up. What they left waiting goes. */
+        buttons_forget_group((uint16_t)id);
         lighting_group_forget_adaptive((uint16_t)id);
         /* The id is given out again: the WLED interface must not stream to
          * whatever room is made next. */

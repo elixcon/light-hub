@@ -179,7 +179,9 @@ export function remoteCards(devices: Device[], buttons: ButtonDef[]): RemoteCard
   const cards = new Map<string, RemoteCard>();
   for (const d of devices) {
     /* A sensor that also lists On/Off as an output (a Hue motion sensor's
-     * endpoint 1) is on the Sensors page, not a remote with no buttons. */
+     * endpoint 1) is on the Sensors page, not a remote with no buttons. The
+     * firmware drops such an endpoint (drop_presses_beside_motion), but one
+     * recorded before it did stays until the sensor is interrogated again. */
     if (isSensor(d)) continue;
     const ep = d.endpoints.find(isRemoteEp)?.ep;
     if (ep !== undefined) cards.set(d.ieee, { ieee: d.ieee, ep, device: d, known: knownRemote(d), buttons: [], spans: false });

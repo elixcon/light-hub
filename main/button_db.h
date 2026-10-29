@@ -281,7 +281,9 @@ bool      button_db_sensor_taken(const uint8_t ieee[ZBC_BTN_IEEE_LEN], uint8_t e
 
 /* A deleted group leaves its rules in place but unassigned, so the button keeps
  * its shape and the UI can say "pick a group" instead of silently losing the
- * work. Mirrors group_db_forget_device / curve_db_forget_device. */
+ * work. Mirrors group_db_forget_device / curve_db_forget_device. Called through
+ * buttons_forget_group, which drops the rules' waiting actions too, and the
+ * same for buttons_forget_device. */
 void      button_db_forget_group(uint16_t group_id);
 
 /* And the same when a device is deleted. A remote or a sensor: the button keeps
