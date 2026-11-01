@@ -3,10 +3,13 @@
 
 import type { MixCurvesJson } from "./mix.ts";
 
-export type Feature = "onoff" | "brightness" | "color_temp" | "color" | "switch" | "hue_buttons" | "motion";
+export type Feature = "onoff" | "brightness" | "color_temp" | "color" | "switch" | "hue_buttons" | "motion" | "node";
 
 export interface Endpoint {
   ep: number;
+  /* A Light Node's control endpoint: what its Wi-Fi is doing. */
+  node_wifi?: "off" | "joining" | "station" | "hotspot";
+  node_ip?: string | null;
   device_id: number;
   features: Feature[];
   on: boolean | null;
@@ -215,6 +218,8 @@ export type ButtonSource = "gpio" | "zigbee" | "sensor";
 
 export interface ButtonDef {
   id: number;
+  /* On a Light Node: the light it toggles when the hub cannot be reached. */
+  fallback?: number | null;
   name: string;
   source: ButtonSource;
   ieee: string | null;
@@ -285,6 +290,8 @@ export interface ChannelSurveyAnswer {
 
 export interface Status {
   name: string;
+  /* On a Light Node. */
+  node?: { mode: string; paired: boolean; hub_down: boolean; window_left_s: number };
   wifi: WifiStatus;
   zigbee: {
     network_up: boolean;
@@ -295,6 +302,8 @@ export interface Status {
     radio: Record<string, number>;
     ota?: ZbOtaStatus;
     channel_move?: ChannelMove;
+    /* On a Light Node: who it hangs off. */
+    parent?: { short_addr: number; coordinator: boolean; lqi: number; rssi: number };
   };
   device_count: number;
   uptime_s: number;

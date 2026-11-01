@@ -59,25 +59,6 @@ typedef struct {
 } node_zb_stats_t;
 void node_zb_stats(node_zb_stats_t *out);
 
-/* The last signals and frames, newest last, for the diagnostics page. */
-typedef struct {
-    uint32_t at_ms;
-    uint16_t src;
-    uint16_t cluster;
-    uint8_t  dst_ep;
-    uint8_t  cmd;
-    uint8_t  fc;
-    uint8_t  handled;
-} node_zb_frame_t;
-int  node_zb_frames(node_zb_frame_t *out, int max);
-
-typedef struct {
-    uint32_t at_ms;
-    char     name[28];
-    int      status;
-} node_zb_signal_t;
-int  node_zb_signals(node_zb_signal_t *out, int max);
-
 #ifdef __cplusplus
 }
 #endif

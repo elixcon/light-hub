@@ -62,6 +62,11 @@ void node_store_claim(void)
     set_u8("role", 1);
 }
 
+void node_store_forget_claim(void)
+{
+    set_u8("role", 0);
+}
+
 void node_store_set_ask(node_ask_t ask, uint8_t minutes)
 {
     set_u8("ask_min", minutes);

@@ -84,6 +84,7 @@ those are only on `/api/status`.
 | `POST` | `/api/devices/{ieee}/ep/{ep}/color_temp` | `{"kelvin":2700}` |
 | `POST` | `/api/devices/{ieee}/ep/{ep}/color` | `{"hue":280,"sat":90}`: degrees and percent |
 | `PATCH` | `/api/devices/{ieee}` | `{"name":"Desk lamp"}` |
+| `POST` | `/api/devices/{ieee}/wifi` | `{"minutes":15}`, optional: asks a [Light Node](light-node.md) to open Wi-Fi until that many minutes without a request. Answers `202`, and `409` for any other device. Its control endpoint then shows `node_wifi` (`off`, `joining`, `station` or `hotspot`) and `node_ip` |
 | `DELETE` | `/api/devices/{ieee}` | asks a lamp to leave and forgets the device (a sleepy remote or sensor is only forgotten); a wired light gives its pin back; a Matter lamp is forgotten, and its device is told to forget the coordinator (RemoveFabric) when it was the device's last lamp |
 | `GET` | `/api/devices/{ieee}/ep/{ep}/curves` | this light's response curves |
 | `POST` | `/api/devices/{ieee}/ep/{ep}/curves` | replaces them: `level` points, `chroma` stops; a `null` member clears that part |

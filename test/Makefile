@@ -46,14 +46,14 @@ SRC_LL     = ../main/local_lights.c
 SRC_UPD    = ../updater/main/updater.c
 SRC_CONV   = ../updater/main/convert.c
 
-TESTS    = test_nodemode test_fallback test_nodezcl test_gate test_settle test_sweep test_zremote test_remote test_matter test_slug \
+TESTS    = test_nodemode test_fallback test_nodezcl test_variant test_gate test_settle test_sweep test_zremote test_remote test_matter test_slug \
            test_unlock test_btnstep test_authkey test_switchpoint test_prewarm test_lightaddr test_cwww test_ramp test_updater test_convert \
            test_sun test_tz test_ntc test_alstate test_linkgap test_reach test_zbota test_fadein \
            test_mctl_gate test_mctl_disc test_clause test_parent test_crash test_ent test_stream test_wled \
            test_config_backup test_idfver test_motion test_delayed test_bdbpool
 REGIONS  = gate-types gate-body settle-types settle-body sweep zremote btnstep motion delayed levels matter slug \
            unlock authkey switchpoint prewarm fadein lightaddr cwww ramp pchip updater-decide convert-plan alstate linkgap reach zota-wake \
-           mctl-gate mctl-disc clause parent crash-scan ent-frame stream wled-parse cfg-plan idf-ver \
+           mctl-gate mctl-disc clause parent crash-scan ent-frame stream wled-parse cfg-plan idf-ver variant \
            bdb-types bdb-table
 INCS     = $(REGIONS:%=%.inc)
 
@@ -104,6 +104,7 @@ FROM_stream       = $(SRC_LIGHT)
 FROM_wled-parse   = ../main/wled.c
 FROM_cfg-plan     = ../main/config_backup.c
 FROM_idf-ver      = ../main/ota.c
+FROM_variant      = ../main/ota.c
 FROM_bdb-types    = ../main/button_db.h
 FROM_bdb-table    = ../main/button_db.c
 
@@ -190,6 +191,9 @@ test_authkey: test_authkey.c authkey.inc
 	@$(CC) $(CFLAGS) -o $@ $<
 
 test_idfver: test_idfver.c idf-ver.inc
+	@$(CC) $(CFLAGS) -o $@ $<
+
+test_variant: test_variant.c variant.inc
 	@$(CC) $(CFLAGS) -o $@ $<
 
 test_switchpoint: test_switchpoint.c switchpoint.inc

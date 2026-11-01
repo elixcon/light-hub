@@ -16,26 +16,27 @@
 #include "esp_timer.h"
 #include "nvs_flash.h"
 
+#include "auth.h"
 #include "button_db.h"
 #include "crash_log.h"
 #include "light_db.h"
 #include "local_lights.h"
 #include "node_buttons.h"
-#include "node_debug.h"
+#include "node_http.h"
 #include "node_main.h"
 #include "node_proto.h"
 #include "node_store.h"
 #include "node_zb.h"
+#include "ota.h"
 #include "settings.h"
 #include "thermal.h"
 #include "wifi_manager.h"
 
-static const char *TAG = "node";
+/* partitions.csv as it is flashed, updater row included; main/CMakeLists.txt. */
+extern const uint8_t own_table_start[] asm("_binary_partition_table_full_bin_start");
+extern const uint8_t own_table_end[]   asm("_binary_partition_table_full_bin_end");
 
-/* Until Wi-Fi mode can hand an update over (node_http.c), a test image does not confirm
- * itself and restarts after this long. On trial that is a rollback to the updater, which
- * is how a board with no cable stays reachable. */
-#define TEST_WINDOW_US (20 * 60 * 1000000LL)
+static const char *TAG = "node";
 
 static node_mode_t      s_mode;
 static uint8_t          s_minutes;
@@ -112,10 +113,18 @@ static void window_task(void *arg)
     }
 }
 
-static void test_window_cb(void *arg)
+/* On Zigbee is this firmware's proof that a new image works: it usually has no Wi-Fi. */
+bool ota_extra_boot_good(void)
 {
-    (void)arg;
-    esp_restart();
+    return node_zb_joined_at() != 0;
+}
+
+/* A firmware upload comes back on Wi-Fi, so the page it came from sees it finish. */
+void ota_before_handoff(void)
+{
+    local_lights_save_all();
+    node_store_set_resume();
+    node_store_set_ask(NODE_ASK_WIFI, 0);
 }
 
 void app_main(void)
@@ -127,7 +136,6 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(err);
     crash_log_init();
-    node_debug_note_namespaces();
 
     /* A flash that held a hub keeps its lights, Wi-Fi and keys; only the coordinator's
      * network has to go. Erased directly, since the stack's own reset restarts. */
@@ -139,17 +147,15 @@ void app_main(void)
         }
     }
 
+    ota_set_own_table(own_table_start, (size_t)(own_table_end - own_table_start));
+
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     ESP_ERROR_CHECK(settings_init());
     ESP_ERROR_CHECK(light_db_init());
     ESP_ERROR_CHECK(button_db_init());
+    ESP_ERROR_CHECK(auth_init());
 
-    node_ask_t ask = node_store_take_ask(&s_minutes);
-#ifdef NODE_TEST_WIFI
-    if (ask == NODE_ASK_NONE) {
-        ask = NODE_ASK_WIFI;   /* so a test image can be watched */
-    }
-#endif
+    const node_ask_t ask = node_store_take_ask(&s_minutes);
     s_mode = node_mode_decide(node_store_paired(), ask, wifi_manager_has_credentials());
     ESP_LOGW(TAG, "Mode %d", s_mode);
 
@@ -165,15 +171,14 @@ void app_main(void)
     if (wifi) {
         ESP_ERROR_CHECK(wifi_manager_start());
         wifi_manager_set_modem_sleep(settings_wifi_sleep());
-        ESP_ERROR_CHECK(node_debug_start());
+        ESP_ERROR_CHECK(node_http_start());
         s_last_use = esp_timer_get_time();
         xTaskCreate(window_task, "node_window", 3072, NULL, 3, NULL);
     }
 
-    const esp_timer_create_args_t tw = { .callback = test_window_cb, .name = "test_window" };
-    esp_timer_handle_t timer;
-    ESP_ERROR_CHECK(esp_timer_create(&tw, &timer));
-    ESP_ERROR_CHECK(esp_timer_start_once(timer, TEST_WINDOW_US));
+    /* Whichever mode: a new image is confirmed once Zigbee or Wi-Fi is up, or by the
+     * uptime fallback. Before anything can restart. */
+    ota_init();
 
     /* A paired node in its hotspot keeps quiet on Zigbee: a listening receiver holds the
      * antenna against hotspot clients. Unpaired, it does listen, only while it looks. */

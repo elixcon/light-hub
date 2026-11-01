@@ -203,14 +203,6 @@ void node_buttons_delivered(uint8_t seq, bool delivered)
     }
 }
 
-void node_buttons_inject(uint8_t key, uint8_t event)
-{
-    if (s_queue) {
-        const msg_t m = { .type = MSG_GESTURE, .key = key, .event = event };
-        xQueueSend(s_queue, &m, 0);
-    }
-}
-
 bool node_buttons_hub_down(void)
 {
     return s_fb.hub_down;

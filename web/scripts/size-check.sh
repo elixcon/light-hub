@@ -3,7 +3,7 @@
 # (see partitions.csv); the UI may take 150 KB gzipped and no more. zopfli is
 # what main/CMakeLists.txt runs, so this is the number that lands in flash.
 set -e
-f="$(dirname "$0")/../../main/www/index.html"
+f="$(dirname "$0")/../../${1:-main}/www/index.html"
 limit=153600
 raw=$(wc -c < "$f" | tr -d ' ')
 n=$(zopfli -c "$f" | wc -c | tr -d ' ')

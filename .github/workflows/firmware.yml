@@ -36,8 +36,8 @@ jobs:
       - name: The committed page is what web/ builds
         run: |
           npm run build
-          git diff --stat --exit-code -- ../main/www/index.html || {
-            echo "::error file=main/www/index.html::not what web/ builds - run npm run build in web/ and commit it"
+          git diff --stat --exit-code -- ../main/www/index.html ../node/main/www/index.html || {
+            echo "::error file=main/www/index.html::not what web/ builds - run npm run build in web/ and commit both pages"
             exit 1
           }
 
@@ -69,7 +69,9 @@ jobs:
         run: |
           . "$IDF_PATH/export.sh"
           idf.py build
+          idf.py -C node build
           tools/make-release.sh build dist
+          tools/make-release.sh node/build dist
           # The release notes name the files after the tag, but make-release.sh
           # names them after git describe, which differs with two tags on one
           # commit or a modified tree. A release is the tag's version or nothing.
@@ -103,7 +105,8 @@ jobs:
           - `elixcon_light_hub-@VERSION@-factory.bin`: a blank board. It erases everything stored.
           - `elixcon_light_hub-@VERSION@-usb.zip`: a board already in use, over USB. It keeps everything stored.
           - `elixcon_light_hub-@VERSION@.bin`: an update over the network.
-          - `elixcon_light_hub_updater-@VERSION@.bin`: converting an ESPHome device, or replacing the updater.
+          - `elixcon_light_hub_updater-@VERSION@.bin`: converting an ESPHome device, or replacing the updater. The hub and the Light Node share it.
+          - `elixcon_light_node-@VERSION@-factory.bin`, `-usb.zip`, `.bin` and `.elf`: the same for a [Light Node](@BASE@/docs/light-node.md).
           - `elixcon_light_hub-@VERSION@.elf`: decodes a crash record from this build.
 
           How to write each one: [Installing](@BASE@/README.md#installing), [Firmware updates](@BASE@/docs/updates.md), [Converting](@BASE@/docs/converting.md), [After a crash](@BASE@/docs/development.md#after-a-crash).

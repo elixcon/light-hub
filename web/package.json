@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build && npm run size-check",
+    "build": "vite build && npm run size-check && npm run build:node",
+    "build:node": "vite build --mode node && mv ../node/main/www/node.html ../node/main/www/index.html && sh scripts/size-check.sh node/main",
     "size-check": "sh scripts/size-check.sh",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test": "node --test test/*.test.ts",

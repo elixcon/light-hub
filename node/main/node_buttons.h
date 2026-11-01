@@ -23,9 +23,6 @@ bool      node_buttons_pin_state(uint16_t id, bool *pressed, int *level);
 /* The frame's verdict, from the Zigbee task: spinlock only, no blocking. */
 void      node_buttons_delivered(uint8_t seq, bool delivered);
 
-/* Runs a gesture as though it had been pressed. For tests and the page. */
-void      node_buttons_inject(uint8_t key, uint8_t event);
-
 /* Whether the hub could not be reached the last time a press tried. */
 bool      node_buttons_hub_down(void);
 

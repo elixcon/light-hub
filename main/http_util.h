@@ -11,6 +11,8 @@
 #include "esp_err.h"
 #include "esp_http_server.h"
 
+#include "auth.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -71,6 +73,28 @@ typedef esp_err_t (*route_fn_t)(httpd_req_t *req);
 /* Route handlers: the real handler rides in user_ctx. See http_util.c. */
 esp_err_t guarded(httpd_req_t *req);
 esp_err_t watched(httpd_req_t *req);
+
+void   reboot_task(void *arg);
+
+/* The access state, as /api/auth and /api/state carry it. */
+cJSON *auth_json(httpd_req_t *req);
+/* The Wi-Fi status, as /api/status carries it. */
+cJSON *wifi_json(void);
+/* This firmware and the updater beside it. */
+cJSON *ota_json(void);
+
+/* Routes the hub and the node serve alike. */
+esp_err_t index_get(httpd_req_t *req);
+esp_err_t auth_state_get(httpd_req_t *req);
+esp_err_t auth_session_post(httpd_req_t *req);
+esp_err_t send_session(httpd_req_t *req, const zbc_auth_key_t *k, const char *shown);
+esp_err_t wifi_scan_get(httpd_req_t *req);
+esp_err_t wifi_post(httpd_req_t *req);
+esp_err_t wifi_test_post(httpd_req_t *req);
+esp_err_t wifi_test_get(httpd_req_t *req);
+esp_err_t wifi_resume_post(httpd_req_t *req);
+esp_err_t updater_dispatch(httpd_req_t *req);
+esp_err_t not_found(httpd_req_t *req, httpd_err_code_t err);
 
 #ifdef __cplusplus
 }

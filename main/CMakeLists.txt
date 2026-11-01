@@ -3,6 +3,7 @@ idf_component_register(
         "main.c"
         "wifi_manager.c"
         "captive_dns.c"
+        "ieee_str.c"
         "device_db.c"
         "settings.c"
         "state_rev.c"

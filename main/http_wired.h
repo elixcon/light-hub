@@ -25,6 +25,10 @@ bool curve_from_json(const cJSON *obj, zbc_curve_t *out);
 /* Why a button cannot read this pin, or NULL when it can. */
 const char *button_pin_problem(int pin);
 
+/* /api/status's thermal and wired members. */
+cJSON *thermal_json(void);
+cJSON *wired_json(void);
+
 /* POST /api/lights, PATCH /api/lights/{id}. */
 esp_err_t light_dispatch(httpd_req_t *req);
 

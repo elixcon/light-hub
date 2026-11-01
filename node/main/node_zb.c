@@ -55,6 +55,7 @@ typedef enum {
     EV_ENTER_WIFI,    /* the hub asked: cmd.level holds the minutes */
     EV_LEFT,          /* left the network for good */
     EV_ANNOUNCE,      /* the endpoints changed since the hub last looked */
+    EV_WIFI_OFF,      /* back on Zigbee alone: the hub should stop offering a link */
 } ev_type_t;
 
 typedef struct {
@@ -79,62 +80,6 @@ static volatile int64_t   s_joined_at;
 static uint32_t           s_endpoints_digest;
 
 static node_zb_stats_t    s_stats;
-static portMUX_TYPE       s_log_mux = portMUX_INITIALIZER_UNLOCKED;
-static node_zb_frame_t    s_frames[16];
-static int                s_frames_n;
-static node_zb_signal_t   s_signals[12];
-static int                s_signals_n;
-
-static uint32_t now_ms(void)
-{
-    return (uint32_t)(esp_timer_get_time() / 1000);
-}
-
-static void note_signal(const char *name, int status)
-{
-    node_zb_signal_t e = { .at_ms = now_ms(), .status = status };
-    strlcpy(e.name, name, sizeof(e.name));
-    portENTER_CRITICAL(&s_log_mux);
-    if (s_signals_n == (int)(sizeof(s_signals) / sizeof(s_signals[0]))) {
-        memmove(&s_signals[0], &s_signals[1], sizeof(s_signals) - sizeof(s_signals[0]));
-        s_signals_n--;
-    }
-    s_signals[s_signals_n++] = e;
-    portEXIT_CRITICAL(&s_log_mux);
-}
-
-static void note_frame(const ezb_zcl_cmd_hdr_t *h, uint16_t src, bool handled)
-{
-    const node_zb_frame_t e = {
-        .at_ms = now_ms(), .src = src, .cluster = h->cluster_id, .dst_ep = h->dst_ep,
-        .cmd = h->cmd_id, .fc = h->fc, .handled = handled,
-    };
-    portENTER_CRITICAL(&s_log_mux);
-    if (s_frames_n == (int)(sizeof(s_frames) / sizeof(s_frames[0]))) {
-        memmove(&s_frames[0], &s_frames[1], sizeof(s_frames) - sizeof(s_frames[0]));
-        s_frames_n--;
-    }
-    s_frames[s_frames_n++] = e;
-    portEXIT_CRITICAL(&s_log_mux);
-}
-
-int node_zb_frames(node_zb_frame_t *out, int max)
-{
-    portENTER_CRITICAL(&s_log_mux);
-    const int n = s_frames_n < max ? s_frames_n : max;
-    memcpy(out, &s_frames[s_frames_n - n], (size_t)n * sizeof(*out));
-    portEXIT_CRITICAL(&s_log_mux);
-    return n;
-}
-
-int node_zb_signals(node_zb_signal_t *out, int max)
-{
-    portENTER_CRITICAL(&s_log_mux);
-    const int n = s_signals_n < max ? s_signals_n : max;
-    memcpy(out, &s_signals[s_signals_n - n], (size_t)n * sizeof(*out));
-    portEXIT_CRITICAL(&s_log_mux);
-    return n;
-}
 
 void node_zb_stats(node_zb_stats_t *out)
 {
@@ -359,7 +304,6 @@ static bool raw_frame(const ezb_zcl_raw_frame_t *raw)
 
     /* The hub, and only the hub: anything on the network can address this cluster. */
     if (h->cluster_id == NODE_PROTO_CLUSTER) {
-        note_frame(h, src, true);
         if (src == 0x0000 && h->dst_ep == NODE_CONTROL_EP && h->cmd_id == NODE_CMD_ENTER_WIFI &&
             !EZB_ZCL_CMD_FC_IS_TO_CLI_DIRECTION(h->fc)) {
             const node_ev_t ev = {
@@ -377,7 +321,6 @@ static bool raw_frame(const ezb_zcl_raw_frame_t *raw)
                       EZB_ZCL_CMD_FC_GET_FRAME_TYPE(h->fc) == EZB_ZCL_FRAME_TYPE_CLUSTER_SPECIFIC &&
                       !EZB_ZCL_CMD_FC_IS_MANUF_SPEC(h->fc) && !EZB_ZCL_CMD_FC_IS_TO_CLI_DIRECTION(h->fc) &&
                       node_zcl_decode(h->cluster_id, h->cmd_id, raw->payload, raw->payload_length, &cmd);
-    note_frame(h, src, mine);
     if (!mine) {
         return false;
     }
@@ -467,6 +410,9 @@ static void node_task(void *arg)
                 vTaskDelay(pdMS_TO_TICKS(300));
                 node_restart_into(NODE_ASK_NONE, 0);
                 break;
+            case EV_WIFI_OFF:
+                node_zb_send_wifi_state(NODE_WIFI_OFF, NULL);
+                break;
             case EV_ANNOUNCE: {
                 /* The hub interrogates on an announce, and that is how it hears of a
                  * light added or removed. */
@@ -513,6 +459,9 @@ static void on_network(const char *how)
     if (node_store_endpoints() != s_endpoints_digest) {
         post_event(EV_ANNOUNCE);
     }
+    if (node_mode() == NODE_MODE_ZIGBEE) {
+        post_event(EV_WIFI_OFF);
+    }
 }
 
 static bool app_signal_handler(const ezb_app_signal_t *app_signal)
@@ -523,7 +472,6 @@ static bool app_signal_handler(const ezb_app_signal_t *app_signal)
                        type == EZB_BDB_SIGNAL_STEERING;
     const void *params = ezb_app_signal_get_params(app_signal);
     const int   status = bdb && params ? *(const ezb_bdb_comm_status_t *)params : -1;
-    note_signal(name ? name : "?", status);
 
     switch (type) {
     case EZB_ZDO_SIGNAL_SKIP_STARTUP:

@@ -19,6 +19,9 @@ void     node_store_set_paired(bool paired);
  * an end device can use; node_store_claim records that it has been dealt with. */
 bool     node_store_foreign(void);
 void     node_store_claim(void);
+/* The next boot treats this flash as foreign again, so it erases the Zigbee network
+ * before the stack starts. How a node is unpaired from its own page. */
+void     node_store_forget_claim(void);
 
 /* The one-shot request for the next boot, erased as it is read, so a power cut in that
  * boot lands in plain Zigbee rather than in Wi-Fi for ever. */

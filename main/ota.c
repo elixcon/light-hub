@@ -320,6 +320,8 @@ typedef struct {
     uint8_t          head[IMAGE_HDR_LEN];
     size_t           head_len;
     size_t           next_log;
+    char             installed[32];   /* the project in the partition now; "" when none */
+    bool             any_variant;     /* POST /update?variant=any */
 } app_sink_t;
 
 /* The first bytes decide whether this is an application image at all. Both the
@@ -388,6 +390,28 @@ static bool idf_image_too_old(const char *image, size_t image_size, const char *
 }
 /* >>> end host-test region: idf-ver <<< */
 
+/* >>> host-test region: variant <<< */
+/* Whether an upload is the other firmware of this project: a hub's image on a node, or
+ * a node's on a hub. Each would start on what the other left in NVS, and a coordinator
+ * on an end device's stored network is not something a person can see from the page.
+ * Refused, unless the upload says it means it (POST /update?variant=any).
+ *
+ * Only between the two names: anything else installed is a build from before the
+ * names existed, or another firmware altogether, and the updater has its own way with
+ * those (convert.c). */
+#define OTA_PROJECT_PREFIX "elixcon_light_"
+
+static bool image_is_other_variant(const char *incoming, size_t incoming_size,
+                                   const char *installed, size_t installed_size)
+{
+    const size_t p = sizeof(OTA_PROJECT_PREFIX) - 1;
+    if (strncmp(incoming, OTA_PROJECT_PREFIX, p) != 0 || strncmp(installed, OTA_PROJECT_PREFIX, p) != 0) {
+        return false;
+    }
+    return strncmp(incoming, installed, incoming_size < installed_size ? incoming_size : installed_size) != 0;
+}
+/* >>> end host-test region: variant <<< */
+
 /* The bootloader's ESP-IDF, read once: only a USB flash or a conversion writes
  * a bootloader, and both restart afterwards. Empty without a description. Asked
  * from the httpd task only. */
@@ -447,6 +471,13 @@ static const char *app_sink_write(void *ctx, const uint8_t *data, size_t len)
         why = check_image_idf(desc);
         if (why) {
             return why;
+        }
+        if (!s->any_variant && image_is_other_variant(desc->project_name, sizeof(desc->project_name),
+                                                      s->installed, sizeof(s->installed))) {
+            static char other[128];
+            snprintf(other, sizeof(other), "this is %.32s, and this board runs %.32s: upload the firmware made for it",
+                     desc->project_name, s->installed);
+            return other;
         }
 
         if (esp_ota_write(s->handle, s->head, IMAGE_HDR_LEN) != ESP_OK) {
@@ -522,6 +553,15 @@ esp_err_t ota_handle_update(httpd_req_t *req)
              part->label, (unsigned)(part->size / 1024), (int)req->content_len);
 
     app_sink_t sink = { .size = part->size, .next_log = 128 * 1024 };
+    /* Read before anything is erased. */
+    esp_app_desc_t have;
+    if (esp_ota_get_partition_description(part, &have) == ESP_OK) {
+        memcpy(sink.installed, have.project_name, sizeof(sink.installed));
+    }
+    char query[32], variant[8];
+    sink.any_variant = httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+                       httpd_query_key_value(query, "variant", variant, sizeof(variant)) == ESP_OK &&
+                       strcmp(variant, "any") == 0;
     esp_err_t  err  = esp_ota_begin(part, OTA_WITH_SEQUENTIAL_WRITES, &sink.handle);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_ota_begin: %s", esp_err_to_name(err));
@@ -570,9 +610,16 @@ esp_err_t ota_handle_update(httpd_req_t *req)
  * into the provisioning AP is not rolled back at the next power cut. */
 static int64_t s_trial_started_us;
 
+/* Another reason a boot is good, for a firmware that normally has no Wi-Fi to prove
+ * itself on: the node, once it is back on Zigbee. */
+__attribute__((weak)) bool ota_extra_boot_good(void)
+{
+    return false;
+}
+
 static bool boot_is_good(void)
 {
-    return wifi_manager_station_joined() ||
+    return wifi_manager_station_joined() || ota_extra_boot_good() ||
            esp_timer_get_time() - s_trial_started_us >= CONFIRM_DEADLINE_US;
 }
 
@@ -810,6 +857,12 @@ static void set_updater_flag(uint8_t on)
  * restarts. Selecting the factory app erases otadata, and that is also what
  * makes a power cut in the updater harmless: no flag, no otadata entry and a
  * valid image are "start the coordinator" to it. NULL on success. */
+/* Called before restarting into the updater: the node leaves a note to come back on
+ * Wi-Fi, so the page it was uploaded from can see the update finish. */
+__attribute__((weak)) void ota_before_handoff(void)
+{
+}
+
 static const char *request_updater(void)
 {
     const esp_partition_t *upd = updater_partition();
@@ -823,6 +876,7 @@ static const char *request_updater(void)
     if (!ota_updater_valid()) {
         return "the updater cannot be trusted - upload this build's elixcon_light_hub_updater.bin first";
     }
+    ota_before_handoff();
     set_updater_flag(1);
     esp_err_t err = esp_ota_set_boot_partition(upd);
     if (err != ESP_OK) {

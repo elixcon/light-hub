@@ -11,7 +11,9 @@
 #include "http_util.h"
 #include "light_math.h"
 #include "local_lights.h"
+#include "ntc.h"
 #include "settings.h"
+#include "thermal.h"
 
 static const char *TAG = "http";
 
@@ -424,4 +426,41 @@ esp_err_t light_dispatch(httpd_req_t *req)
         return light_patch(req, (uint16_t)id);
     }
     return send_error(req, "404 Not Found", "no such light route");
+}
+
+/* Overheat protection. On every poll, like the rest of the status, so the
+ * temperature moves without a revision bump; a change of state bumps one. */
+cJSON *thermal_json(void)
+{
+    thermal_status_t th;
+    thermal_get(&th);
+    cJSON *t = cJSON_CreateObject();
+    static const char *const THERMAL_STATES[] = { "ok", "hot", "fault" };
+    cJSON_AddStringToObject(t, "state", !th.configured ? "off" : THERMAL_STATES[th.state < 3 ? th.state : 2]);
+    if (th.configured && th.have) {
+        cJSON_AddNumberToObject(t, "temp_c", th.deci_c / 10.0);
+        cJSON_AddNumberToObject(t, "max_c", th.max_deci_c / 10.0);
+    } else {
+        cJSON_AddNullToObject(t, "temp_c");
+        cJSON_AddNullToObject(t, "max_c");
+    }
+    cJSON_AddNumberToObject(t, "trip_c", th.trip_c);
+    cJSON_AddNumberToObject(t, "release_c", th.trip_c - ZBC_THERMAL_RELEASE_DECI_C / 10.0);
+    cJSON_AddNumberToObject(t, "trips", th.trips);
+    cJSON_AddNumberToObject(t, "mv", th.mv);
+    cJSON_AddBoolToObject(t, "held", local_lights_held());
+    return t;
+}
+
+/* The wired lights' fade task: how often it came late while something moved.
+ * Free-running since boot, like the radio counters - sample around a fade. */
+cJSON *wired_json(void)
+{
+    local_lights_fade_stats_t f;
+    local_lights_fade_stats(&f);
+    cJSON *w = cJSON_CreateObject();
+    cJSON_AddNumberToObject(w, "fade_ticks", f.ticks);
+    cJSON_AddNumberToObject(w, "fade_late", f.late);
+    cJSON_AddNumberToObject(w, "fade_max_gap_ms", f.max_gap_ms);
+    return w;
 }

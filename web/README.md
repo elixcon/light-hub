@@ -14,7 +14,11 @@ npm run check          # svelte-check
 npm test               # the math ports (pchip, switch points, the colour path), lamp card colours, class clashes, the QR code and Zigbee OTA matching
 ```
 
-**Rebuild and commit `main/www/index.html` with every UI change.** The source
+The same build also makes the [Light Node](../docs/light-node.md)'s page, from `node.html` and `src/node/` into
+`../node/main/www/index.html`, with its own size check. It reuses the hub's components: `LightView` with `node` set
+leaves out curves and rooms. A change to a shared component changes both pages.
+
+**Rebuild and commit `main/www/index.html` and `node/main/www/index.html` with every UI change.** The source
 of truth for what ships is that file; `web/` is how it is made. Tailwind also
 picks up class-like words from comments, so even a comment edit can change the
 build.

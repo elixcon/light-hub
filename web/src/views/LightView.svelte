@@ -15,6 +15,7 @@
 	import SwitchPointEditor from "$lib/components/SwitchPointEditor.svelte";
 	import MixCurves from "$lib/components/MixCurves.svelte";
 	import FirmwareRow from "$lib/components/FirmwareRow.svelte";
+	import NodeWifiCard from "$lib/components/NodeWifiCard.svelte";
 	import { data, pending, key, value, epPct, isRemoteEp, findEp, findGroup, refresh, schedule, seenIeee,
 		setOnOff, setLevel, sendCommand, getOffEpoch } from "$lib/state.svelte.ts";
 	import { api, post, patch, del } from "$lib/api.ts";
@@ -40,7 +41,8 @@
 	import { channelsOf, curvesFromJson, curvesFromMix, curvesToJson, type MixCurves as Curves,
 		type MixCurvesJson } from "$lib/mix.ts";
 
-	let { ieee, ep }: { ieee: string; ep: number } = $props();
+	/* `node`: on a Light Node's own page, where curves and rooms are the hub's. */
+	let { ieee, ep, node = false }: { ieee: string; ep: number; node?: boolean } = $props();
 
 	const found = $derived(findEp(ieee, ep));
 	const d = $derived(found?.device);
@@ -75,7 +77,7 @@
 
 	async function load() {
 		const id = `${ieee}/${ep}`;
-		if (c.loaded === id || !e) return;
+		if (c.loaded === id || !e || node) return;
 		c.loaded = id;
 		try {
 			const cs = await api(`/api/devices/${ieee}/ep/${ep}/curves`);
@@ -266,6 +268,13 @@
 		<Card.Root class="mt-4"><Card.Content class="text-muted-foreground text-sm">
 			This is a remote: it sends presses rather than answering commands. Set up its buttons under <a href="#/remotes" class="text-primary underline underline-offset-4">Remotes</a>.
 		</Card.Content></Card.Root>
+	{:else if node}
+		{#if dims}
+			<Card.Root class="mt-4"><Card.Content>
+				<Label class="mb-2 block">Try it</Label>
+				<LevelSlider {pct} {on} label="Test brightness" onsend={(v) => setLevel(ieee, ep, v)} />
+			</Card.Content></Card.Root>
+		{/if}
 	{:else if f.includes("onoff")}
 		<!-- Response -->
 		<Card.Root class="mt-4">
@@ -489,6 +498,8 @@
 		</Card.Root>
 	{/if}
 
+	{#if !node}<NodeWifiCard device={d} />{/if}
+
 	<!-- Device -->
 	<Card.Root class="mt-4">
 		<Card.Header><Card.Title>Device</Card.Title></Card.Header>
@@ -514,7 +525,7 @@
 					<dt>Link</dt><dd class="text-foreground">{linkText(d)}{d.online ? "" : " · offline"}</dd>
 					<dt>Last seen</dt><dd class="text-foreground">{agoS(d.last_seen_s_ago)}</dd>
 				{/if}
-				<dt>Rooms</dt><dd class="text-foreground">{groupsOf.length ? groupsOf.join(", ") : "none"}</dd>
+				{#if !node}<dt>Rooms</dt><dd class="text-foreground">{groupsOf.length ? groupsOf.join(", ") : "none"}</dd>{/if}
 			</dl>
 			{#if matter && d.bridged}
 				<div class="text-muted-foreground text-xs">A lamp added to the hub later appears here after <b>Rescan device</b>.</div>

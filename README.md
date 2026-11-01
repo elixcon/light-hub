@@ -152,6 +152,8 @@ Wi-Fi](docs/radio.md) explains the channels and the link counters in `/api/statu
   Adaptive Lighting
 - [Buttons and remotes](docs/buttons-and-remotes.md): pairing remotes, gestures and rules
 - [Wired lights and overheat protection](docs/wired-lights.md)
+- [Light Node](docs/light-node.md): a second firmware, a Zigbee end device for lights and buttons
+  wired away from the hub
 - [The WLED interface](docs/wled.md): a room's Hue colour lamps as a WLED strip for Hyperion,
   HyperHDR or LedFx
 - [Matter](docs/matter.md): the bridge to Apple Home, Home Assistant and Alexa, and adding Matter
