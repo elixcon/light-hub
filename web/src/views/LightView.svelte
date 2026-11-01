@@ -514,7 +514,7 @@
 				{:else}
 					<dt>Model</dt><dd class="text-foreground">{[d.manufacturer, d.model].filter(Boolean).join(" · ") || "unknown"}</dd>
 				{/if}
-				<dt>Address</dt><dd class="text-foreground font-mono text-xs">{d.ieee} · endpoint {e.ep}</dd>
+				{#if !node}<dt>Address</dt><dd class="text-foreground font-mono text-xs">{d.ieee} · endpoint {e.ep}</dd>{/if}
 				{#if matter}
 					<dt>Matter</dt><dd class="text-foreground">node <span class="font-mono text-xs">{d.node_id}</span> · endpoint {d.remote_ep}{d.bridged ? " · behind a hub" : ""}</dd>
 					<dt>Vendor</dt><dd class="text-foreground font-mono text-xs">{hex4(d.vendor_id ?? 0)} · product {hex4(d.product_id ?? 0)}</dd>
