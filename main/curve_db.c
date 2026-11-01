@@ -601,6 +601,22 @@ void curve_db_forget_device(const uint8_t ieee[ZBC_IEEE_LEN])
     CDB_UNLOCK();
 }
 
+void curve_db_forget_endpoint(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep)
+{
+    bool changed = false;
+    CDB_LOCK();
+    for (int i = 0; i < CONFIG_ZBC_MAX_CURVES; i++) {
+        if (s_curves[i].in_use && s_curves[i].ep == ep && memcmp(s_curves[i].ieee, ieee, ZBC_IEEE_LEN) == 0) {
+            memset(&s_curves[i], 0, sizeof(s_curves[i]));
+            changed = true;
+        }
+    }
+    if (changed) {
+        cdb_save_locked();
+    }
+    CDB_UNLOCK();
+}
+
 esp_err_t curve_db_erase(void)
 {
     CDB_LOCK();

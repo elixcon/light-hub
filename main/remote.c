@@ -1,5 +1,7 @@
 #include "remote.h"
 
+#include "node_proto.h"
+
 #include <stddef.h>
 #include <string.h>
 
@@ -151,6 +153,28 @@ zb_remote_ev_t remote_decode_attr(zb_remote_model_t model, uint16_t cluster_id, 
 zb_remote_ev_t remote_decode_cmd(zb_remote_model_t model, uint16_t cluster_id, uint8_t cmd_id,
                                  const uint8_t *payload, uint16_t len, uint8_t *key)
 {
+    /* A Light Node's wired buttons, on its own cluster (node_proto.h). The node has
+     * debounced the press and told a hold from a click; a double is made here, for a
+     * key whose rules want one, like any remote's. By cluster, not by model: the
+     * cluster is what makes it a node. */
+    if (cluster_id == NODE_PROTO_CLUSTER) {
+        if (cmd_id != NODE_CMD_BUTTON || !payload || len < 2 || payload[0] >= ZB_REMOTE_KEY_MAX) {
+            return ZB_REMOTE_NONE;
+        }
+        if (key) {
+            *key = payload[0];
+        }
+        switch (payload[1]) {
+        case NODE_BTN_CLICK:   return ZB_REMOTE_CLICK;
+        case NODE_BTN_HOLD:    return ZB_REMOTE_HOLD;
+        case NODE_BTN_RELEASE: return ZB_REMOTE_RELEASE;
+        case NODE_BTN_SINGLE:  return ZB_REMOTE_SINGLE;
+        /* Acted on at the node, which could not reach us when it was pressed. */
+        case NODE_BTN_LOCAL:   return ZB_REMOTE_IGNORED;
+        default:               return ZB_REMOTE_NONE;
+        }
+    }
+
     /* A standard remote - an IKEA rocker, a Hue dimmer - reports nothing at all.
      * It sends the commands it would send to a lamp, at whatever its own binding
      * table points at, which is why a bind has to be in place before any of this

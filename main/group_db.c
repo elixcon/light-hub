@@ -351,6 +351,27 @@ void group_db_forget_device(const uint8_t ieee[ZBC_IEEE_LEN])
     GDB_UNLOCK();
 }
 
+void group_db_forget_endpoint(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep)
+{
+    bool changed = false;
+    GDB_LOCK();
+    for (int i = 0; i < CONFIG_ZBC_MAX_GROUPS; i++) {
+        if (!s_groups[i].in_use) {
+            continue;
+        }
+        for (int m = s_groups[i].member_count - 1; m >= 0; m--) {
+            if (s_groups[i].members[m].ep == ep && memcmp(s_groups[i].members[m].ieee, ieee, ZBC_IEEE_LEN) == 0) {
+                drop_member_locked(&s_groups[i], m);
+                changed = true;
+            }
+        }
+    }
+    if (changed) {
+        gdb_save_locked();
+    }
+    GDB_UNLOCK();
+}
+
 esp_err_t group_db_erase(void)
 {
     GDB_LOCK();

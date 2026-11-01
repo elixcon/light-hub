@@ -454,6 +454,19 @@ void lighting_forget_device(const uint8_t ieee[ZBC_IEEE_LEN])
     portEXIT_CRITICAL(&s_restore_mux);
 }
 
+void lighting_forget_endpoint(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep)
+{
+    group_db_forget_endpoint(ieee, ep);
+    curve_db_forget_endpoint(ieee, ep);
+    portENTER_CRITICAL(&s_restore_mux);
+    for (size_t i = 0; i < sizeof(s_restore) / sizeof(s_restore[0]); i++) {
+        if (s_restore[i].used && s_restore[i].ep == ep && memcmp(s_restore[i].ieee, ieee, ZBC_IEEE_LEN) == 0) {
+            memset(&s_restore[i], 0, sizeof(s_restore[i]));
+        }
+    }
+    portEXIT_CRITICAL(&s_restore_mux);
+}
+
 static void remember_level(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, int pct)
 {
     portENTER_CRITICAL(&s_restore_mux);

@@ -46,7 +46,7 @@ SRC_LL     = ../main/local_lights.c
 SRC_UPD    = ../updater/main/updater.c
 SRC_CONV   = ../updater/main/convert.c
 
-TESTS    = test_gate test_settle test_sweep test_zremote test_remote test_matter test_slug \
+TESTS    = test_nodemode test_fallback test_nodezcl test_gate test_settle test_sweep test_zremote test_remote test_matter test_slug \
            test_unlock test_btnstep test_authkey test_switchpoint test_prewarm test_lightaddr test_cwww test_ramp test_updater test_convert \
            test_sun test_tz test_ntc test_alstate test_linkgap test_reach test_zbota test_fadein \
            test_mctl_gate test_mctl_disc test_clause test_parent test_crash test_ent test_stream test_wled \
@@ -241,6 +241,17 @@ test_tz: test_tz.c ../main/tz.c ../main/tz.h
 	@$(CC) $(CFLAGS) -I../main -o $@ test_tz.c ../main/tz.c
 
 # ntc.c is a leaf as well: the NTC divider and the overheat decision.
+# The Light Node's leaf modules, compiled whole like ntc.c and sun.c.
+NODE_DIR = ../node/main
+test_nodemode: test_nodemode.c $(NODE_DIR)/node_mode.c $(NODE_DIR)/node_mode.h
+	@$(CC) $(CFLAGS) -I$(NODE_DIR) -o $@ test_nodemode.c $(NODE_DIR)/node_mode.c
+
+test_fallback: test_fallback.c $(NODE_DIR)/node_fallback.c $(NODE_DIR)/node_fallback.h ../main/node_proto.h
+	@$(CC) $(CFLAGS) -I$(NODE_DIR) -I../main -o $@ test_fallback.c $(NODE_DIR)/node_fallback.c
+
+test_nodezcl: test_nodezcl.c $(NODE_DIR)/node_zcl.c $(NODE_DIR)/node_zcl.h
+	@$(CC) $(CFLAGS) -I$(NODE_DIR) -o $@ test_nodezcl.c $(NODE_DIR)/node_zcl.c
+
 test_ntc: test_ntc.c ../main/ntc.c ../main/ntc.h
 	@$(CC) $(CFLAGS) -I../main -o $@ test_ntc.c ../main/ntc.c -lm
 
@@ -256,7 +267,7 @@ test_ramp: test_ramp.c ramp.inc cwww.inc pchip.inc ../main/light_math.h
 
 # remote.c is a leaf - no ESP-IDF, nothing to extract - so it is compiled whole
 # rather than lifted out of a bigger file. Same reason colorspace.c can be.
-test_remote: test_remote.c ../main/remote.c ../main/remote.h
+test_remote: test_remote.c ../main/remote.c ../main/remote.h ../main/node_proto.h
 	@$(CC) $(CFLAGS) -I../main -o $@ test_remote.c ../main/remote.c
 
 clean:

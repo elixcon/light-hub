@@ -420,6 +420,24 @@ esp_err_t device_db_remove_endpoint(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep
     return err;
 }
 
+esp_err_t device_db_drop_endpoint(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep)
+{
+    DB_LOCK();
+    zbc_device_t *dev = find_by_ieee(ieee);
+    esp_err_t     err = dev ? ESP_OK : ESP_ERR_NOT_FOUND;
+    for (int i = 0; dev && i < dev->ep_count; i++) {
+        if (dev->eps[i].ep == ep) {
+            memmove(&dev->eps[i], &dev->eps[i + 1], (size_t)(dev->ep_count - i - 1) * sizeof(dev->eps[0]));
+            dev->ep_count--;
+            memset(&dev->eps[dev->ep_count], 0, sizeof(dev->eps[0]));
+            err = db_save_locked();
+            break;
+        }
+    }
+    DB_UNLOCK();
+    return err;
+}
+
 esp_err_t device_db_rename(const uint8_t ieee[ZBC_IEEE_LEN], const char *name)
 {
     DB_LOCK();

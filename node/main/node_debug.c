@@ -21,6 +21,8 @@
 
 #include "light_db.h"
 #include "local_lights.h"
+#include "node_buttons.h"
+#include "node_main.h"
 #include "node_zb.h"
 #include "radio_coex.h"
 #include "wifi_manager.h"
@@ -71,11 +73,12 @@ static esp_err_t node_get(httpd_req_t *req)
     esp_ota_get_state_partition(esp_ota_get_running_partition(), &ota);
 
     int len = snprintf(buf, 4096,
-        "{\"uptime_ms\":%lld,\"mac\":{\"tx_done\":%lu,\"tx_no_ack\":%lu,\"tx_bad_ack\":%lu,\"tx_coex\":%lu,\"tx_cca_busy\":%lu,\"rx\":%lu,\"rx_coex\":%lu,\"rx_ack_coex\":%lu,\"tx_ack_coex\":%lu},\"uptime_s\":%lld,\"parent\":{\"short\":%u,\"ieee\":\"%02x%02x%02x%02x%02x%02x%02x%02x\",\"lqi\":%u,\"rssi\":%d,\"type\":%u,\"neighbours\":%u},"
+        "{\"mode\":%d,\"window_left_s\":%d,\"hub_down\":%d,\"uptime_ms\":%lld,\"mac\":{\"tx_done\":%lu,\"tx_no_ack\":%lu,\"tx_bad_ack\":%lu,\"tx_coex\":%lu,\"tx_cca_busy\":%lu,\"rx\":%lu,\"rx_coex\":%lu,\"rx_ack_coex\":%lu,\"tx_ack_coex\":%lu},\"uptime_s\":%lld,\"parent\":{\"short\":%u,\"ieee\":\"%02x%02x%02x%02x%02x%02x%02x%02x\",\"lqi\":%u,\"rssi\":%d,\"type\":%u,\"neighbours\":%u},"
         "\"fade\":{\"ticks\":%lu,\"late\":%lu,\"max_gap_ms\":%lu},\"cpu_mhz\":%d,\"heap\":%u,\"heap_min\":%u,\"project\":\"%s\",\"ota_state\":%d,"
         "\"nvs_found\":\"%s\",\"wifi\":{\"mode\":%d,\"connected\":%d,\"ip\":\"%s\",\"rssi\":%d,\"channel\":%d},"
         "\"zb\":{\"started\":%d,\"joined\":%d,\"rx_on\":%d,\"short\":%u,\"pan\":%u,\"channel\":%d,\"steers\":%lu,"
         "\"frames\":%lu,\"handled\":%lu,\"dups\":%lu,\"refused\":%lu,\"syncs\":%lu},\"lights\":[",
+        (int)node_mode(), node_window_left_s(), node_buttons_hub_down(),
         esp_timer_get_time() / 1000,
         (unsigned long)m.tx_done, (unsigned long)m.tx_no_ack, (unsigned long)m.tx_bad_ack, (unsigned long)m.tx_coex,
         (unsigned long)m.tx_cca_busy, (unsigned long)m.rx, (unsigned long)m.rx_coex, (unsigned long)m.rx_ack_coex,
@@ -212,6 +215,18 @@ static esp_err_t level_post(httpd_req_t *req)
     return httpd_resp_sendstr(req, esp_err_to_name(err));
 }
 
+/* POST /node/press?key=&ev=: a gesture as though a pin had made it. */
+static esp_err_t press_post(httpd_req_t *req)
+{
+    char q[32] = "", v[8];
+    int key = 0, ev = 1;
+    httpd_req_get_url_query_str(req, q, sizeof(q));
+    if (httpd_query_key_value(q, "key", v, sizeof(v)) == ESP_OK) key = atoi(v);
+    if (httpd_query_key_value(q, "ev", v, sizeof(v)) == ESP_OK) ev = atoi(v);
+    node_buttons_inject((uint8_t)key, (uint8_t)ev);
+    return httpd_resp_sendstr(req, "ok");
+}
+
 esp_err_t node_debug_start(void)
 {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
@@ -226,6 +241,7 @@ esp_err_t node_debug_start(void)
         { .uri = "/node/pins",    .method = HTTP_GET,  .handler = pins_get },
         { .uri = "/node/blob",    .method = HTTP_GET,  .handler = blob_get },
         { .uri = "/node/level",   .method = HTTP_POST, .handler = level_post },
+        { .uri = "/node/press",   .method = HTTP_POST, .handler = press_post },
         { .uri = "/node/restart", .method = HTTP_POST, .handler = restart_post },
     };
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {

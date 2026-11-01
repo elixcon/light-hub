@@ -66,6 +66,9 @@ static inline bool zbc_short_known(uint16_t short_addr)
  * from its last motion. Learned from the first such report and persisted:
  * interrogation leaves it alone, since no cluster list says it. */
 #define ZBC_FEAT_MOTION_CLEARS (1u << 8)
+/* The control endpoint of a Light Node (node_proto.h): its wired buttons are this
+ * endpoint's keys, and it can be asked to open Wi-Fi. From the cluster it lists. */
+#define ZBC_FEAT_NODE          (1u << 9)
 
 /* Attributes we track per endpoint, addressed by this enum so one setter serves
  * every ZCL attribute we care about. */
@@ -135,6 +138,9 @@ esp_err_t device_db_clear_features(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep,
  * name those, and a lamp does not stop being one. ESP_OK when there was nothing
  * to forget. */
 esp_err_t device_db_remove_endpoint(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep);
+/* The same for a lamp: a Light Node's light was deleted on the node, so unlike any other
+ * lamp this one really has stopped being one. The caller drops what names it. */
+esp_err_t device_db_drop_endpoint(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep);
 esp_err_t device_db_rename(const uint8_t ieee[ZBC_IEEE_LEN], const char *name);
 esp_err_t device_db_remove(const uint8_t ieee[ZBC_IEEE_LEN]);
 

@@ -62,6 +62,9 @@ esp_err_t lighting_set_onoff(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, zb_on
  * made-up address is given out again, and the next light to get it must not
  * start from this one's. */
 void      lighting_forget_device(const uint8_t ieee[ZBC_IEEE_LEN]);
+/* A Light Node no longer has this light: its rooms and curves let go of it, and what
+ * it was last told goes, for the light that gets its endpoint next. */
+void      lighting_forget_endpoint(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep);
 
 /* True if any member of the group is currently known to be on: by its own word,
  * or by ours while that is too recent for its word to have caught up - a room

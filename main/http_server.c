@@ -30,6 +30,7 @@
 #include "http_server.h"
 #include "http_util.h"
 #include "http_wired.h"
+#include "node_proto.h"
 #include "light_db.h"
 #include "lighting.h"
 #include "local_lights.h"
@@ -664,6 +665,21 @@ static cJSON *device_to_json(const zbc_device_t *dev, int64_t now)
         if (src->features & ZBC_FEAT_SWITCH) {
             cJSON_AddItemToArray(feat, cJSON_CreateString("switch"));
         }
+        /* A Light Node: the page offers to open its Wi-Fi. */
+        if (src->features & ZBC_FEAT_NODE) {
+            static const char *const WIFI[] = { "off", "joining", "station", "hotspot" };
+            uint8_t state = NODE_WIFI_OFF, ip[4];
+            zb_node_wifi_get(dev->ieee, &state, ip);
+            cJSON_AddItemToArray(feat, cJSON_CreateString("node"));
+            cJSON_AddStringToObject(ep, "node_wifi", state < 4 ? WIFI[state] : "off");
+            if (state == NODE_WIFI_STATION) {
+                char addr[16];
+                snprintf(addr, sizeof(addr), "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
+                cJSON_AddStringToObject(ep, "node_ip", addr);
+            } else {
+                cJSON_AddNullToObject(ep, "node_ip");
+            }
+        }
         /* The page offers a Hue dimmer's holds and double presses only once
          * they can arrive. */
         if (src->features & ZBC_FEAT_HUE_BUTTONS) {
@@ -1259,6 +1275,26 @@ static esp_err_t device_dispatch(httpd_req_t *req)
     uint8_t ieee[ZBC_IEEE_LEN];
     if (!zbc_str_to_ieee(ieee_str, ieee)) {
         return send_error(req, "400 Bad Request", "malformed device address");
+    }
+
+    /* /api/devices/{ieee}/wifi: a Light Node, to open its Wi-Fi. Like every command it
+     * answers 202: what the node then does arrives in its own frames. */
+    char sub[8];
+    if (req->method == HTTP_POST && uri_segment(req->uri, 3, sub, sizeof(sub)) && strcmp(sub, "wifi") == 0) {
+        uint8_t minutes = 0;
+        if (req->content_len > 0) {
+            cJSON *json = read_json_body(req);
+            if (!json) {
+                return ESP_FAIL;
+            }
+            const cJSON *m = cJSON_GetObjectItem(json, "minutes");
+            if (cJSON_IsNumber(m) && m->valueint > 0 && m->valueint <= 240) {
+                minutes = (uint8_t)m->valueint;
+            }
+            cJSON_Delete(json);
+        }
+        const esp_err_t err = zb_node_enter_wifi(ieee, minutes);
+        return err == ESP_OK ? send_ok(req, "202 Accepted") : send_command_result(req, ieee, err);
     }
 
     char tail[16];

@@ -11,11 +11,23 @@
 extern "C" {
 #endif
 
-/* Endpoint 200 is the control endpoint; a light's endpoint is its light_db id. */
-#define NODE_CONTROL_EP 200
+/* Endpoint 200 (node_proto.h) is the control endpoint; a light's endpoint is its
+ * light_db id. */
 #define NODE_LIGHT_EP_MAX 199
 
-esp_err_t node_zb_start(void);
+/* `with_wifi` asks for the antenna to be shared. Not asked otherwise: the arbiter has
+ * nothing to do with no Wi-Fi to arbitrate against. */
+esp_err_t node_zb_start(bool with_wifi);
+
+/* One gesture of a wired button, to the hub. The verdict comes to
+ * node_buttons_delivered, with `seq`. ESP_FAIL when it could not even be queued. */
+esp_err_t node_zb_send_button(uint8_t key, uint8_t event, uint8_t seq);
+
+/* Tells the hub what Wi-Fi is doing, when there is a network to tell it on. */
+void node_zb_send_wifi_state(uint8_t state, const uint8_t ipv4[4]);
+
+/* Since when this boot has been on a Zigbee network, 0 while it has not. */
+int64_t node_zb_joined_at(void);
 
 /* Any task. A light may have changed: the attributes follow what it is doing. */
 void node_zb_state_changed(void);

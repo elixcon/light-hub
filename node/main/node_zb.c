@@ -10,11 +10,17 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_zigbee.h"
+#include "ezbee/zcl/cluster/custom.h"
 #include "ezbee/zha.h"
+#include "ezbee/zdo.h"
 #include "nvs.h"
 
 #include "light_db.h"
 #include "local_lights.h"
+#include "node_buttons.h"
+#include "node_main.h"
+#include "node_proto.h"
+#include "node_store.h"
 #include "node_zcl.h"
 #include "radio_coex.h"
 
@@ -37,6 +43,7 @@ static const char *TAG = "node_zb";
 #define KEEP_ALIVE_MS (30 * 1000)
 #define JOIN_RETRY_US (30 * 1000000LL)
 #define INIT_RETRY_US (1 * 1000000LL)
+#define REJOIN_RETRY_US (10 * 1000000LL)
 /* A frame the stack's retries bring round again within this long is the same
  * frame. A repeated Toggle would otherwise undo itself. */
 #define DUP_WINDOW_US (1000 * 1000)
@@ -45,6 +52,9 @@ typedef enum {
     EV_SYNC = 0,      /* the attributes should follow the lights */
     EV_COMMISSION,    /* start commissioning, s_commission_mode */
     EV_COMMAND,
+    EV_ENTER_WIFI,    /* the hub asked: cmd.level holds the minutes */
+    EV_LEFT,          /* left the network for good */
+    EV_ANNOUNCE,      /* the endpoints changed since the hub last looked */
 } ev_type_t;
 
 typedef struct {
@@ -64,6 +74,9 @@ static esp_timer_handle_t s_commission_timer;
 static volatile uint8_t   s_commission_mode;
 static bool               s_sync_wanted;
 static bool               s_started;
+static bool               s_with_wifi;
+static volatile int64_t   s_joined_at;
+static uint32_t           s_endpoints_digest;
 
 static node_zb_stats_t    s_stats;
 static portMUX_TYPE       s_log_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -344,6 +357,20 @@ static bool raw_frame(const ezb_zcl_raw_frame_t *raw)
     const uint16_t src = h->src_addr.addr_mode == EZB_ADDR_MODE_SHORT ? h->src_addr.u.short_addr : 0xFFFF;
     s_stats.frames++;
 
+    /* The hub, and only the hub: anything on the network can address this cluster. */
+    if (h->cluster_id == NODE_PROTO_CLUSTER) {
+        note_frame(h, src, true);
+        if (src == 0x0000 && h->dst_ep == NODE_CONTROL_EP && h->cmd_id == NODE_CMD_ENTER_WIFI &&
+            !EZB_ZCL_CMD_FC_IS_TO_CLI_DIRECTION(h->fc)) {
+            const node_ev_t ev = {
+                .type = EV_ENTER_WIFI,
+                .cmd  = { .level = raw->payload_length >= 1 ? raw->payload[0] : 0 },
+            };
+            xQueueSend(s_queue, &ev, 0);
+        }
+        return true;
+    }
+
     node_zcl_cmd_t cmd;
     const bool mine = src != 0xFFFF &&
                       h->dst_ep >= 1 && h->dst_ep <= NODE_LIGHT_EP_MAX &&
@@ -405,6 +432,10 @@ static void node_task(void *arg)
                 esp_zigbee_lock_acquire(portMAX_DELAY);
                 if (s_commission_mode == EZB_BDB_MODE_NETWORK_STEERING) {
                     s_stats.steer_attempts++;
+                    /* Set before each attempt: it goes to the parent in the association.
+                     * Between attempts the receiver has nothing to hear, and left on it
+                     * would hold the antenna against the setup hotspot. */
+                    ezb_set_rx_on_when_idle(true);
                 }
                 ezb_bdb_start_top_level_commissioning(s_commission_mode);
                 esp_zigbee_lock_release();
@@ -424,6 +455,28 @@ static void node_task(void *arg)
                 __atomic_store_n(&s_sync_wanted, true, __ATOMIC_RELEASE);
                 break;
             }
+            case EV_ENTER_WIFI:
+                ESP_LOGW(TAG, "The hub asks for Wi-Fi, %u min", ev.cmd.level);
+                /* Long enough for the APS ack to have gone. */
+                vTaskDelay(pdMS_TO_TICKS(300));
+                node_restart_into(NODE_ASK_WIFI, ev.cmd.level);
+                break;
+            case EV_LEFT:
+                ESP_LOGW(TAG, "Left the network for good: back to looking for one");
+                node_store_set_paired(false);
+                vTaskDelay(pdMS_TO_TICKS(300));
+                node_restart_into(NODE_ASK_NONE, 0);
+                break;
+            case EV_ANNOUNCE: {
+                /* The hub interrogates on an announce, and that is how it hears of a
+                 * light added or removed. */
+                ezb_zdo_device_annce_req_t req = { 0 };
+                esp_zigbee_lock_acquire(portMAX_DELAY);
+                ezb_zdo_device_annce_req(&req);
+                esp_zigbee_lock_release();
+                node_store_set_endpoints(s_endpoints_digest);
+                break;
+            }
             default:
                 break;
             }
@@ -440,6 +493,27 @@ static void node_task(void *arg)
 }
 
 /* ------------------------------------------------------------- the signals */
+
+static void post_event(uint8_t type)
+{
+    const node_ev_t ev = { .type = type };
+    xQueueSend(s_queue, &ev, 0);
+}
+
+static void on_network(const char *how)
+{
+    ESP_LOGI(TAG, "%s: network 0x%04x, channel %d, short 0x%04x", how, ezb_nwk_get_panid(),
+             ezb_nwk_get_current_channel(), ezb_nwk_get_short_address());
+    s_joined_at = esp_timer_get_time();
+    /* A short flash write, in the stack's callback: this happens once per boot. */
+    if (!node_store_paired()) {
+        node_store_set_paired(true);
+    }
+    node_zb_state_changed();
+    if (node_store_endpoints() != s_endpoints_digest) {
+        post_event(EV_ANNOUNCE);
+    }
+}
 
 static bool app_signal_handler(const ezb_app_signal_t *app_signal)
 {
@@ -458,33 +532,49 @@ static bool app_signal_handler(const ezb_app_signal_t *app_signal)
 
     case EZB_BDB_SIGNAL_DEVICE_FIRST_START:
     case EZB_BDB_SIGNAL_DEVICE_REBOOT:
-        if (status != EZB_BDB_STATUS_SUCCESS) {
+        if (status != EZB_BDB_STATUS_SUCCESS && !ezb_bdb_is_factory_new()) {
+            /* A rejoin that found nobody, which is what a parent that is off looks
+             * like. The network is still ours: keep trying, more slowly. */
             ESP_LOGW(TAG, "%s failed (0x%02x), retrying", name, status);
+            schedule_commission(EZB_BDB_MODE_INITIALIZATION, REJOIN_RETRY_US);
+        } else if (status != EZB_BDB_STATUS_SUCCESS) {
             schedule_commission(EZB_BDB_MODE_INITIALIZATION, INIT_RETRY_US);
         } else if (ezb_bdb_is_factory_new()) {
-            ESP_LOGI(TAG, "No network yet, looking for one");
-            schedule_commission(EZB_BDB_MODE_NETWORK_STEERING, 1000);
+            if (node_store_paired()) {
+                /* Told it is paired, with no network stored: the store was lost. */
+                ESP_LOGW(TAG, "Paired, with no network stored");
+                post_event(EV_LEFT);
+            } else {
+                ESP_LOGI(TAG, "No network yet, looking for one");
+                schedule_commission(EZB_BDB_MODE_NETWORK_STEERING, 1000);
+            }
         } else {
-            ESP_LOGI(TAG, "Back on network 0x%04x, channel %d, short 0x%04x", ezb_nwk_get_panid(),
-                     ezb_nwk_get_current_channel(), ezb_nwk_get_short_address());
-            node_zb_state_changed();
+            on_network(name);
         }
         break;
 
     case EZB_BDB_SIGNAL_STEERING:
         if (status == EZB_BDB_STATUS_SUCCESS) {
-            ESP_LOGI(TAG, "Joined network 0x%04x, channel %d, short 0x%04x", ezb_nwk_get_panid(),
-                     ezb_nwk_get_current_channel(), ezb_nwk_get_short_address());
-            node_zb_state_changed();
+            on_network(name);
         } else {
+            /* NO_NETWORK, and TCLK_EX_FAILURE: a key exchange that failed makes the
+             * stack leave again by itself, and the next attempt usually succeeds. */
+            ezb_set_rx_on_when_idle(false);
             schedule_commission(EZB_BDB_MODE_NETWORK_STEERING, JOIN_RETRY_US);
         }
         break;
 
-    case EZB_ZDO_SIGNAL_LEAVE:
-        ESP_LOGW(TAG, "Left the network");
-        schedule_commission(EZB_BDB_MODE_NETWORK_STEERING, JOIN_RETRY_US);
+    case EZB_ZDO_SIGNAL_LEAVE: {
+        const ezb_zdo_signal_leave_params_t *p = params;
+        ESP_LOGW(TAG, "Left the network (type %d)", p ? p->leave_type : -1);
+        /* A join that failed its key exchange leaves too, and is not a leave from a
+         * network this node belonged to: the steering signal is already retrying. */
+        if (node_store_paired() && p && p->leave_type == EZB_ZDO_LEAVE_TYPE_RESET) {
+            post_event(EV_LEFT);
+        }
+        s_joined_at = 0;
         break;
+    }
 
     default:
         break;
@@ -547,6 +637,7 @@ static ezb_af_ep_desc_t light_endpoint(const zbc_light_t *light)
 static esp_err_t create_endpoints(void)
 {
     ezb_af_device_desc_t dev = ezb_af_create_device_desc();
+    uint32_t digest = 2166136261u;
 
     zbc_light_t lights[CONFIG_ZBC_MAX_LIGHTS];
     const int   n = (int)light_db_snapshot(lights, CONFIG_ZBC_MAX_LIGHTS);
@@ -557,12 +648,22 @@ static esp_err_t create_endpoints(void)
         }
         ESP_RETURN_ON_ERROR(ezb_af_device_add_endpoint_desc(dev, light_endpoint(&lights[i])), TAG, "light endpoint");
         ESP_LOGI(TAG, "Endpoint %u: %s", lights[i].id, lights[i].name);
+        /* FNV-1a over what the simple descriptor says. */
+        const uint32_t part = ((uint32_t)lights[i].id << 8) | lights[i].kind;
+        digest = (digest ^ part) * 16777619u;
     }
+    s_endpoints_digest = digest;
 
     ezb_zha_configuration_tool_config_t cfg = EZB_ZHA_CONFIGURATION_TOOL_CONFIG();
     cfg.basic_cfg.power_source = EZB_ZCL_BASIC_POWER_SOURCE_DC_SOURCE;
     ezb_af_ep_desc_t control = ezb_zha_create_configuration_tool(NODE_CONTROL_EP, &cfg);
     add_basic_strings(control);
+    /* What tells a hub this is a node: see node_proto.h. The frames themselves go
+     * through raw_frame, so the cluster needs no handlers, only to be listed. */
+    const ezb_zcl_custom_cluster_config_t proto = { .cluster_id = NODE_PROTO_CLUSTER };
+    ESP_RETURN_ON_ERROR(ezb_af_endpoint_add_cluster_desc(
+                            control, ezb_zcl_custom_create_cluster_desc(&proto, EZB_ZCL_CLUSTER_SERVER)),
+                        TAG, "control cluster");
     ESP_RETURN_ON_ERROR(ezb_af_device_add_endpoint_desc(dev, control), TAG, "control endpoint");
 
     ESP_RETURN_ON_ERROR(ezb_af_device_desc_register(dev), TAG, "register device");
@@ -585,10 +686,10 @@ static void zb_main_task(void *arg)
         },
     };
 
-#ifndef NODE_TEST_ZIGBEE_ONLY
-    /* Without this, whichever of Wi-Fi and 802.15.4 starts first keeps the antenna. */
-    ESP_ERROR_CHECK(esp_coex_wifi_i154_enable());
-#endif
+    if (s_with_wifi) {
+        /* Without this, whichever of Wi-Fi and 802.15.4 starts first keeps the antenna. */
+        ESP_ERROR_CHECK(esp_coex_wifi_i154_enable());
+    }
     ESP_ERROR_CHECK(esp_zigbee_init(&config));
 
     /* Before joining: the flag goes to the parent in the association, and is what
@@ -610,8 +711,62 @@ static void zb_main_task(void *arg)
     vTaskDelete(NULL);
 }
 
-esp_err_t node_zb_start(void)
+int64_t node_zb_joined_at(void)
 {
+    return s_joined_at;
+}
+
+static void button_sent(ezb_af_user_cnf_t *cnf, void *user_ctx)
+{
+    node_buttons_delivered((uint8_t)(uintptr_t)user_ctx, cnf && cnf->status == 0);
+}
+
+/* From the node's own tasks: takes the stack lock. */
+static esp_err_t send_to_hub(uint8_t cmd_id, uint8_t *data, uint16_t len, ezb_af_user_cnf_callback_t cb, void *ctx)
+{
+    if (!s_started || !s_joined_at) {
+        return ESP_FAIL;
+    }
+    /* Not ezb_zcl_custom_cluster_cmd_req, which wants a client of the cluster on this
+     * endpoint before it will send to a server. */
+    ezb_zcl_custom_cmd_t cmd = {
+        .cmd_ctrl = {
+            .dst_addr   = { .addr_mode = EZB_ADDR_MODE_SHORT, .u.short_addr = 0x0000 },
+            .dst_ep     = NODE_HUB_EP,
+            .src_ep     = NODE_CONTROL_EP,
+            .cluster_id = NODE_PROTO_CLUSTER,
+            .manuf_code = NODE_PROTO_MANUF,
+            .fc         = { .manuf_specific = 1, .direction = 0, .dis_default_rsp = 1 },
+            .cnf_ctx    = { .cb = cb, .user_ctx = ctx },
+        },
+        .cmd_id      = cmd_id,
+        .data_length = len,
+        .data        = data,
+    };
+    esp_zigbee_lock_acquire(portMAX_DELAY);
+    const ezb_err_t err = ezb_zcl_custom_cmd_req(&cmd);
+    esp_zigbee_lock_release();
+    return err == EZB_ERR_NONE ? ESP_OK : ESP_FAIL;
+}
+
+esp_err_t node_zb_send_button(uint8_t key, uint8_t event, uint8_t seq)
+{
+    uint8_t body[2] = { key, event };
+    return send_to_hub(NODE_CMD_BUTTON, body, sizeof(body), button_sent, (void *)(uintptr_t)seq);
+}
+
+void node_zb_send_wifi_state(uint8_t state, const uint8_t ipv4[4])
+{
+    uint8_t body[5] = { state, 0, 0, 0, 0 };
+    if (ipv4) {
+        memcpy(&body[1], ipv4, 4);
+    }
+    send_to_hub(NODE_CMD_WIFI_STATE, body, sizeof(body), NULL, NULL);
+}
+
+esp_err_t node_zb_start(bool with_wifi)
+{
+    s_with_wifi = with_wifi;
     s_queue = xQueueCreate(12, sizeof(node_ev_t));
     if (!s_queue) {
         return ESP_ERR_NO_MEM;
@@ -631,7 +786,9 @@ esp_err_t node_zb_start(void)
 
 esp_err_t zb_coordinator_stop(void)
 {
-    if (!s_started || !esp_zigbee_is_started()) {
+    /* Unjoined, it listens only while it looks for a network, and that goes on: the
+     * hotspot is how somebody configures it while the hub is opened for it. */
+    if (!s_started || !esp_zigbee_is_started() || !s_joined_at) {
         return ESP_OK;
     }
     ESP_LOGW(TAG, "Stopping the Zigbee stack to free the radio for Wi-Fi");
