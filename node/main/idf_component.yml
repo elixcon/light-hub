@@ -1,0 +1,9 @@
+## IDF Component Manager Manifest File
+dependencies:
+  idf:
+    version: ">=6.0"
+  # Pinned as the hub pins it: both ends of the network run one stack version.
+  espressif/esp-zigbee-lib:
+    version: "==2.0.5"
+  espressif/mdns:
+    version: "^1.8"

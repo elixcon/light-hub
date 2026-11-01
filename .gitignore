@@ -3,6 +3,7 @@
 # it and holds whatever menuconfig changed locally.
 /build/
 /updater/build/
+/node/build/
 managed_components/
 sdkconfig
 sdkconfig.old

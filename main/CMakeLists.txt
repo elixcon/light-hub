@@ -19,6 +19,7 @@ idf_component_register(
         "thermal.c"
         "colorspace.c"
         "remote.c"
+        "pchip.c"
         "curve_db.c"
         "button_db.c"
         "light_db.c"

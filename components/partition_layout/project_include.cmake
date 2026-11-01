@@ -21,7 +21,10 @@
 # runs first, the CONFIG override is what it reads; if second, the
 # PARTITION_CSV_PATH override replaces what it computed.
 
-set(ZBC_PARTITIONS_CSV "${PROJECT_DIR}/partitions.csv")
+# A project elsewhere in the tree (node/) says which table it means before project().
+if(NOT ZBC_PARTITIONS_CSV)
+    set(ZBC_PARTITIONS_CSV "${PROJECT_DIR}/partitions.csv")
+endif()
 set(ZBC_PARTITIONS_APP_CSV "${BUILD_DIR}/partitions-app.csv")
 
 file(STRINGS "${ZBC_PARTITIONS_CSV}" _zbc_rows)

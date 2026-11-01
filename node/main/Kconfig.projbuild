@@ -1,0 +1,3 @@
+# The hub's own options, read from its main/: the shared modules use them, and
+# two copies would drift.
+rsource "../../main/Kconfig.projbuild"
