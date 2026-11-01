@@ -13,7 +13,6 @@
 #include "esp_timer.h"
 #include "nvs.h"
 #include "nvs_flash.h"
-#include "soc/soc_caps.h"
 
 #include "buttons.h"
 #include "light_db.h"
@@ -63,20 +62,6 @@ static void window_cb(void *arg)
     (void)arg;
     ESP_LOGW(TAG, "Test window over: restarting, which rolls back to the updater");
     esp_restart();
-}
-
-const char *buttons_pin_problem(int gpio)
-{
-    if (gpio == -1) {
-        return NULL;
-    }
-    if (gpio < 0 || gpio >= SOC_GPIO_PIN_COUNT) {
-        return "that pin does not exist on this chip";
-    }
-    if (gpio >= 24 && gpio <= 30) {
-        return "GPIO 24-30 are wired to the flash chip";
-    }
-    return NULL;
 }
 
 void app_main(void)

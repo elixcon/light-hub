@@ -1,4 +1,4 @@
-/* Host test for the pin gesture machines in buttons.c: btn_step (a push button)
+/* Host test for the pin gesture machines in btn_gesture.c: btn_step (a push button)
  * and btn_switch_step (a switch that stays where it is put).
  *
  * Extracted from the source at build time (region `btnstep`). What matters here
@@ -13,7 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-/* From buttons.h - what the machines are written against. */
+/* From btn_gesture.h - what the machines are written against. */
 #define BTN_DEBOUNCE_US  (30 * 1000)
 #define BTN_LONG_US     (600 * 1000)
 #define BTN_DOUBLE_US   (300 * 1000)

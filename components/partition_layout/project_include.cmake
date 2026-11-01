@@ -10,7 +10,7 @@
 #    factory one - so the coordinator would be written over the updater.
 #
 # So the app is built against a derived table listing only what the app may be
-# flashed to, and the root CMakeLists.txt puts the real table and the updater
+# flashed to, and cmake/zbc_updater.cmake puts the real table and the updater
 # back into the flash targets. The derived table is generated at every
 # configure and never committed: two tables kept by hand would drift, and the
 # first sign would be a box whose flash layout is not the one it was built for.

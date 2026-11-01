@@ -33,6 +33,14 @@ typedef struct {
  * so a wired light is never left floating. */
 esp_err_t local_lights_start(void);
 
+/* For a restart that is no power cut (the node changing mode): save_all writes down
+ * what every light is doing, whatever its power-on setting, and resume_once, called
+ * before local_lights_start in the next boot, brings them back to that instead of
+ * to their power-on setting. A state a light with power_on "off" never stores
+ * otherwise, and which that setting ignores at any other boot. */
+void      local_lights_save_all(void);
+void      local_lights_resume_once(void);
+
 /* Re-reads light_db, re-plans the PWM timers and channels, and reconfigures what
  * changed, handing back any pin no longer used. A light whose wiring did not
  * change keeps its state, so saving the editor does not flash it. */

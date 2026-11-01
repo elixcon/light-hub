@@ -16,3 +16,5 @@ set(COMPONENTS main partition_layout)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(elixcon_light_node)
+
+include("${CMAKE_CURRENT_LIST_DIR}/../cmake/zbc_updater.cmake")

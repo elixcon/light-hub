@@ -26,8 +26,11 @@ idf_component_register(
         "mlight_db.c"
         "local_lights.c"
         "lighting.c"
+        "btn_gesture.c"
         "buttons.c"
         "zb_coordinator.c"
+        "http_util.c"
+        "http_wired.c"
         "http_server.c"
         "ota.c"
         "zb_ota_file.c"
@@ -105,7 +108,7 @@ add_custom_target(index_html_gz DEPENDS "${index_gz}")
 add_dependencies(${COMPONENT_LIB} index_html_gz)
 target_add_binary_data(${COMPONENT_LIB} "${index_gz}" BINARY)
 
-# This build's full partition table (the root CMakeLists.txt generates it for the
+# This build's full partition table (cmake/zbc_updater.cmake generates it for the
 # flash targets). The coordinator only trusts an updater that carries this table
 # or the one on flash - see ota_updater_problem in ota.c.
 #

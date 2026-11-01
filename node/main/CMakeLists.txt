@@ -9,6 +9,7 @@ idf_component_register(
         "node_zcl.c"
         "node_state_rev.c"
         "node_debug.c"
+        "${app_dir}/btn_gesture.c"
         "${app_dir}/wifi_manager.c"
         "${app_dir}/captive_dns.c"
         "${app_dir}/settings.c"
