@@ -482,7 +482,7 @@
 					<label class="flex items-center gap-2"><input type="radio" name="lpolarity" class="accent-primary" checked={!!d.active_low} onchange={() => saveWiring({ active_low: true })} /> LOW (GND) — {pwm ? "drivers with an inverting input" : "\"low-level trigger\" relay modules"}</label>
 				</div>
 				<div class="flex flex-col gap-2 text-sm">
-					<span class="font-medium">When the coordinator starts</span>
+					<span class="font-medium">{node ? "When it starts" : "When the coordinator starts"}</span>
 					<div class="flex flex-wrap gap-x-4 gap-y-2">
 						{#each POWER_ON as [v, label] (v)}
 							<label class="flex items-center gap-2"><input type="radio" name="lpoweron" class="accent-primary" checked={(d.power_on ?? "off") === v} onchange={() => saveWiring({ power_on: v })} /> {label}</label>
@@ -530,7 +530,7 @@
 			{#if matter && d.bridged}
 				<div class="text-muted-foreground text-xs">A lamp added to the hub later appears here after <b>Rescan device</b>.</div>
 			{/if}
-			{#if !wired && !matter}<FirmwareRow device={d} />{/if}
+			{#if !wired && !matter && !d.endpoints.some((x) => x.features.includes("node"))}<FirmwareRow device={d} />{/if}
 			<div class="flex flex-wrap gap-2">
 				{#if matter && !d.needs_pairing}<Button variant="outline" onclick={rescan}>Rescan device</Button>{/if}
 				<Button variant="destructive" onclick={remove}><Trash /> Remove device</Button>

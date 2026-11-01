@@ -189,9 +189,11 @@
 	</Card.Root>
 
 	{#if c.device?.ota}
+		{#if !c.device.endpoints.some((x) => x.features.includes("node"))}
 		<Card.Root class="mt-4">
 			<Card.Content><FirmwareRow device={c.device} /></Card.Content>
 		</Card.Root>
+		{/if}
 	{/if}
 {/if}
 

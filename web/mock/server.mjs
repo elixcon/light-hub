@@ -4,6 +4,12 @@ import http from "node:http";
 import { parseHhmm, sampleAt, usedDay } from "../src/lib/adaptive.ts";
 
 const devices = [
+  /* A Light Node: three lamps would be the same, and a control endpoint is what makes it one. */
+  { ieee: "0x404ccafffe42c504", short_addr: 0xc5a2, name: "Porch node", manufacturer: "Elixcon", model: "LightNode", source: "zigbee", online: true, last_seen_s_ago: 4, lqa: 140, rssi: -52, parent: null, child: false,
+    endpoints: [
+      { ep: 1, device_id: 0x0102, features: ["onoff", "brightness", "color_temp"], on: false, brightness_pct: 40, kelvin: 3000, min_kelvin: 2700, max_kelvin: 6500, hue: null, sat: null, color_mode: "color_temp", curves: { level: false, chroma: false }, input_pct: null },
+      { ep: 200, device_id: 0x0005, features: ["switch", "node"], on: null, brightness_pct: null, kelvin: null, min_kelvin: null, max_kelvin: null, hue: null, sat: null, color_mode: null, curves: { level: false, chroma: false }, input_pct: null, node_wifi: "off", node_ip: null },
+    ] },
   { ieee: "0x001788010bd6f2a1", short_addr: 0x046b, name: "Sofa strip", manufacturer: "Signify Netherlands B.V.", model: "LST002", online: true, last_seen_s_ago: 4, lqa: 114,
     endpoints: [{ ep: 11, device_id: 0x0210, features: ["onoff", "brightness", "color_temp", "color"], on: true, brightness_pct: 61, kelvin: 2700, min_kelvin: 2000, max_kelvin: 6500, hue: 30, sat: 60, color_mode: "color_temp", curves: { level: true, chroma: true }, input_pct: 40 }] },
   { ieee: "0x7cb03eaa0a0c5e12", short_addr: 0xa2b4, name: "Desk spot", manufacturer: "OSRAM", model: "PAR16 50 TW", online: true, last_seen_s_ago: 9, lqa: 98,
@@ -262,6 +268,13 @@ http.createServer(async (req, res) => {
   if (u.pathname === "/api/permit_join") { permit = Date.now() + (await body(req)).duration * 1000; return json(res, 202, { ok: true }); }
   if (p[0] === "api" && p[1] === "devices") {
     const ieee = p[2], e = findEp(ieee, p[4]);
+    if (p[3] === "wifi" && m === "POST") {
+      /* A Light Node asked to open Wi-Fi: on it a moment later, as after its restart. */
+      const c = devices.find((x) => x.ieee === ieee)?.endpoints.find((x) => x.features.includes("node"));
+      if (!c) return json(res, 409, { error: "this light does not support that" });
+      setTimeout(() => { c.node_wifi = "station"; c.node_ip = "192.168.1.77"; }, 3000);
+      return json(res, 202, { ok: true });
+    }
     if (p[3] === "ep" && p[5] === "curves") {
       const k = `${ieee}/${p[4]}`;
       if (m === "GET") return json(res, 200, { level: curves[k]?.level ?? null, chroma: curves[k]?.chroma ?? null, input_pct: e?.input_pct ?? null });
