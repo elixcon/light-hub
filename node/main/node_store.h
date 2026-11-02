@@ -23,6 +23,11 @@ void     node_store_claim(void);
  * before the stack starts. How a node is unpaired from its own page. */
 void     node_store_forget_claim(void);
 
+/* Erase everything at the start of the next boot, before anything is using the flash. A
+ * power cut after this still ends in a reset, and nothing is half gone before then. */
+void     node_store_ask_wipe(void);
+bool     node_store_wipe_asked(void);
+
 /* The one-shot request for the next boot, erased as it is read, so a power cut in that
  * boot lands in plain Zigbee rather than in Wi-Fi for ever. */
 void     node_store_set_ask(node_ask_t ask, uint8_t minutes);

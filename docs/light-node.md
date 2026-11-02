@@ -81,6 +81,15 @@ Wi-Fi closes after 15 minutes without a request, or at once with **Close Wi-Fi n
 the way back in when the hub is gone. Five open the node's page to everyone for two minutes, as on a hub. Neither
 does anything to the hub's own lock, which a node's buttons cannot open.
 
+## Giving it away
+
+**Forget this network** in the Wi-Fi section takes the stored network off the node. It goes back to Zigbee alone, and the
+next time the hub asks it to open Wi-Fi it opens its setup hotspot instead.
+
+**Factory reset** erases its lights, buttons, name, Wi-Fi network, access keys and Zigbee network, and it starts as new.
+Remove it from the hub as well. It also works from the setup hotspot, unlike a hub's, because it needs no Zigbee network:
+the flash is erased at the start of the next boot.
+
 ## Buttons and the hub
 
 A press goes to the hub, whose rules decide what it means. On the hub's Remotes page the node is a remote, and
@@ -106,9 +115,9 @@ From a node on a test board, under a hub on the same desk:
 
 - A press through a hub rule to the node's own light: 111 ms.
 - PWM at the 80 MHz CPU: exact, 9765.6 Hz, as at 160 MHz.
-- The hotspot while still looking for a network, with a bad stored network being retried as well: 144 requests in a row
-  from a laptop, none failed, 27 ms typically, with a pause of 2-3 s about every 32 s while it looks for a network. A
-  node with no stored network has only the looking to do, though that case was not tried on its own.
+- The hotspot while still looking for a network, from a laptop. With a bad stored network being retried as well: 144
+  requests in a row, none failed, 27 ms typically, with a pause of 2-3 s about every 32 s while it looks. As a new node
+  with no network stored: 144 requests, 0 failed, 27 ms typically, with 4 pauses of up to 3.4 s.
 - Choosing a parent: after a restart a node asks for a strong one and steps down about every 6 dB, which takes about
   2.7 s a step. It chose the hub at -39 dBm over the plug at -47 dBm on all of 9 boots, joining 5.6-10.7 s after each;
   without this it landed on either. A first join has no such demand. `zigbee.parent` in `/api/status` shows the result.
@@ -130,6 +139,4 @@ Open:
 - **A plain restart can lose a brightness.** A light set to start off saves no level, as on a hub, so a restart that is
   not a change of mode, such as storing a Wi-Fi network, takes it back to the last one saved. The hub reads what it finds
   when the node comes back.
-- **A node cannot forget its Wi-Fi network**, or be reset, from its page. So a node with no network stored was tried only
-  through a bad stored network, which reaches the same hotspot and also retries that network.
 - The overheat sensor cannot be set on the node's page yet. A board that was a hub keeps its setting.

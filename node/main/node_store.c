@@ -62,6 +62,17 @@ void node_store_claim(void)
     set_u8("role", 1);
 }
 
+void node_store_ask_wipe(void)
+{
+    set_u8("wipe", 1);
+}
+
+bool node_store_wipe_asked(void)
+{
+    uint8_t v = 0;
+    return get_u8("wipe", &v) && v;
+}
+
 void node_store_forget_claim(void)
 {
     set_u8("role", 0);

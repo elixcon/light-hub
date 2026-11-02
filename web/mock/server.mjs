@@ -257,6 +257,8 @@ http.createServer(async (req, res) => {
   }
   if (u.pathname === "/api/wifi/test") return json(res, 200, wifiCheckState());
   if (u.pathname === "/api/wifi" && m === "POST") return json(res, 200, { ok: true });
+  if (u.pathname === "/api/wifi" && m === "DELETE") return json(res, 200, { ok: true });
+  if (u.pathname === "/api/factory_reset" && m === "POST") return json(res, 200, { ok: true });
   if (u.pathname === "/api/wifi/scan") return json(res, 200, { networks: [{ ssid: "elixcon", rssi: -61, channel: 6, second: null, open: false },
     { ssid: "elixcon", rssi: -79, channel: 13, second: null, open: false }, { ssid: "Guest", rssi: -75, channel: 11, second: null, open: true },
     { ssid: "FRITZ!Box 7590 XY", rssi: -83, channel: 1, second: "above", open: false }] });

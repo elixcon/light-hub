@@ -135,6 +135,11 @@ void app_main(void)
         err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
+    if (node_store_wipe_asked()) {
+        ESP_LOGW(TAG, "Factory reset: erasing everything");
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ESP_ERROR_CHECK(nvs_flash_init());
+    }
     crash_log_init();
 
     /* A flash that held a hub keeps its lights, Wi-Fi and keys; only the coordinator's

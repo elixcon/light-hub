@@ -598,6 +598,47 @@ static esp_err_t node_leave_post(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* DELETE /api/wifi: forget the stored network. A paired node goes back to Zigbee alone,
+ * and opens its hotspot the next time the hub asks. An unpaired one opens it now. */
+static esp_err_t wifi_forget(httpd_req_t *req)
+{
+    if (wifi_manager_erase_credentials() != ESP_OK) {
+        return send_error(req, "500 Internal Server Error", "could not forget the network");
+    }
+    send_ok(req, "200 OK");
+    restart_later(NODE_ASK_NONE);
+    return ESP_OK;
+}
+
+/* POST /api/factory_reset: as new, with the scopes a hub's has. No stack is needed, so
+ * unlike a hub's it also works from the setup hotspot. */
+static esp_err_t factory_reset_post(httpd_req_t *req)
+{
+    bool zigbee_only = false;
+    if (req->content_len > 0) {
+        cJSON *json = read_json_body(req);
+        if (!json) {
+            return ESP_FAIL;
+        }
+        const cJSON *scope = cJSON_GetObjectItem(json, "scope");
+        const bool   known = !scope || (cJSON_IsString(scope) && (strcmp(scope->valuestring, "all") == 0 ||
+                                                                  strcmp(scope->valuestring, "zigbee") == 0));
+        zigbee_only = known && scope && strcmp(scope->valuestring, "zigbee") == 0;
+        cJSON_Delete(json);
+        /* A scope this build does not know is not read as "everything". */
+        if (!known) {
+            return send_error(req, "400 Bad Request", "scope must be all or zigbee");
+        }
+    }
+    if (zigbee_only) {
+        return node_leave_post(req);
+    }
+    node_store_ask_wipe();
+    send_ok(req, "200 OK");
+    restart_later(NODE_ASK_NONE);
+    return ESP_OK;
+}
+
 /* Restarts keep Wi-Fi: the page asking is open. */
 static esp_err_t restart_post(httpd_req_t *req)
 {
@@ -622,7 +663,7 @@ static esp_err_t update_post(httpd_req_t *req)
 esp_err_t node_http_start(void)
 {
     httpd_config_t config   = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers = 30;
+    config.max_uri_handlers = 32;
     config.lru_purge_enable = true;
     config.uri_match_fn     = httpd_uri_match_wildcard;
     config.stack_size       = 6144;
@@ -653,6 +694,8 @@ esp_err_t node_http_start(void)
         R("/api/settings",        HTTP_POST,   settings_post_),
         R("/api/wifi/scan",       HTTP_GET,    wifi_scan_get),
         R("/api/wifi",            HTTP_POST,   wifi_post),
+        R("/api/wifi",            HTTP_DELETE, wifi_forget),
+        R("/api/factory_reset",   HTTP_POST,   factory_reset_post),
         R("/api/wifi/resume",     HTTP_POST,   wifi_resume_post),
         R("/api/wifi/test",       HTTP_POST,   wifi_test_post),
         R("/api/wifi/test",       HTTP_GET,    wifi_test_get),

@@ -7,7 +7,7 @@
 	import Upload from "@lucide/svelte/icons/upload";
 	import WifiForm from "$lib/components/WifiForm.svelte";
 	import { app, refresh } from "$lib/state.svelte.ts";
-	import { post } from "$lib/api.ts";
+	import { api, post } from "$lib/api.ts";
 	import { toast } from "$lib/toast.svelte.ts";
 	import { confirm } from "$lib/confirm.svelte.ts";
 	import { ota, uploadFirmware } from "$lib/ota.svelte.ts";
@@ -37,6 +37,19 @@
 	async function leave() {
 		if (!(await confirm("Forget this node's Zigbee network? It stops being on the hub, and looks for a network to join. Remove it from the hub too.", { confirmLabel: "Leave network" }))) return;
 		try { await post("/api/node/leave"); toast("Leaving the network"); }
+		catch (err: any) { toast(err.message); }
+	}
+	async function forgetWifi() {
+		const after = s?.node?.paired
+			? "It goes back to Zigbee alone, and this page goes away. The next time the hub asks it to open Wi-Fi, it opens its setup hotspot instead."
+			: "It restarts into its setup hotspot, and this page goes away.";
+		if (!(await confirm(`Forget the Wi-Fi network ${s?.wifi?.ssid ?? ""}? ${after}`, { confirmLabel: "Forget network" }))) return;
+		try { await api("/api/wifi", { method: "DELETE" }); toast("Network forgotten, restarting"); }
+		catch (err: any) { toast(err.message); }
+	}
+	async function reset() {
+		if (!(await confirm("Erase everything on this node? Its lights, buttons, name, Wi-Fi network, access keys and Zigbee network are all forgotten, and it starts as new with its setup hotspot open. Remove it from the hub too.", { confirmLabel: "Erase everything", destructive: true }))) return;
+		try { await post("/api/factory_reset"); toast("Reset, it is restarting into its setup hotspot"); }
 		catch (err: any) { toast(err.message); }
 	}
 	async function restart() {
@@ -75,7 +88,10 @@
 
 <Card.Root class="mt-4">
 	<Card.Header><Card.Title>Wi-Fi</Card.Title><Card.Description>Used only while configuring: normally this node has Wi-Fi off. Saving a network restarts it onto that one.</Card.Description></Card.Header>
-	<Card.Content><WifiForm /></Card.Content>
+	<Card.Content class="flex flex-col gap-3">
+		<WifiForm />
+		{#if s?.wifi?.mode === "sta"}<div><Button variant="outline" onclick={forgetWifi}>Forget this network</Button></div>{/if}
+	</Card.Content>
 </Card.Root>
 
 <Card.Root class="mt-4">
@@ -95,4 +111,9 @@
 			<div class="text-muted-foreground text-xs">{ota.message}</div>
 		{/if}
 	</Card.Content>
+</Card.Root>
+
+<Card.Root class="mt-4">
+	<Card.Header><Card.Title>Factory reset</Card.Title><Card.Description>Erases its lights, buttons, name, Wi-Fi network, access keys and Zigbee network, for giving this node away or starting again. It cannot be undone.</Card.Description></Card.Header>
+	<Card.Content><Button variant="destructive" onclick={reset}>Factory reset</Button></Card.Content>
 </Card.Root>
