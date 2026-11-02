@@ -1982,9 +1982,13 @@ bool local_light_get(uint16_t id, zbc_local_state_t *out)
             int64_t lvl = l->on ? (ramp_now(&l->level, now) + 500) / 1000 : l->remembered;
             out->level  = (int16_t)(lvl < 1 ? 1 : lvl);
             out->mireds = zbc_light_tunable(l->kind) ? (int32_t)ramp_now(&l->mireds, now) : -1;
+            out->comes_back_to = l->remembered;
+            out->fading_out    = l->off_at_end;
         } else {
             out->level  = -1;
             out->mireds = -1;
+            out->comes_back_to = -1;
+            out->fading_out    = false;
         }
     }
     xSemaphoreGive(s_lock);

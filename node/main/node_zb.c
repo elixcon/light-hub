@@ -144,13 +144,14 @@ static void sync_attrs(void)
             continue;
         }
         const uint8_t ep = (uint8_t)lights[i].id;
+        const node_zcl_report_t r = node_zcl_report(st.on, st.level, st.comes_back_to, st.fading_out);
         esp_zigbee_lock_acquire(portMAX_DELAY);
-        if (st.on >= 0) {
-            bool on = st.on > 0;
+        if (r.has_on) {
+            bool on = r.on;
             set_attr(ep, EZB_ZCL_CLUSTER_ID_ON_OFF, EZB_ZCL_ATTR_ON_OFF_ON_OFF_ID, &on);
         }
-        if (st.level >= 0) {
-            uint8_t level = (uint8_t)st.level;
+        if (r.has_level) {
+            uint8_t level = r.level;
             set_attr(ep, EZB_ZCL_CLUSTER_ID_LEVEL, EZB_ZCL_ATTR_LEVEL_CURRENT_LEVEL_ID, &level);
         }
         if (st.mireds > 0) {
@@ -215,7 +216,9 @@ static esp_err_t run_command(const node_ev_t *ev)
         if (!dims || ds == 0) {
             return local_light_set(id, ZB_ONOFF_ON);
         }
-        return local_light_fade_in(id, st.level > 0 ? (uint8_t)st.level : 254, ds);
+        /* Set_level rather than fade_in, which starts from black: an On that finds a fade
+         * still running should carry on from where the light is. */
+        return local_light_set_level(id, st.comes_back_to > 0 ? (uint8_t)st.comes_back_to : 254, ds);
     case NODE_ZCL_OFF:
     case NODE_ZCL_OFF_EFFECT:
         if (!dims) {
@@ -225,7 +228,7 @@ static esp_err_t run_command(const node_ev_t *ev)
     case NODE_ZCL_TOGGLE:
         return local_light_set(id, ZB_ONOFF_TOGGLE);
     case NODE_ZCL_LEVEL:
-        if (st.on <= 0) {
+        if (st.on <= 0 || st.fading_out) {
             return ESP_OK;   /* ZCL: without "with on/off", a lamp that is off stays so */
         }
         return local_light_set_level(id, ev->cmd.level, ds);

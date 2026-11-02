@@ -6225,7 +6225,10 @@ esp_err_t zb_fade_in(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, uint8_t level
         return ESP_ERR_NOT_SUPPORTED;
     }
 
-    const zbc_cmd_t c = { .kind = ZBC_CMD_FADE_IN, .step = 0, .a = level,
+    /* A node ramps from black by itself, so the preset would only make it wait a round
+     * trip at the floor, and remember the floor if the ramp went astray. */
+    const bool      node = (device_db_features_by_short(short_addr, NODE_CONTROL_EP) & ZBC_FEAT_NODE) != 0;
+    const zbc_cmd_t c = { .kind = ZBC_CMD_FADE_IN, .step = node ? 1 : 0, .a = level,
                           .transition_ds = transition_ds };
     esp_err_t       err = gate_send(short_addr, ep, &c, ZBC_CH_LEVEL);
     if (err == ESP_OK) {

@@ -77,6 +77,25 @@ int main(void)
     CHECK(!node_zcl_decode(NODE_ZCL_CLUSTER_COLOR, 0x06, ct, 4, &c));
     CHECK(!node_zcl_decode(NODE_ZCL_CLUSTER_COLOR, 0x07, ct, 4, &c));
 
+    /* What a light reports. Lit or dark, it is what it is. */
+    node_zcl_report_t r = node_zcl_report(1, 200, 200, false);
+    CHECK(r.has_on && r.on && r.has_level && r.level == 200);
+    r = node_zcl_report(0, 150, 150, false);
+    CHECK(r.has_on && !r.on && r.has_level && r.level == 150);
+    /* Fading up, it says how far it has got. */
+    r = node_zcl_report(1, 30, 200, false);
+    CHECK(r.on && r.level == 30);
+    /* Fading out, it is already the off it will be, at the level it comes back to.
+     * Reported as "on, at 13", the hub's next toggle went the wrong way. */
+    r = node_zcl_report(1, 33, 200, true);
+    CHECK(r.has_on && !r.on && r.level == 200);
+    /* An on/off light has no level to report. */
+    r = node_zcl_report(1, -1, -1, false);
+    CHECK(r.has_on && r.on && !r.has_level);
+    /* Unknown says nothing. */
+    r = node_zcl_report(-1, -1, -1, false);
+    CHECK(!r.has_on && !r.has_level);
+
     /* Another cluster altogether. */
     CHECK(!node_zcl_decode(0x0005, 0x05, NULL, 0, &c));
     CHECK(!node_zcl_decode(NODE_ZCL_CLUSTER_ON_OFF, 0x00, NULL, 0, NULL));

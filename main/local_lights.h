@@ -26,6 +26,10 @@ typedef struct {
     int8_t  on;
     int16_t level;
     int32_t mireds;
+    /* Where it comes back to. Not `level` while a ramp runs: that is how far the ramp
+     * has got, and a switch-on that took it for this would remember a fade's low point. */
+    int16_t comes_back_to;
+    bool    fading_out;     /* on, but only until a fade-out ends */
 } zbc_local_state_t;
 
 /* Drives every wired pin to its power-on state and starts the task that runs the

@@ -43,6 +43,18 @@ typedef struct {
 bool node_zcl_decode(uint16_t cluster_id, uint8_t cmd_id, const uint8_t *payload, uint16_t len,
                      node_zcl_cmd_t *out);
 
+/* What a light's attributes say, from what it is doing. A fade-out reads as the off it
+ * is about to be, at the level it will come back to, as a lamp switched off with
+ * OffWithEffect keeps its CurrentLevel. Told "on, at 13 %" straight after switching it
+ * off, the hub would send the next toggle the wrong way, and take 13 % for its level. */
+typedef struct {
+    bool    has_on, on;
+    bool    has_level;
+    uint8_t level;
+} node_zcl_report_t;
+
+node_zcl_report_t node_zcl_report(int on, int level, int comes_back_to, bool fading_out);
+
 #ifdef __cplusplus
 }
 #endif

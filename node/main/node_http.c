@@ -260,9 +260,9 @@ static esp_err_t device_dispatch(httpd_req_t *req)
         if (strcmp(s, "toggle") == 0) {
             err = local_light_set(id, ZB_ONOFF_TOGGLE);
         } else if (strcmp(s, "on") == 0) {
-            zbc_local_state_t st = { .level = -1 };
+            zbc_local_state_t st = { .comes_back_to = -1 };
             local_light_get(id, &st);
-            err = dims ? local_light_fade_in(id, st.level > 0 ? (uint8_t)st.level : 254, ds)
+            err = dims ? local_light_set_level(id, st.comes_back_to > 0 ? (uint8_t)st.comes_back_to : 254, ds)
                        : local_light_set(id, ZB_ONOFF_ON);
         } else if (strcmp(s, "off") == 0) {
             err = dims ? local_light_fade_off(id, ds) : local_light_set(id, ZB_ONOFF_OFF);
