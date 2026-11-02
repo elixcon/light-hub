@@ -10,6 +10,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "sdkconfig.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -27,8 +28,14 @@ extern "C" {
  * typed, and the DNS label derived from it. 32 is what both ends allow - Matter's
  * NodeLabel caps there, and wifi_mgr_status_t::hostname is char[32]. */
 #define ZBC_COORD_NAME_LEN     32
+/* A Light Node must not answer as the hub it joins: both would be zigbee.local. */
+#if CONFIG_ZB_ZED
+#define ZBC_COORD_NAME_DEFAULT "Elixcon Light Node"
+#define ZBC_COORD_HOST_DEFAULT "light-node"
+#else
 #define ZBC_COORD_NAME_DEFAULT "Elixcon Light Hub"
 #define ZBC_COORD_HOST_DEFAULT "zigbee"
+#endif
 
 esp_err_t settings_init(void);
 

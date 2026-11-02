@@ -22,6 +22,7 @@
 #include "node_proto.h"
 #include "node_store.h"
 #include "node_zcl.h"
+#include "wifi_manager.h"
 #include "radio_coex.h"
 
 static const char *TAG = "node_zb";
@@ -413,6 +414,11 @@ static void node_task(void *arg)
             }
             case EV_ENTER_WIFI:
                 ESP_LOGW(TAG, "The hub asks for Wi-Fi, %u min", ev.cmd.level);
+                /* With no network to go to it opens its hotspot, with Zigbee off, and this
+                 * is the last the hub hears until that closes. */
+                if (!wifi_manager_has_credentials()) {
+                    node_zb_send_wifi_state(NODE_WIFI_HOTSPOT, NULL);
+                }
                 /* Long enough for the APS ack to have gone. */
                 vTaskDelay(pdMS_TO_TICKS(300));
                 node_restart_into(NODE_ASK_WIFI, ev.cmd.level);

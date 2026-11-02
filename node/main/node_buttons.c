@@ -189,6 +189,9 @@ static void buttons_task(void *arg)
             break;
         case MSG_UNLOCK_HOTSPOT:
             ESP_LOGW(TAG, "Ten presses: restarting into the setup hotspot");
+            /* The last the hub hears until the hotspot closes. */
+            node_zb_send_wifi_state(NODE_WIFI_HOTSPOT, NULL);
+            vTaskDelay(pdMS_TO_TICKS(300));
             node_restart_into(NODE_ASK_HOTSPOT, 0);
             break;
         default:
