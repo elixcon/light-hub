@@ -109,16 +109,20 @@ From a node on a test board, under a hub on the same desk:
 - The hotspot while still looking for a network, with a bad stored network being retried as well: 144 requests in a row
   from a laptop, none failed, 27 ms typically, with a pause of 2-3 s about every 32 s while it looks for a network. A
   node with no stored network has only the looking to do, though that case was not tried on its own.
+- Choosing a parent: after a restart a node asks for a strong one and steps down about every 6 dB, which takes about
+  2.7 s a step. It chose the hub at -39 dBm over the plug at -47 dBm on all of 9 boots, joining 5.6-10.7 s after each;
+  without this it landed on either. A first join has no such demand. `zigbee.parent` in `/api/status` shows the result.
 - A quick double press on real switches: the hub heard the second press 117 and 207 ms after the first click.
 
 Open:
 
-- **The parent matters, and you can notice it.** With the hub as its parent, 0 of 142 commands were slow. Under a
-  TS011F plug at -60 dBm, 14-40 % of commands had their acknowledgement delayed by about 1.6 s, and the hub's gate
-  held that endpoint for the next command, so a quick second command can be late. Commands can also fail outright: in
-  about a minute of real button use under that plug, 2 commands went undelivered and 10 were slow, and by the hub's
-  record one press changed nothing for about 11 s. After a restart a node has gone back under the plug, though a
-  fresh join chose the hub. The stack picks the parent.
+- **Slow and lost commands come and go, and the cause is not known.** Through a TS011F plug, 32 % of 40 on/off commands
+  had their acknowledgement delayed by about 1.6 s in one run, which holds that endpoint's next command back. In about a
+  minute of real button use 2 commands went undelivered and 10 were slow, and by the hub's record one press changed
+  nothing for about 11 s. Later the same evening, about 640 commands through that plug had none slow, however the node
+  reported and with the hub's page polling at four times its rate. With the hub as the parent, 0 of 142 were slow, but
+  not at the same time, so that does not prove the parent is the cause. Interference on the Zigbee channel would fit,
+  and was not shown.
 - **Asking a node to open Wi-Fi just after the hub restarts** was lost once, about 20 s after a restart: the hub answered
   `202`, the node stayed on Zigbee, and its Wi-Fi state stayed off. Asking again two minutes later worked. The cause has
   not been looked into.

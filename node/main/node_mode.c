@@ -33,3 +33,10 @@ bool node_window_over(node_mode_t mode, int64_t now, int64_t last_use, int64_t j
         return false;
     }
 }
+
+uint8_t node_parent_floor(unsigned failed_rejoins)
+{
+    /* Every 6 dB or so, from -37 dBm down to -67. */
+    static const uint8_t floors[] = { 150, 135, 120, 105, 90, 75 };
+    return failed_rejoins < sizeof(floors) ? floors[failed_rejoins] : 0;
+}

@@ -44,6 +44,8 @@ static const char *TAG = "node_zb";
 #define JOIN_RETRY_US (30 * 1000000LL)
 #define INIT_RETRY_US (1 * 1000000LL)
 #define REJOIN_RETRY_US (10 * 1000000LL)
+/* The next step down, when a rejoin found no parent that strong. */
+#define REJOIN_STEP_US  (100 * 1000LL)
 /* A frame the stack's retries bring round again within this long is the same
  * frame. A repeated Toggle would otherwise undo itself. */
 #define DUP_WINDOW_US (1000 * 1000)
@@ -81,6 +83,11 @@ static uint32_t           s_endpoints_digest;
 
 static node_zb_stats_t    s_stats;
 
+static uint8_t  s_stack_floor;      /* the stack's own minimum join LQI */
+static uint8_t  s_join_floor;       /* what this boot's rejoin was held to; 0 for nothing */
+static unsigned s_rejoins_failed;
+static uint32_t s_joined_after_ms;
+
 void node_zb_stats(node_zb_stats_t *out)
 {
     *out = s_stats;
@@ -88,6 +95,9 @@ void node_zb_stats(node_zb_stats_t *out)
     if (s_started && esp_zigbee_lock_acquire(pdMS_TO_TICKS(200))) {
         out->joined     = ezb_bdb_dev_joined();
         out->rx_on      = ezb_get_rx_on_when_idle();
+        out->join_floor = s_join_floor;
+        out->rejoins_failed = (uint8_t)s_rejoins_failed;
+        out->joined_after_ms = s_joined_after_ms;
         out->short_addr = ezb_nwk_get_short_address();
         out->pan_id     = ezb_nwk_get_panid();
         out->channel    = ezb_nwk_get_current_channel();
@@ -454,6 +464,10 @@ static void on_network(const char *how)
     ESP_LOGI(TAG, "%s: network 0x%04x, channel %d, short 0x%04x", how, ezb_nwk_get_panid(),
              ezb_nwk_get_current_channel(), ezb_nwk_get_short_address());
     s_joined_at = esp_timer_get_time();
+    s_joined_after_ms = (uint32_t)(s_joined_at / 1000);
+    /* Only a restart's choice is this fussy. A rejoin the stack starts by itself has
+     * lost its parent, and any parent is better than none. */
+    ezb_nwk_set_min_join_lqi(s_stack_floor);
     /* A short flash write, in the stack's callback: this happens once per boot. */
     if (!node_store_paired()) {
         node_store_set_paired(true);
@@ -487,7 +501,11 @@ static bool app_signal_handler(const ezb_app_signal_t *app_signal)
             /* A rejoin that found nobody, which is what a parent that is off looks
              * like. The network is still ours: keep trying, more slowly. */
             ESP_LOGW(TAG, "%s failed (0x%02x), retrying", name, status);
-            schedule_commission(EZB_BDB_MODE_INITIALIZATION, REJOIN_RETRY_US);
+            const uint8_t was = s_join_floor;
+            s_rejoins_failed++;
+            s_join_floor = node_parent_floor(s_rejoins_failed);
+            ezb_nwk_set_min_join_lqi(s_join_floor ? s_join_floor : s_stack_floor);
+            schedule_commission(EZB_BDB_MODE_INITIALIZATION, was ? REJOIN_STEP_US : REJOIN_RETRY_US);
         } else if (status != EZB_BDB_STATUS_SUCCESS) {
             schedule_commission(EZB_BDB_MODE_INITIALIZATION, INIT_RETRY_US);
         } else if (ezb_bdb_is_factory_new()) {
@@ -648,6 +666,15 @@ static void zb_main_task(void *arg)
     ezb_set_rx_on_when_idle(true);
     ESP_ERROR_CHECK(ezb_bdb_set_primary_channel_set(ALL_CHANNELS));
     ESP_ERROR_CHECK(ezb_bdb_set_secondary_channel_set(0));
+    /* Left to itself, a restart's rejoin lands on whichever of the routers in range
+     * answers, however weak, where a first join found the strongest. Ask for a strong
+     * one and step down. A first join has no such floor: the hub has only just been
+     * opened for it, and each failed attempt costs 30 s. */
+    s_stack_floor = ezb_nwk_get_min_join_lqi();
+    if (node_store_paired()) {
+        s_join_floor = node_parent_floor(0);
+        ezb_nwk_set_min_join_lqi(s_join_floor);
+    }
     ESP_ERROR_CHECK(ezb_app_signal_add_handler(app_signal_handler));
     ESP_ERROR_CHECK(create_endpoints());
 

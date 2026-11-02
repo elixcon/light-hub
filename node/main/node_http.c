@@ -62,6 +62,9 @@ static cJSON *zigbee_json(void)
         cJSON_AddBoolToObject(p, "coordinator", z.parent_short == 0);
         cJSON_AddNumberToObject(p, "lqi", z.parent_lqi);
         cJSON_AddNumberToObject(p, "rssi", z.parent_rssi);
+        cJSON_AddNumberToObject(p, "join_floor", z.join_floor);
+        cJSON_AddNumberToObject(p, "rejoins_failed", z.rejoins_failed);
+        cJSON_AddNumberToObject(p, "joined_after_ms", z.joined_after_ms);
     }
     /* What the page's poll asks of any Zigbee status. A node never opens a network. */
     cJSON_AddNumberToObject(o, "permit_join_remaining_s", 0);

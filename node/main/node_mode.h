@@ -39,6 +39,11 @@ node_mode_t node_mode_decide(bool paired, node_ask_t ask, bool has_network);
 bool node_window_over(node_mode_t mode, int64_t now, int64_t last_use, int64_t joined_at,
                       uint8_t minutes);
 
+/* The weakest parent a restart's rejoin will accept, as an LQI, by how many rejoins
+ * have found nobody that strong. 0 once it has run out: whoever answers, as the stack
+ * would choose. On this chip LQI is about 2.5 * (RSSI + 97). */
+uint8_t node_parent_floor(unsigned failed_rejoins);
+
 #ifdef __cplusplus
 }
 #endif

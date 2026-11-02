@@ -56,6 +56,10 @@ typedef struct {
     uint8_t  parent_type;
     uint8_t  neighbours;
     uint8_t  parent_ieee[8];
+    /* The weakest parent this boot's rejoin would take, and how many steps down that was. */
+    uint8_t  join_floor;
+    uint8_t  rejoins_failed;
+    uint32_t joined_after_ms;
 } node_zb_stats_t;
 void node_zb_stats(node_zb_stats_t *out);
 

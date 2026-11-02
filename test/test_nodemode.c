@@ -25,8 +25,24 @@ static int failures, checks;
 
 #define MIN (60 * 1000000LL)
 
+static void test_parent_floor(void)
+{
+    /* Strongest first, each lower than the last, ending with no demand at all, or a
+     * node with one distant router would never get back on. */
+    unsigned i = 0;
+    while (node_parent_floor(i + 1) > 0) {
+        CHECK(node_parent_floor(i) > node_parent_floor(i + 1));
+        i++;
+    }
+    CHECK(i < 20);
+    CHECK(node_parent_floor(0) > 0);
+    CHECK(node_parent_floor(i + 1) == 0);
+    CHECK(node_parent_floor(100) == 0);
+}
+
 int main(void)
 {
+    test_parent_floor();
     /* Normal: paired, nobody asked. Wi-Fi never starts, with or without a network. */
     CHECK(node_mode_decide(true, NODE_ASK_NONE, true) == NODE_MODE_ZIGBEE);
     CHECK(node_mode_decide(true, NODE_ASK_NONE, false) == NODE_MODE_ZIGBEE);
