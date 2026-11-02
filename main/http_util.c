@@ -1,5 +1,6 @@
 #include "http_util.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -629,7 +630,9 @@ esp_err_t wifi_test_post(httpd_req_t *req)
         return send_error(req, "409 Conflict", "a check is already running");
     }
     if (err != ESP_OK) {
-        return send_error(req, "500 Internal Server Error", "the check could not start");
+        char why[64];
+        snprintf(why, sizeof(why), "the check could not start (%s)", esp_err_to_name(err));
+        return send_error(req, "500 Internal Server Error", why);
     }
     return send_ok(req, "202 Accepted");
 }

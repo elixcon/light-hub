@@ -106,6 +106,9 @@ From a node on a test board, under a hub on the same desk:
 
 - A press through a hub rule to the node's own light: 111 ms.
 - PWM at the 80 MHz CPU: exact, 9765.6 Hz, as at 160 MHz.
+- The hotspot while still looking for a network, with a bad stored network being retried as well: 144 requests in a row
+  from a laptop, none failed, 27 ms typically, with a pause of 2-3 s about every 32 s while it looks for a network. A
+  node with no stored network has only the looking to do, though that case was not tried on its own.
 - A quick double press on real switches: the hub heard the second press 117 and 207 ms after the first click.
 
 Open:
@@ -120,6 +123,4 @@ Open:
   `202`, the node stayed on Zigbee, and its Wi-Fi state stayed off. Asking again two minutes later worked. The cause has
   not been looked into.
 - **Current draw** has not been measured.
-- **The hotspot while still looking for a network** has not been tried with a phone connected. If it proves unusable,
-  the page needs a button that closes the hotspot to join.
 - The overheat sensor cannot be set on the node's page yet. A board that was a hub keeps its setting.
