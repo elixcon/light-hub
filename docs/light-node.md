@@ -127,8 +127,9 @@ Open:
   `202`, the node stayed on Zigbee, and its Wi-Fi state stayed off. Asking again two minutes later worked. The cause has
   not been looked into.
 - **Current draw** has not been measured.
-- **A node's lights are not read again when it comes back.** Brightness changed on its own page while the hub could not
-  hear it, as in its hotspot, stays unknown to the hub, whose next switch-on uses the level it last knew.
+- **A plain restart can lose a brightness.** A light set to start off saves no level, as on a hub, so a restart that is
+  not a change of mode, such as storing a Wi-Fi network, takes it back to the last one saved. The hub reads what it finds
+  when the node comes back.
 - **A node cannot forget its Wi-Fi network**, or be reset, from its page. So a node with no network stored was tried only
   through a bad stored network, which reaches the same hotspot and also retries that network.
 - The overheat sensor cannot be set on the node's page yet. A board that was a hub keeps its setting.
