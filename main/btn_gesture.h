@@ -57,6 +57,12 @@ typedef struct {
 zbc_btn_emit_t btn_step(zbc_btn_fsm_t *st, int level, bool inverted,
                         bool want_double, int64_t now_us);
 
+/* The same for a button whose rules are somebody else's, which holds nothing back: a
+ * short press is emitted as the button comes up, and a press that follows inside the
+ * double-press window is ZBC_EMIT_DOUBLE on the way down, as in btn_step. So one double
+ * is a SHORT and then a DOUBLE, and whoever has the rules decides what to make of them. */
+zbc_btn_emit_t btn_step_eager(zbc_btn_fsm_t *st, int level, bool inverted, int64_t now_us);
+
 /* The same for a switch that stays where it is put: every debounced flip, either
  * way, is one ZBC_EMIT_SHORT, and nothing else is ever emitted. The position it
  * is in when first read - at boot, or after its wiring changed - is taken as

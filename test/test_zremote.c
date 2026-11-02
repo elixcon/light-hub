@@ -41,7 +41,7 @@ typedef enum {
 typedef enum {
     ZB_REMOTE_NONE = 0, ZB_REMOTE_CLICK, ZB_REMOTE_DOUBLE,
     ZB_REMOTE_HOLD, ZB_REMOTE_RELEASE, ZB_REMOTE_IGNORED, ZB_REMOTE_HOLD_TICK,
-    ZB_REMOTE_SINGLE, ZB_REMOTE_TRIPLE,
+    ZB_REMOTE_SINGLE, ZB_REMOTE_TRIPLE, ZB_REMOTE_AGAIN,
 } zb_remote_ev_t;
 
 typedef struct {
@@ -169,6 +169,33 @@ static void test_a_device_decoded_double_is_immediate(void)
     zbc_zbtn_fsm_t st = { 0 };
     expect(zbtn_step(&st, ZB_REMOTE_DOUBLE, true, 1000), ZBC_EMIT_DOUBLE,
            "a double the device decoded fires at once");
+}
+
+/* A node's second press. It timed the gap itself, which the hub cannot: a click arrives
+ * only when the button comes up. */
+static void test_a_nodes_second_press(void)
+{
+    zbc_zbtn_fsm_t st = { 0 };
+    int64_t now = 1000000;
+    expect(zbtn_step(&st, ZB_REMOTE_CLICK, true, now), ZBC_EMIT_NONE, "the first waits");
+    expect(zbtn_step(&st, ZB_REMOTE_AGAIN, true, now + 250000), ZBC_EMIT_DOUBLE,
+           "the second makes it a double");
+    expect(zbtn_step(&st, ZB_REMOTE_NONE, true, now + 900000), ZBC_EMIT_NONE,
+           "and the click does not fire later as well");
+
+    /* Delayed past the window by the radio: the person still meant a double. */
+    memset(&st, 0, sizeof(st));
+    expect(zbtn_step(&st, ZB_REMOTE_CLICK, true, now), ZBC_EMIT_NONE, "waiting");
+    expect(zbtn_step(&st, ZB_REMOTE_NONE, true, now + BTN_DOUBLE_US), ZBC_EMIT_SHORT,
+           "the window closes on the click");
+    expect(zbtn_step(&st, ZB_REMOTE_AGAIN, true, now + BTN_DOUBLE_US + 40000), ZBC_EMIT_DOUBLE,
+           "a late second press is a double all the same");
+
+    /* A key with no double rules: two quick taps toggle twice. */
+    memset(&st, 0, sizeof(st));
+    expect(zbtn_step(&st, ZB_REMOTE_CLICK, false, now), ZBC_EMIT_SHORT, "at once");
+    expect(zbtn_step(&st, ZB_REMOTE_AGAIN, false, now + 200000), ZBC_EMIT_SHORT,
+           "and the second is a press of its own");
 }
 
 /* A remote that counts its own presses (an E1744, a BILRESA, an Aqara) has
@@ -607,6 +634,7 @@ int main(void)
     test_two_clicks_inside_the_window_are_a_double();
     test_two_clicks_outside_the_window_are_two_shorts();
     test_a_device_decoded_double_is_immediate();
+    test_a_nodes_second_press();
     test_a_counted_single_is_immediate_despite_double_rules();
     test_a_counted_single_does_not_pair_with_a_click();
     test_a_device_decoded_triple_is_immediate();

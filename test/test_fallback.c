@@ -79,6 +79,23 @@ int main(void)
     CHECK(!p.act_now);
     CHECK(p.send_ev == NODE_BTN_CLICK);
 
+    /* A second press close behind a click is a press like any other out here: a quick
+     * double during an outage toggles twice, as it would with no double rule. */
+    memset(&fb, 0, sizeof(fb));
+    fb.hub_down = true;
+    p = node_fb_press(&fb, 1, NODE_BTN_SECOND, true, 45 * S);
+    CHECK(p.act_now);
+    CHECK(p.send_ev == NODE_BTN_LOCAL);
+    CHECK(!node_fb_result(&fb, p.seq, false, &key));
+    /* And before the outage is known, a lost one acts once the stack gives up. */
+    memset(&fb, 0, sizeof(fb));
+    p = node_fb_press(&fb, 1, NODE_BTN_SECOND, true, 46 * S);
+    CHECK(!p.act_now);
+    CHECK(p.send_ev == NODE_BTN_SECOND);
+    key = 0xFF;
+    CHECK(node_fb_result(&fb, p.seq, false, &key));
+    CHECK(key == 1);
+
     /* A hold has no local action, even with the hub down and a toggle configured. */
     memset(&fb, 0, sizeof(fb));
     fb.hub_down = true;

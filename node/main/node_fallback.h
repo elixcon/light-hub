@@ -15,7 +15,7 @@
  *   for the presses after it. Were it the press itself, the first press after the hub
  *   came back would toggle here and there.
  *
- * Only a click or a switch's flip has a local action. A leaf: no ESP-IDF, so
+ * Only a press or a switch's flip has a local action. A leaf: no ESP-IDF, so
  * test_fallback drives it. */
 #pragma once
 

@@ -84,6 +84,16 @@ zbc_btn_emit_t btn_step(zbc_btn_fsm_t *st, int level, bool inverted,
     return ZBC_EMIT_NONE;
 }
 
+zbc_btn_emit_t btn_step_eager(zbc_btn_fsm_t *st, int level, bool inverted, int64_t now_us)
+{
+    const uint8_t was_waiting = st->pending_short;
+    const zbc_btn_emit_t emit = btn_step(st, level, inverted, true, now_us);
+    if (emit == ZBC_EMIT_SHORT) {
+        return ZBC_EMIT_NONE;   /* the window closed on a press already told */
+    }
+    return !was_waiting && st->pending_short ? ZBC_EMIT_SHORT : emit;
+}
+
 zbc_btn_emit_t btn_switch_step(zbc_btn_fsm_t *st, int level, bool inverted, int64_t now_us)
 {
     const uint8_t pos = (uint8_t)(inverted ? (level == 0) : (level != 0));

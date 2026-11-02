@@ -363,6 +363,8 @@ static void test_a_light_nodes_buttons(void)
     const uint8_t click[]   = { 2, NODE_BTN_CLICK }, hold[] = { 2, NODE_BTN_HOLD };
     const uint8_t release[] = { 2, NODE_BTN_RELEASE }, flip[] = { 7, NODE_BTN_SINGLE };
     const uint8_t local[]   = { 2, NODE_BTN_LOCAL }, unknown[] = { 2, 99 }, high[] = { 8, NODE_BTN_CLICK };
+    const uint8_t second[]  = { 2, NODE_BTN_SECOND };
+    cmd_is(NODE_PROTO_CLUSTER, NODE_CMD_BUTTON, second,  2, ZB_REMOTE_AGAIN,   2, "a press close behind a click");
     cmd_is(NODE_PROTO_CLUSTER, NODE_CMD_BUTTON, click,   2, ZB_REMOTE_CLICK,   2, "a click, which a second may make a double");
     cmd_is(NODE_PROTO_CLUSTER, NODE_CMD_BUTTON, hold,    2, ZB_REMOTE_HOLD,    2, "a hold");
     cmd_is(NODE_PROTO_CLUSTER, NODE_CMD_BUTTON, release, 2, ZB_REMOTE_RELEASE, 2, "its release");

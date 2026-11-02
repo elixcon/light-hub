@@ -145,6 +145,13 @@ zbc_btn_emit_t zbtn_step(zbc_zbtn_fsm_t *st, zb_remote_ev_t ev, bool want_double
         st->pending_click = 0;
         return ZBC_EMIT_SHORT;
 
+    case ZB_REMOTE_AGAIN:
+        /* Not timed here: the device did, so it holds even when the radio delayed the
+         * frame past the window, and a click already acted on is then followed by the
+         * double the person meant. */
+        st->pending_click = 0;
+        return want_double ? ZBC_EMIT_DOUBLE : ZBC_EMIT_SHORT;
+
     case ZB_REMOTE_CLICK:
         if (st->pending_click && now_us - st->clicked_at < BTN_DOUBLE_US) {
             st->pending_click = 0;

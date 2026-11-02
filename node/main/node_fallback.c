@@ -4,7 +4,7 @@
 
 static bool is_press(uint8_t ev)
 {
-    return ev == NODE_BTN_CLICK || ev == NODE_BTN_SINGLE;
+    return ev == NODE_BTN_CLICK || ev == NODE_BTN_SECOND || ev == NODE_BTN_SINGLE;
 }
 
 node_fb_press_t node_fb_press(node_fb_t *fb, uint8_t key, uint8_t ev, bool has_local, int64_t now)

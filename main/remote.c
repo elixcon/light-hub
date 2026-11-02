@@ -169,6 +169,7 @@ zb_remote_ev_t remote_decode_cmd(zb_remote_model_t model, uint16_t cluster_id, u
         case NODE_BTN_HOLD:    return ZB_REMOTE_HOLD;
         case NODE_BTN_RELEASE: return ZB_REMOTE_RELEASE;
         case NODE_BTN_SINGLE:  return ZB_REMOTE_SINGLE;
+        case NODE_BTN_SECOND:  return ZB_REMOTE_AGAIN;
         /* Acted on at the node, which could not reach us when it was pressed. */
         case NODE_BTN_LOCAL:   return ZB_REMOTE_IGNORED;
         default:               return ZB_REMOTE_NONE;
@@ -411,7 +412,8 @@ const char *remote_event_name(zb_remote_ev_t ev)
     switch (ev) {
     /* One word for both: to somebody learning a key, a press is a press. */
     case ZB_REMOTE_CLICK:
-    case ZB_REMOTE_SINGLE:  return "click";
+    case ZB_REMOTE_SINGLE:
+    case ZB_REMOTE_AGAIN:   return "click";
     case ZB_REMOTE_DOUBLE:  return "double";
     case ZB_REMOTE_TRIPLE:  return "triple";
     /* The same word for both: to somebody learning a key, a wheel turning is a

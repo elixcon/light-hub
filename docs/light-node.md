@@ -83,8 +83,9 @@ the way back in when the hub is gone. Five open the page to everyone for two min
 ## Buttons and the hub
 
 A press goes to the hub, whose rules decide what it means. On the hub's Remotes page the node is a remote, and
-each button is a key, found by pressing it. A click goes out at once and the hub makes a double press out of two,
-for the keys whose rules want one.
+each button is a key, found by pressing it. A click goes out as the button comes up, and a press that follows within
+0.3 s makes a double, as on a hub's own buttons. A key with double-press rules waits those 0.3 s before it acts on a
+click, and one without acts at once and takes two quick taps as two presses.
 
 A button can name one of the node's lights to toggle when the hub cannot be reached. Set it on the button's
 page on the node. While the hub is out, the first press takes a few seconds (6.4 s measured) because the node
@@ -104,14 +105,19 @@ From a node on a test board, under a hub on the same desk:
 
 - A press through a hub rule to the node's own light: 111 ms.
 - PWM at the 80 MHz CPU: exact, 9765.6 Hz, as at 160 MHz.
-- Commands reach the lamp at once whatever its parent: in 19 of 20, within about 15 ms of the request.
+- A quick double press on real switches: the hub heard the second press 117 and 207 ms after the first click.
 
 Open:
 
-- **The parent matters.** With the hub as its parent, 0 of 142 commands were slow. Under a TS011F plug at -60 dBm,
-  14-40 % of commands had their acknowledgement delayed by about 1.6 s: the lamp had already reacted, but the hub's
-  gate held that endpoint for the next command, so a quick second command can be late. After a restart a node has
-  gone back under the plug, though a fresh join chose the hub. The stack picks the parent.
+- **The parent matters, and you can notice it.** With the hub as its parent, 0 of 142 commands were slow. Under a
+  TS011F plug at -60 dBm, 14-40 % of commands had their acknowledgement delayed by about 1.6 s, and the hub's gate
+  held that endpoint for the next command, so a quick second command can be late. Commands can also fail outright: in
+  about a minute of real button use under that plug, 2 commands went undelivered and 10 were slow, and by the hub's
+  record one press changed nothing for about 11 s. After a restart a node has gone back under the plug, though a
+  fresh join chose the hub. The stack picks the parent.
+- **Asking a node to open Wi-Fi just after the hub restarts** was lost once, about 20 s after a restart: the hub answered
+  `202`, the node stayed on Zigbee, and its Wi-Fi state stayed off. Asking again two minutes later worked. The cause has
+  not been looked into.
 - **Current draw** has not been measured.
 - **The hotspot while still looking for a network** has not been tried with a phone connected. If it proves unusable,
   the page needs a button that closes the hotspot to join.

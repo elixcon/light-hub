@@ -34,7 +34,7 @@ extern "C" {
 #define NODE_CMD_WIFI_STATE 0x02u
 
 typedef enum {
-    NODE_BTN_CLICK = 1,   /* a press that a second may yet make a double, on the hub's clock */
+    NODE_BTN_CLICK = 1,   /* a press, told as the button came up */
     NODE_BTN_HOLD,
     NODE_BTN_RELEASE,
     NODE_BTN_SINGLE,      /* a switch's flip: nothing follows it to wait for */
@@ -42,6 +42,12 @@ typedef enum {
      * only that this node is alive and can reach it again: acted on as well, a press
      * made while the hub was coming back would toggle the light twice. */
     NODE_BTN_LOCAL,
+    /* Pressed again within the double-press window of a click, told on the way down.
+     * Only the node can time that gap. The hub hears a click when the button comes
+     * up, so pairing two clicks by arrival would count the second press's length
+     * against the window: a quick double of 210 + 150 ms arrived 360 ms apart and made
+     * two toggles. */
+    NODE_BTN_SECOND,
 } node_btn_event_t;
 
 #define NODE_MAX_KEYS 8

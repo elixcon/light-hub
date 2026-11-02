@@ -63,6 +63,7 @@ static uint8_t gesture_event(zbc_btn_emit_t emit, bool is_switch)
 {
     switch (emit) {
     case ZBC_EMIT_SHORT:        return is_switch ? NODE_BTN_SINGLE : NODE_BTN_CLICK;
+    case ZBC_EMIT_DOUBLE:       return NODE_BTN_SECOND;
     case ZBC_EMIT_LONG:         return NODE_BTN_HOLD;
     case ZBC_EMIT_LONG_RELEASE: return NODE_BTN_RELEASE;
     /* LONG_REPEAT: the hub repeats a hold on its own clock until the release. */
@@ -104,10 +105,11 @@ static void sample_cb(void *arg)
             const uint8_t was = s->fsm.stable;
             is_sw = s->is_switch;
             key   = s->key;
-            /* No double-press wait: a click goes at once, and the hub makes a double
-             * out of two, for the buttons that have double-press rules. */
+            /* No double-press wait: a click goes at once, since only the hub knows
+             * whether this key has a use for a double, and a press close behind it
+             * says so. */
             emit = is_sw ? btn_switch_step(&s->fsm, level, s->inverted, now)
-                         : btn_step(&s->fsm, level, s->inverted, false, now);
+                         : btn_step_eager(&s->fsm, level, s->inverted, now);
             u    = unlock_level(&s->unlock, level, s->inverted, now);
             edge = s->fsm.stable != was;
         }
