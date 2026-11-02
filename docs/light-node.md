@@ -78,7 +78,8 @@ were, and the hub shows a link to its page. The modes are:
 | A wired button pressed ten times, 0.5-2.5 s apart | setup hotspot | off |
 
 Wi-Fi closes after 15 minutes without a request, or at once with **Close Wi-Fi now** on the page. Ten presses is
-the way back in when the hub is gone. Five open the page to everyone for two minutes, as on a hub.
+the way back in when the hub is gone. Five open the node's page to everyone for two minutes, as on a hub. Neither
+does anything to the hub's own lock, which a node's buttons cannot open.
 
 ## Buttons and the hub
 

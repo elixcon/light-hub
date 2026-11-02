@@ -27,6 +27,7 @@
 #define ZBTN_TICK_QUIET_MAX_US  (1500 * 1000)
 #define ZBTN_TICK_GAP_MAX_US    (1500 * 1000)
 #define ZBTN_STOP_GRACE_US      (150 * 1000)
+#define NODE_CONTROL_EP         200
 
 typedef enum {
     ZBC_EMIT_NONE = 0,
@@ -169,6 +170,19 @@ static void test_a_device_decoded_double_is_immediate(void)
     zbc_zbtn_fsm_t st = { 0 };
     expect(zbtn_step(&st, ZB_REMOTE_DOUBLE, true, 1000), ZBC_EMIT_DOUBLE,
            "a double the device decoded fires at once");
+}
+
+/* Who may open the box from a distance. Getting back into a Light Node takes ten presses
+ * on one of its buttons, and that must not open the hub on the way. */
+static void test_what_counts_towards_unlocking(void)
+{
+    expect(remote_press_unlocks(ZB_REMOTE_CLICK, 0, 1), true, "a remote's on/off key");
+    expect(remote_press_unlocks(ZB_REMOTE_SINGLE, 0, 1), true, "and one that counts its own");
+    expect(remote_press_unlocks(ZB_REMOTE_CLICK, 1, 1), false, "not its other keys");
+    expect(remote_press_unlocks(ZB_REMOTE_HOLD, 0, 1), false, "not a hold");
+    expect(remote_press_unlocks(ZB_REMOTE_DOUBLE, 0, 1), false, "not a double");
+    expect(remote_press_unlocks(ZB_REMOTE_CLICK, 0, NODE_CONTROL_EP), false, "not a node's first button");
+    expect(remote_press_unlocks(ZB_REMOTE_AGAIN, 0, NODE_CONTROL_EP), false, "in any form");
 }
 
 /* A node's second press. It timed the gap itself, which the hub cannot: a click arrives
@@ -635,6 +649,7 @@ int main(void)
     test_two_clicks_outside_the_window_are_two_shorts();
     test_a_device_decoded_double_is_immediate();
     test_a_nodes_second_press();
+    test_what_counts_towards_unlocking();
     test_a_counted_single_is_immediate_despite_double_rules();
     test_a_counted_single_does_not_pair_with_a_click();
     test_a_device_decoded_triple_is_immediate();

@@ -13,6 +13,7 @@
 #include "auth.h"
 #include "buttons.h"
 #include "lighting.h"
+#include "node_proto.h"
 #include "settings.h"
 #include "state_rev.h"
 #include "wifi_manager.h"
@@ -205,6 +206,19 @@ zbc_btn_emit_t zbtn_step(zbc_zbtn_fsm_t *st, zb_remote_ev_t ev, bool want_double
         return ZBC_EMIT_SHORT;
     }
     return ZBC_EMIT_NONE;
+}
+
+/* Whether a press counts towards opening the box. Clicks on the on/off key only: a Hue
+ * Smart Button decodes each Level Step as a click on key 1 or 2, and sends one about
+ * every 800 ms while held, so counting those would let a four-second hold open it.
+ *
+ * And not a Light Node's buttons, which go where the hub's wires do not reach, perhaps
+ * outside, and which have a five and a ten of their own: pressing ten times to get back
+ * into a node must not open the hub as well. By endpoint, as near as this gets to the
+ * device's clusters; another remote that happens to use it only loses this way in. */
+bool remote_press_unlocks(zb_remote_ev_t ev, uint8_t key, uint8_t ep)
+{
+    return (ev == ZB_REMOTE_CLICK || ev == ZB_REMOTE_SINGLE) && key == 0 && ep != NODE_CONTROL_EP;
 }
 
 /* >>> end host-test region: zremote <<< */
@@ -1739,10 +1753,7 @@ void buttons_remote_event(const uint8_t ieee[ZBC_BTN_IEEE_LEN], uint8_t ep, uint
             s_live[i].last_event_us = now;
             zbc_state_bump();         /* "last heard" on the button's page */
             emit = zbtn_step(&s_live[i].zfsm, ev, s_live[i].want_double, now);
-            /* Clicks on the on/off key only. A Hue Smart Button decodes each Level
-             * Step as a click on key 1 or 2, and sends one about every 800 ms while
-             * held - so counting those would let a four-second hold open the box. */
-            if ((ev == ZB_REMOTE_CLICK || ev == ZB_REMOTE_SINGLE) && key == 0) {
+            if (remote_press_unlocks(ev, key, ep)) {
                 unlocked = unlock_tap(&s_live[i].unlock, now);
             }
         }
