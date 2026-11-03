@@ -10,9 +10,11 @@
 #include "freertos/task.h"
 #include "esp_app_desc.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 
 #include "auth.h"
 #include "auth_http.h"
+#include "crash_log.h"
 #include "heap_watch.h"
 #include "ota.h"
 #include "wifi_manager.h"
@@ -729,4 +731,55 @@ cJSON *ota_json(void)
         cJSON_AddNullToObject(o, "updater_problem");
     }
     return o;
+}
+
+void stream_firmware_status(json_stream_t *js, bool *first)
+{
+    json_stream_member(js, first, "uptime_s", cJSON_CreateNumber((double)(esp_timer_get_time() / 1000000)));
+    /* Why this boot happened, so "the board seems to have crashed" can be told
+     * from a power cut - and where the last crash was, since there is no core
+     * dump partition and the panic handler prints only to the serial port. */
+    json_stream_member(js, first, "reset_reason",
+                       cJSON_CreateString(crash_log_reset_reason_name(esp_reset_reason())));
+    json_stream_member(js, first, "last_crash", crash_log_json());
+    json_stream_member(js, first, "version", cJSON_CreateString(esp_app_get_description()->version));
+    /* Unique per image, where `version` is only the git description - two
+     * builds from one uncommitted tree share it. The UI reloads itself when this
+     * changes, so it has to change whenever the firmware does. */
+    char build[17];
+    esp_app_get_elf_sha256(build, sizeof(build));
+    json_stream_member(js, first, "build", cJSON_CreateString(build));
+}
+
+bool rev_unchanged(httpd_req_t *req, const char *rev)
+{
+    char query[64], seen[24];
+    return httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+           httpd_query_key_value(query, "rev", seen, sizeof(seen)) == ESP_OK && strcmp(seen, rev) == 0;
+}
+
+bool reset_scope_from_body(httpd_req_t *req, bool *zigbee_only, esp_err_t *ret)
+{
+    *zigbee_only = false;
+    if (req->content_len == 0) {
+        return true;
+    }
+    /* A body that could not be read has been answered, and must not fall through
+     * to the default - which is the reset that erases everything. */
+    cJSON *json = read_json_body(req);
+    if (!json) {
+        *ret = ESP_FAIL;
+        return false;
+    }
+    const cJSON *scope = cJSON_GetObjectItem(json, "scope");
+    const bool   known = !scope || (cJSON_IsString(scope) && (strcmp(scope->valuestring, "all") == 0 ||
+                                                              strcmp(scope->valuestring, "zigbee") == 0));
+    *zigbee_only = known && scope && strcmp(scope->valuestring, "zigbee") == 0;
+    cJSON_Delete(json);
+    /* A scope this build does not know is not read as "everything". */
+    if (!known) {
+        *ret = send_error(req, "400 Bad Request", "scope must be all or zigbee");
+        return false;
+    }
+    return true;
 }

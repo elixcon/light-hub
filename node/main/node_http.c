@@ -34,12 +34,6 @@
 
 static const char *TAG = "node_http";
 
-/* A wired light is at endpoint 1 of its made-up address, as on a hub, so the editor's
- * paths are the same. */
-#define LIGHT_EP 1
-
-static const char *const PULL_NAMES[]  = { "none", "up", "down" };
-static const char *const INPUT_NAMES[] = { "button", "switch" };
 static const char *const MODE_NAMES[]  = { "zigbee", "station", "hotspot", "unpaired" };
 
 /* ---------------------------------------------------------------- the status */
@@ -86,13 +80,7 @@ static void stream_status(json_stream_t *js)
     json_stream_member(js, &first, "node", n);
     json_stream_member(js, &first, "thermal", thermal_json());
     json_stream_member(js, &first, "wired", wired_json());
-    json_stream_member(js, &first, "uptime_s", cJSON_CreateNumber((double)(esp_timer_get_time() / 1000000)));
-    json_stream_member(js, &first, "reset_reason", cJSON_CreateString(crash_log_reset_reason_name(esp_reset_reason())));
-    json_stream_member(js, &first, "last_crash", crash_log_json());
-    json_stream_member(js, &first, "version", cJSON_CreateString(esp_app_get_description()->version));
-    char build[17];
-    esp_app_get_elf_sha256(build, sizeof(build));
-    json_stream_member(js, &first, "build", cJSON_CreateString(build));
+    stream_firmware_status(js, &first);
     json_stream_member(js, &first, "ota", ota_json());
     json_stream_raw(js, "}");
 }
@@ -135,7 +123,7 @@ static cJSON *light_to_json(const zbc_light_t *l)
     cJSON *eps = cJSON_AddArrayToObject(d, "endpoints");
     cJSON *ep  = cJSON_CreateObject();
     cJSON_AddItemToArray(eps, ep);
-    cJSON_AddNumberToObject(ep, "ep", LIGHT_EP);
+    cJSON_AddNumberToObject(ep, "ep", ZBC_LIGHT_EP);
     cJSON_AddNumberToObject(ep, "device_id", 0);
     cJSON *feat = cJSON_AddArrayToObject(ep, "features");
     cJSON_AddItemToArray(feat, cJSON_CreateString("onoff"));
@@ -151,7 +139,7 @@ static cJSON *light_to_json(const zbc_light_t *l)
         cJSON_AddBoolToObject(ep, "on", st.on > 0);
     }
     if (dims && st.level >= 0) {
-        cJSON_AddNumberToObject(ep, "brightness_pct", (st.level * 100 + 127) / 254);
+        cJSON_AddNumberToObject(ep, "brightness_pct", zbc_level_to_pct(st.level));
     } else {
         cJSON_AddNullToObject(ep, "brightness_pct");
     }
@@ -224,8 +212,7 @@ static esp_err_t light_result(httpd_req_t *req, esp_err_t err)
 static esp_err_t device_dispatch(httpd_req_t *req)
 {
     const uint16_t id = light_of_uri(req);
-    zbc_light_t    light;
-    if (!id || !light_db_get(id, &light)) {
+    if (!id || !light_db_get(id, NULL)) {
         return send_error(req, "404 Not Found", "unknown light");
     }
     char tail[16];
@@ -259,21 +246,17 @@ static esp_err_t device_dispatch(httpd_req_t *req)
     if (strcmp(tail, "onoff") == 0) {
         const cJSON *state = cJSON_GetObjectItem(json, "state");
         const char  *s     = cJSON_IsString(state) ? state->valuestring : "";
-        const bool   dims  = zbc_light_pwm_channels(light.kind) > 0;
         if (strcmp(s, "toggle") == 0) {
             err = local_light_set(id, ZB_ONOFF_TOGGLE);
         } else if (strcmp(s, "on") == 0) {
-            zbc_local_state_t st = { .comes_back_to = -1 };
-            local_light_get(id, &st);
-            err = dims ? local_light_set_level(id, st.comes_back_to > 0 ? (uint8_t)st.comes_back_to : 254, ds)
-                       : local_light_set(id, ZB_ONOFF_ON);
+            err = local_light_on(id, ds);
         } else if (strcmp(s, "off") == 0) {
-            err = dims ? local_light_fade_off(id, ds) : local_light_set(id, ZB_ONOFF_OFF);
+            err = local_light_off(id, ds);
         }
     } else if (strcmp(tail, "level") == 0) {
         const cJSON *pct = cJSON_GetObjectItem(json, "pct");
         if (cJSON_IsNumber(pct) && pct->valueint >= 1 && pct->valueint <= 100) {
-            err = local_light_set_level(id, (uint8_t)((pct->valueint * 254 + 50) / 100), ds);
+            err = local_light_set_level(id, zbc_pct_to_level(pct->valueint), ds);
         }
     } else if (strcmp(tail, "color_temp") == 0) {
         const cJSON *k = cJSON_GetObjectItem(json, "kelvin");
@@ -290,33 +273,13 @@ static esp_err_t device_dispatch(httpd_req_t *req)
 /* A button here is a pin and how it is wired: the rules are the hub's. The one thing
  * stored beside them is the light to toggle when the hub cannot be reached, kept as an
  * ordinary rule. */
-static uint16_t fallback_of(const zbc_button_t *b)
-{
-    zbc_button_t copy = *b;
-    int n = 0;
-    const zbc_btn_rule_t *r = button_db_rules(&copy, ZBC_EV_SHORT, &n);
-    for (int i = 0; i < n; i++) {
-        if (r[i].action == ZBC_ACT_TOGGLE && r[i].ep != 0) {
-            return zbc_light_id_from_ieee(r[i].ieee);
-        }
-    }
-    return 0;
-}
-
 static cJSON *button_to_json(const zbc_button_t *b)
 {
     cJSON *o = cJSON_CreateObject();
     cJSON_AddNumberToObject(o, "id", b->id);
     cJSON_AddStringToObject(o, "name", b->name);
     cJSON_AddStringToObject(o, "source", "gpio");
-    if (b->gpio < 0) {
-        cJSON_AddNullToObject(o, "gpio");
-    } else {
-        cJSON_AddNumberToObject(o, "gpio", b->gpio);
-    }
-    cJSON_AddBoolToObject(o, "inverted", b->inverted);
-    cJSON_AddStringToObject(o, "pull", PULL_NAMES[b->pull <= ZBC_PULL_DOWN ? b->pull : 0]);
-    cJSON_AddStringToObject(o, "input", INPUT_NAMES[b->input < ZBC_INPUT_COUNT ? b->input : 0]);
+    button_wiring_to_json(o, b);
     bool pressed = false;
     int  level   = 0;
     if (node_buttons_pin_state(b->id, &pressed, &level)) {
@@ -326,7 +289,7 @@ static cJSON *button_to_json(const zbc_button_t *b)
         cJSON_AddNullToObject(o, "pressed");
         cJSON_AddNullToObject(o, "level");
     }
-    const uint16_t fb = fallback_of(b);
+    const uint16_t fb = node_buttons_fallback(b);
     if (fb) {
         cJSON_AddNumberToObject(o, "fallback", fb);
     } else {
@@ -359,42 +322,17 @@ static const char *button_from_json(const cJSON *json, zbc_button_t *b, uint16_t
     if (name) {
         strlcpy(b->name, name, sizeof(b->name));
     }
-    const cJSON *gpio = cJSON_GetObjectItem(json, "gpio");
-    if (cJSON_IsNull(gpio)) {
-        b->gpio = -1;
-    } else if (cJSON_IsNumber(gpio)) {
-        const int   pin = gpio->valueint;
-        const char *why = button_pin_problem(pin);
-        if (why) {
-            return why;
-        }
-        if (light_db_pin_taken(pin, 0)) {
+    const char *why = button_wiring_from_json(json, b);
+    if (why) {
+        return why;
+    }
+    if (cJSON_IsNumber(cJSON_GetObjectItem(json, "gpio"))) {
+        if (light_db_pin_taken(b->gpio, 0)) {
             return "a light drives that pin";
         }
-        if (button_db_pin_taken(pin, id)) {
+        if (button_db_pin_taken(b->gpio, id)) {
             return "another button reads that pin";
         }
-        b->gpio = (int8_t)pin;
-    }
-    const cJSON *inverted = cJSON_GetObjectItem(json, "inverted");
-    if (cJSON_IsBool(inverted)) {
-        b->inverted = cJSON_IsTrue(inverted);
-    }
-    const cJSON *pull = cJSON_GetObjectItem(json, "pull");
-    if (pull) {
-        const int p = name_index(PULL_NAMES, 3, pull);
-        if (p < 0) {
-            return "pull must be none, up or down";
-        }
-        b->pull = (uint8_t)p;
-    }
-    const cJSON *input = cJSON_GetObjectItem(json, "input");
-    if (input) {
-        const int v = name_index(INPUT_NAMES, ZBC_INPUT_COUNT, input);
-        if (v < 0) {
-            return "input must be button or switch";
-        }
-        b->input = (uint8_t)v;
     }
     const cJSON *fb = cJSON_GetObjectItem(json, "fallback");
     if (fb) {
@@ -406,7 +344,7 @@ static const char *button_from_json(const cJSON *json, zbc_button_t *b, uint16_t
             if (!light_db_get(light, NULL)) {
                 return "unknown light";
             }
-            zbc_btn_rule_t r = { .cond = ZBC_COND_ALWAYS, .action = ZBC_ACT_TOGGLE, .ep = LIGHT_EP };
+            zbc_btn_rule_t r = { .cond = ZBC_COND_ALWAYS, .action = ZBC_ACT_TOGGLE, .ep = ZBC_LIGHT_EP };
             zbc_light_ieee(light, r.ieee);
             b->rules[0] = r;
             b->rule_count[ZBC_EV_SHORT] = 1;
@@ -491,10 +429,7 @@ static esp_err_t state_get(httpd_req_t *req)
     char rev[16];
     snprintf(rev, sizeof(rev), "%lu", (unsigned long)zbc_state_rev());
 
-    char query[64], seen[24];
-    const bool unchanged = httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
-                           httpd_query_key_value(query, "rev", seen, sizeof(seen)) == ESP_OK &&
-                           strcmp(seen, rev) == 0;
+    const bool unchanged = rev_unchanged(req, rev);
     /* First: it reads the request's headers, gone once a chunk has been sent. */
     cJSON        *auth = auth_json(req);
     json_stream_t js;
@@ -557,6 +492,13 @@ static void restart_later(node_ask_t ask)
     xTaskCreate(restart_task, "restart", 3072, (void *)(intptr_t)ask, 5, NULL);
 }
 
+static esp_err_t ok_then_restart(httpd_req_t *req, node_ask_t ask)
+{
+    send_ok(req, "200 OK");
+    restart_later(ask);
+    return ESP_OK;
+}
+
 static esp_err_t settings_post_(httpd_req_t *req)
 {
     cJSON *json = read_json_body(req);
@@ -583,9 +525,7 @@ static esp_err_t settings_post_(httpd_req_t *req)
  * the idle time runs out. */
 static esp_err_t node_close_post(httpd_req_t *req)
 {
-    send_ok(req, "200 OK");
-    restart_later(NODE_ASK_NONE);
-    return ESP_OK;
+    return ok_then_restart(req, NODE_ASK_NONE);
 }
 
 /* POST /api/node/leave: forget the Zigbee network, to pair with another hub. */
@@ -593,9 +533,7 @@ static esp_err_t node_leave_post(httpd_req_t *req)
 {
     node_store_set_paired(false);
     node_store_forget_claim();   /* the next boot erases the network, before the stack starts */
-    send_ok(req, "200 OK");
-    restart_later(NODE_ASK_NONE);
-    return ESP_OK;
+    return ok_then_restart(req, NODE_ASK_NONE);
 }
 
 /* DELETE /api/wifi: forget the stored network. A paired node goes back to Zigbee alone,
@@ -605,46 +543,29 @@ static esp_err_t wifi_forget(httpd_req_t *req)
     if (wifi_manager_erase_credentials() != ESP_OK) {
         return send_error(req, "500 Internal Server Error", "could not forget the network");
     }
-    send_ok(req, "200 OK");
-    restart_later(NODE_ASK_NONE);
-    return ESP_OK;
+    return ok_then_restart(req, NODE_ASK_NONE);
 }
 
 /* POST /api/factory_reset: as new, with the scopes a hub's has. No stack is needed, so
  * unlike a hub's it also works from the setup hotspot. */
 static esp_err_t factory_reset_post(httpd_req_t *req)
 {
-    bool zigbee_only = false;
-    if (req->content_len > 0) {
-        cJSON *json = read_json_body(req);
-        if (!json) {
-            return ESP_FAIL;
-        }
-        const cJSON *scope = cJSON_GetObjectItem(json, "scope");
-        const bool   known = !scope || (cJSON_IsString(scope) && (strcmp(scope->valuestring, "all") == 0 ||
-                                                                  strcmp(scope->valuestring, "zigbee") == 0));
-        zigbee_only = known && scope && strcmp(scope->valuestring, "zigbee") == 0;
-        cJSON_Delete(json);
-        /* A scope this build does not know is not read as "everything". */
-        if (!known) {
-            return send_error(req, "400 Bad Request", "scope must be all or zigbee");
-        }
+    bool      zigbee_only;
+    esp_err_t answered;
+    if (!reset_scope_from_body(req, &zigbee_only, &answered)) {
+        return answered;
     }
     if (zigbee_only) {
         return node_leave_post(req);
     }
     node_store_ask_wipe();
-    send_ok(req, "200 OK");
-    restart_later(NODE_ASK_NONE);
-    return ESP_OK;
+    return ok_then_restart(req, NODE_ASK_NONE);
 }
 
 /* Restarts keep Wi-Fi: the page asking is open. */
 static esp_err_t restart_post(httpd_req_t *req)
 {
-    send_ok(req, "200 OK");
-    restart_later(NODE_ASK_WIFI);
-    return ESP_OK;
+    return ok_then_restart(req, NODE_ASK_WIFI);
 }
 
 /* Every route counts as somebody using the page, which keeps Wi-Fi open. */

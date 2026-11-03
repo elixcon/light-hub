@@ -104,7 +104,8 @@ The updater compiles shared modules (`wifi_manager.c`, `settings.c`, `auth.c`, `
   lamps (`matter_priv.h` is internal and runs on the CHIP thread; `matter_ctl.h` is the C API). No
   Thread: the radio runs Zigbee.
 - Leaf modules have no ESP-IDF dependencies and compile whole in host tests: `remote.c`,
-  `colorspace.c`, `sun.c`, `tz.c`, `ntc.c`, `zb_ota_file.c`, `light_math.h`, `node_proto.h`, and in
+  `colorspace.c`, `sun.c`, `tz.c`, `ntc.c`, `zb_ota_file.c`, `light_math.h`, `frame_dup.h`, `btn_gesture.h`,
+  `node_proto.h`, and in
   `node/main` `node_mode.c`, `node_fallback.c`, `node_zcl.c`. Keep them that way.
 - `main/CMakeLists.txt` links several `-Wl,--wrap=` hooks: the 802.15.4 driver (`radio_ed.c`
   restarts energy scans the driver abandons, `radio_coex.c` counts frames and adjusts send

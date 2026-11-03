@@ -569,65 +569,6 @@ typedef struct {
     int64_t  clear_us;
 } btn_wiring_t;
 
-/* Pins we configured, so one that stops being used is handed back rather than
- * left pulled in whatever direction it happened to have. */
-static bool s_owned[SOC_GPIO_PIN_COUNT];
-
-/* Returns whether the failsafe pin is left to the sampler to watch on its own. */
-static bool apply_pins(const btn_wiring_t *w, size_t n)
-{
-    bool wanted[SOC_GPIO_PIN_COUNT] = { 0 };
-
-    for (size_t i = 0; i < n; i++) {
-        const int pin = w[i].gpio;
-        if (pin < 0 || pin >= SOC_GPIO_PIN_COUNT) {
-            continue;
-        }
-        wanted[pin] = true;
-
-        gpio_config_t io = {
-            .pin_bit_mask = 1ULL << pin,
-            .mode         = GPIO_MODE_INPUT,
-            .pull_up_en   = w[i].pull == ZBC_PULL_UP   ? GPIO_PULLUP_ENABLE   : GPIO_PULLUP_DISABLE,
-            .pull_down_en = w[i].pull == ZBC_PULL_DOWN ? GPIO_PULLDOWN_ENABLE : GPIO_PULLDOWN_DISABLE,
-            .intr_type    = GPIO_INTR_DISABLE,
-        };
-        esp_err_t err = gpio_config(&io);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "GPIO %d refused by the driver (0x%x)", pin, err);
-            wanted[pin] = false;
-            continue;
-        }
-        s_owned[pin] = true;
-    }
-
-    for (int pin = 0; pin < SOC_GPIO_PIN_COUNT; pin++) {
-        if (s_owned[pin] && !wanted[pin]) {
-            gpio_reset_pin(pin);
-            s_owned[pin] = false;
-        }
-    }
-
-    /* The failsafe pin is watched whether or not anybody made a button of it, so
-     * a bare board can always be let back into. A button on that pin wins: its
-     * wiring is the truth, and its own slot counts the presses. Not recorded in
-     * s_owned, so the loop above never hands it back. */
-#if CONFIG_ZBC_UNLOCK_GPIO >= 0
-    const int up = CONFIG_ZBC_UNLOCK_GPIO;
-    if (up < SOC_GPIO_PIN_COUNT && !wanted[up]) {
-        gpio_config_t io = {
-            .pin_bit_mask = 1ULL << up,
-            .mode         = GPIO_MODE_INPUT,
-            .pull_up_en   = GPIO_PULLUP_ENABLE,
-            .pull_down_en = GPIO_PULLDOWN_DISABLE,
-            .intr_type    = GPIO_INTR_DISABLE,
-        };
-        return gpio_config(&io) == ESP_OK;
-    }
-#endif
-    return false;
-}
-
 /* Matching on the source as well as the pin: a button switched from a pin to
  * a remote is a different button as far as a half-finished gesture is
  * concerned, and carrying one over would invent a press. */
@@ -699,7 +640,11 @@ void buttons_reload(void)
     }
     free(b);
 
-    const bool    unlock_self = apply_pins(w, n);
+    uint64_t wanted = 0;
+    for (size_t i = 0; i < n; i++) {
+        btn_pin_take(&wanted, w[i].gpio, w[i].pull);
+    }
+    const bool    unlock_self = btn_pins_settle(wanted);
     const int64_t now         = esp_timer_get_time();
     bool          placed[CONFIG_ZBC_MAX_BUTTONS] = { false };
 

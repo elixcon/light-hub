@@ -13,34 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-/* From btn_gesture.h - what the machines are written against. */
-#define BTN_DEBOUNCE_US  (30 * 1000)
-#define BTN_LONG_US     (600 * 1000)
-#define BTN_DOUBLE_US   (300 * 1000)
-#define BTN_REPEAT_US  (1000 * 1000)
-
-typedef enum {
-    ZBC_EMIT_NONE = 0,
-    ZBC_EMIT_SHORT,
-    ZBC_EMIT_LONG,
-    ZBC_EMIT_LONG_REPEAT,
-    ZBC_EMIT_LONG_RELEASE,
-    ZBC_EMIT_DOUBLE,
-    ZBC_EMIT_TRIPLE,
-} zbc_btn_emit_t;
-
-typedef struct {
-    uint8_t raw;
-    uint8_t stable;
-    uint8_t swallow;
-    uint8_t pending_short;
-    int64_t raw_since;
-    int64_t pressed_at;
-    int64_t released_at;
-    uint8_t long_fired;
-    int64_t next_repeat;
-    uint8_t primed;
-} zbc_btn_fsm_t;
+#include "../main/btn_gesture.h"
 
 #include "btnstep.inc"
 

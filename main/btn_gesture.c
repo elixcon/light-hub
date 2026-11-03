@@ -1,7 +1,11 @@
 #include "btn_gesture.h"
 
+#include "driver/gpio.h"
+#include "esp_log.h"
 #include "sdkconfig.h"
 #include "soc/soc_caps.h"
+
+#include "button_db.h"
 
 /* ------------------------------------------------------------ the gesture machine */
 
@@ -143,4 +147,64 @@ const char *buttons_pin_problem(int gpio)
     }
 #endif
     return NULL;
+}
+
+/* ------------------------------------------------------------------- the pins */
+
+static const char *TAG = "btn_gesture";
+
+/* Pins we configured, so one that stops being used is handed back rather than
+ * left pulled in whatever direction it happened to have. */
+static uint64_t s_owned;
+
+bool btn_pin_take(uint64_t *wanted, int pin, uint8_t pull)
+{
+    if (pin < 0 || pin >= SOC_GPIO_PIN_COUNT) {
+        return true;
+    }
+    const gpio_config_t io = {
+        .pin_bit_mask = 1ULL << pin,
+        .mode         = GPIO_MODE_INPUT,
+        .pull_up_en   = pull == ZBC_PULL_UP   ? GPIO_PULLUP_ENABLE   : GPIO_PULLUP_DISABLE,
+        .pull_down_en = pull == ZBC_PULL_DOWN ? GPIO_PULLDOWN_ENABLE : GPIO_PULLDOWN_DISABLE,
+        .intr_type    = GPIO_INTR_DISABLE,
+    };
+    const esp_err_t err = gpio_config(&io);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "GPIO %d refused by the driver (0x%x)", pin, err);
+        return false;
+    }
+    *wanted |= 1ULL << pin;
+    s_owned |= 1ULL << pin;
+    return true;
+}
+
+bool btn_pins_settle(uint64_t wanted)
+{
+    for (int pin = 0; pin < SOC_GPIO_PIN_COUNT; pin++) {
+        const uint64_t bit = 1ULL << pin;
+        if ((s_owned & bit) && !(wanted & bit)) {
+            gpio_reset_pin(pin);
+            s_owned &= ~bit;
+        }
+    }
+
+    /* The failsafe pin is watched whether or not anybody made a button of it, so
+     * a bare board can always be let back into. A button on that pin wins: its
+     * wiring is the truth, and its own slot counts the presses. Not recorded in
+     * s_owned, so the loop above never hands it back. */
+#if CONFIG_ZBC_UNLOCK_GPIO >= 0
+    const int up = CONFIG_ZBC_UNLOCK_GPIO;
+    if (up < SOC_GPIO_PIN_COUNT && !(wanted & (1ULL << up))) {
+        const gpio_config_t io = {
+            .pin_bit_mask = 1ULL << up,
+            .mode         = GPIO_MODE_INPUT,
+            .pull_up_en   = GPIO_PULLUP_ENABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type    = GPIO_INTR_DISABLE,
+        };
+        return gpio_config(&io) == ESP_OK;
+    }
+#endif
+    return false;
 }

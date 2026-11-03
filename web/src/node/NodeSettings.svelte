@@ -3,11 +3,11 @@
 	import { Button } from "$lib/components/ui/button";
 	import { Input } from "$lib/components/ui/input";
 	import { Label } from "$lib/components/ui/label";
-	import { Progress } from "$lib/components/ui/progress";
 	import Upload from "@lucide/svelte/icons/upload";
+	import OtaProgress from "$lib/components/OtaProgress.svelte";
 	import WifiForm from "$lib/components/WifiForm.svelte";
 	import { app, refresh } from "$lib/state.svelte.ts";
-	import { api, post } from "$lib/api.ts";
+	import { del, post } from "$lib/api.ts";
 	import { toast } from "$lib/toast.svelte.ts";
 	import { confirm } from "$lib/confirm.svelte.ts";
 	import { ota, uploadFirmware } from "$lib/ota.svelte.ts";
@@ -18,6 +18,10 @@
 	let named = false;
 	$effect(() => { if (s && !named) { name = s.name; named = true; } });
 	let fileInput: HTMLInputElement;
+	/* The form scans when it appears, which holds up the page's answers for about five
+	 * seconds. On a network already, that waits until somebody wants another one, and
+	 * nothing is shown until the status says which it is. */
+	let changing = $state(false);
 
 	async function rename() {
 		if (!name.trim() || name === s?.name) return;
@@ -44,7 +48,7 @@
 			? "It goes back to Zigbee alone, and this page goes away. The next time the hub asks it to open Wi-Fi, it opens its setup hotspot instead."
 			: "It restarts into its setup hotspot, and this page goes away.";
 		if (!(await confirm(`Forget the Wi-Fi network ${s?.wifi?.ssid ?? ""}? ${after}`, { confirmLabel: "Forget network" }))) return;
-		try { await api("/api/wifi", { method: "DELETE" }); toast("Network forgotten, restarting"); }
+		try { await del("/api/wifi"); toast("Network forgotten, restarting"); }
 		catch (err: any) { toast(err.message); }
 	}
 	async function reset() {
@@ -89,8 +93,14 @@
 <Card.Root class="mt-4">
 	<Card.Header><Card.Title>Wi-Fi</Card.Title><Card.Description>Used only while configuring: normally this node has Wi-Fi off. Saving a network restarts it onto that one.</Card.Description></Card.Header>
 	<Card.Content class="flex flex-col gap-3">
-		<WifiForm />
-		{#if s?.wifi?.mode === "sta"}<div><Button variant="outline" onclick={forgetWifi}>Forget this network</Button></div>{/if}
+		{#if changing || s?.wifi?.mode === "ap"}
+			<WifiForm />
+		{:else if s}
+			<div class="flex flex-wrap gap-2">
+				<Button variant="outline" onclick={() => (changing = true)}>Change network</Button>
+				<Button variant="outline" onclick={forgetWifi}>Forget this network</Button>
+			</div>
+		{/if}
 	</Card.Content>
 </Card.Root>
 
@@ -102,14 +112,7 @@
 			<Button variant="outline" disabled={ota.busy || s?.ota?.updater_valid === false} onclick={() => fileInput.click()}><Upload /> Update firmware</Button>
 			<Button variant="ghost" onclick={restart}>Restart</Button>
 		</div>
-		{#if ota.shown}
-			{#if ota.fraction === null}
-				<div class="bg-muted h-2 w-full overflow-hidden rounded-full"><div class="bg-primary h-full w-1/3 animate-pulse rounded-full"></div></div>
-			{:else}
-				<Progress value={ota.fraction * 100} class="h-2" />
-			{/if}
-			<div class="text-muted-foreground text-xs">{ota.message}</div>
-		{/if}
+		<OtaProgress />
 	</Card.Content>
 </Card.Root>
 

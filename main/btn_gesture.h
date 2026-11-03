@@ -74,7 +74,15 @@ zbc_btn_emit_t btn_switch_step(zbc_btn_fsm_t *st, int level, bool inverted, int6
  * is wired. -1 means "no pin yet" and is allowed. */
 const char *buttons_pin_problem(int gpio);
 
-/* >>> host-test region: unlock <<< */
+/* One pass of setting up a board's button pins, the same in both firmwares. These two
+ * touch the driver, unlike the rest of this file. `wanted` starts each pass at 0.
+ * btn_pin_take makes a pin an input and notes it there; false when the driver refuses
+ * it, and a pin that does not exist is passed over. btn_pins_settle then hands back
+ * whatever an earlier pass took and this one did not, and returns whether the failsafe
+ * pin is left to the sampler to watch on its own. */
+bool btn_pin_take(uint64_t *wanted, int pin, uint8_t pull);
+bool btn_pins_settle(uint64_t wanted);
+
 
 /* Five presses, each 0.5-2.5 s after the one before, open the web UI to everyone
  * for a couple of minutes - see auth.c. Keep going at the same pace and the tenth
@@ -154,8 +162,6 @@ static inline zbc_unlock_t unlock_level(zbc_unlock_fsm_t *st, int level, bool in
     }
     return UNLOCK_NONE;
 }
-
-/* >>> end host-test region: unlock <<< */
 
 #ifdef __cplusplus
 }

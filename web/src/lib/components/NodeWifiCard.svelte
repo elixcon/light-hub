@@ -35,7 +35,7 @@
 			{:else if wifi === "joining"}
 				<div class="text-muted-foreground">Joining its Wi-Fi network…</div>
 			{:else if wifi === "hotspot"}
-				<div>It has no Wi-Fi network stored, so it opened its setup hotspot. Connect to it from a phone. It is off Zigbee until the hotspot closes.</div>
+				<div>It opened its setup hotspot. Connect to it from a phone. It is off Zigbee until the hotspot closes.</div>
 			{:else if asked}
 				<div class="text-muted-foreground">Restarting to open Wi-Fi…</div>
 			{:else}

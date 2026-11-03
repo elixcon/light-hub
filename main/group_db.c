@@ -330,7 +330,8 @@ void group_db_note_level(uint16_t id, int pct)
     GDB_UNLOCK();
 }
 
-void group_db_forget_device(const uint8_t ieee[ZBC_IEEE_LEN])
+/* Out of every room: one endpoint of a device, or with ep 0 all of it. */
+static void forget_members(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep)
 {
     bool changed = false;
     GDB_LOCK();
@@ -339,7 +340,7 @@ void group_db_forget_device(const uint8_t ieee[ZBC_IEEE_LEN])
             continue;
         }
         for (int m = s_groups[i].member_count - 1; m >= 0; m--) {
-            if (memcmp(s_groups[i].members[m].ieee, ieee, ZBC_IEEE_LEN) == 0) {
+            if ((!ep || s_groups[i].members[m].ep == ep) && memcmp(s_groups[i].members[m].ieee, ieee, ZBC_IEEE_LEN) == 0) {
                 drop_member_locked(&s_groups[i], m);
                 changed = true;
             }
@@ -351,25 +352,14 @@ void group_db_forget_device(const uint8_t ieee[ZBC_IEEE_LEN])
     GDB_UNLOCK();
 }
 
+void group_db_forget_device(const uint8_t ieee[ZBC_IEEE_LEN])
+{
+    forget_members(ieee, 0);
+}
+
 void group_db_forget_endpoint(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep)
 {
-    bool changed = false;
-    GDB_LOCK();
-    for (int i = 0; i < CONFIG_ZBC_MAX_GROUPS; i++) {
-        if (!s_groups[i].in_use) {
-            continue;
-        }
-        for (int m = s_groups[i].member_count - 1; m >= 0; m--) {
-            if (s_groups[i].members[m].ep == ep && memcmp(s_groups[i].members[m].ieee, ieee, ZBC_IEEE_LEN) == 0) {
-                drop_member_locked(&s_groups[i], m);
-                changed = true;
-            }
-        }
-    }
-    if (changed) {
-        gdb_save_locked();
-    }
-    GDB_UNLOCK();
+    forget_members(ieee, ep);
 }
 
 esp_err_t group_db_erase(void)

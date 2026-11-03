@@ -1,4 +1,5 @@
 <script lang="ts">
+	import StatusChips from "$lib/components/StatusChips.svelte";
 	import { app } from "$lib/state.svelte.ts";
 	import { hex4, plural } from "$lib/format.ts";
 
@@ -24,9 +25,5 @@
 
 <header class="pr-12 pt-[env(safe-area-inset-top)]">
 	<h1 class="text-2xl font-semibold tracking-tight">{app.name}</h1>
-	<div class="mt-1.5 flex flex-wrap gap-1.5 text-xs">
-		{#each chips as c, i (i)}
-			<span class="bg-card dark:bg-background/80 rounded-full px-2 py-0.5 {c.bad ? 'text-destructive font-medium' : 'text-primary'}">{c.text}</span>
-		{/each}
-	</div>
+	<StatusChips {chips} />
 </header>

@@ -6,7 +6,7 @@
  * easily - a hold, a bouncing contact, a Hue button's stream of Steps - opens
  * the web UI to the whole network. Neither shows in a serial log.
  *
- * unlock.inc is extracted from main/btn_gesture.h by the Makefile, never copied.
+ * The header has no ESP-IDF in it, so it is included whole.
  *
  *   make -C test
  */
@@ -15,10 +15,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* From btn_gesture.h - the only thing the region is written against. */
-#define BTN_DEBOUNCE_US (30 * 1000)
-
-#include "unlock.inc"
+#include "../main/btn_gesture.h"
 
 static int failures;
 static int checks;

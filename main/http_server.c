@@ -344,22 +344,7 @@ static void stream_status(json_stream_t *js, bool heap_tables)
     json_stream_member(js, &first, "wled", wled_status_json());
 #endif
     json_stream_member(js, &first, "device_count", cJSON_CreateNumber(device_db_count()));
-    json_stream_member(js, &first, "uptime_s",
-                       cJSON_CreateNumber((double)(esp_timer_get_time() / 1000000)));
-    /* Why this boot happened, so "the board seems to have crashed" can be told
-     * from a power cut - and where the last crash was, since there is no core
-     * dump partition and the panic handler prints only to the serial port. */
-    json_stream_member(js, &first, "reset_reason",
-                       cJSON_CreateString(crash_log_reset_reason_name(esp_reset_reason())));
-    json_stream_member(js, &first, "last_crash", crash_log_json());
-    json_stream_member(js, &first, "version",
-                       cJSON_CreateString(esp_app_get_description()->version));
-    /* Unique per image, where `version` is only the git description - two
-     * builds from one uncommitted tree share it. The UI reloads itself when this
-     * changes, so it has to change whenever the firmware does. */
-    char build[17];
-    esp_app_get_elf_sha256(build, sizeof(build));
-    json_stream_member(js, &first, "build", cJSON_CreateString(build));
+    stream_firmware_status(js, &first);
     cJSON *ota = ota_json();
     /* "old" until the updater has rewritten the partition table with room for
      * Zigbee device firmware - see partitions.csv. */
@@ -1382,8 +1367,6 @@ static const char *event_name(uint8_t src, int ev)
     }
     return EVENT_NAMES[ev];
 }
-static const char *const PULL_NAMES[]   = { "none", "up", "down" };
-static const char *const INPUT_NAMES[]  = { "button", "switch" };
 
 static cJSON *button_to_json(const zbc_button_t *b)
 {
@@ -1406,14 +1389,7 @@ static cJSON *button_to_json(const zbc_button_t *b)
         cJSON_AddNullToObject(obj, "ep");
         cJSON_AddNullToObject(obj, "key");
     }
-    if (b->gpio < 0) {
-        cJSON_AddNullToObject(obj, "gpio");
-    } else {
-        cJSON_AddNumberToObject(obj, "gpio", b->gpio);
-    }
-    cJSON_AddBoolToObject(obj, "inverted", b->inverted);
-    cJSON_AddStringToObject(obj, "pull", PULL_NAMES[b->pull <= ZBC_PULL_DOWN ? b->pull : 0]);
-    cJSON_AddStringToObject(obj, "input", INPUT_NAMES[b->input < ZBC_INPUT_COUNT ? b->input : 0]);
+    button_wiring_to_json(obj, b);
 
     /* The live reading: how a wiring mistake shows on the page. */
     bool pressed = false;
@@ -1785,38 +1761,9 @@ static const char *button_from_json(const cJSON *json, zbc_button_t *out, uint16
         /* The pin fields are meaningless now, and valid_button says so. */
         out->gpio = -1;
     } else {
-        const cJSON *gpio = cJSON_GetObjectItem(json, "gpio");
-        if (cJSON_IsNull(gpio)) {
-            out->gpio = -1;
-        } else if (cJSON_IsNumber(gpio)) {
-            const int pin = gpio->valueint;
-            const char *why = button_pin_problem(pin);
-            if (why) {
-                return why;
-            }
-            out->gpio = (int8_t)pin;
-        }
-
-        const cJSON *inverted = cJSON_GetObjectItem(json, "inverted");
-        if (cJSON_IsBool(inverted)) {
-            out->inverted = cJSON_IsTrue(inverted);
-        }
-
-        const cJSON *pull = cJSON_GetObjectItem(json, "pull");
-        if (pull) {
-            const int p = name_index(PULL_NAMES, 3, pull);
-            if (p < 0) {
-                return "pull must be none, up or down";
-            }
-            out->pull = (uint8_t)p;
-        }
-        const cJSON *input = cJSON_GetObjectItem(json, "input");
-        if (input) {
-            const int k = name_index(INPUT_NAMES, ZBC_INPUT_COUNT, input);
-            if (k < 0) {
-                return "input must be button or switch";
-            }
-            out->input = (uint8_t)k;
+        const char *why = button_wiring_from_json(json, out);
+        if (why) {
+            return why;
         }
     }
 
@@ -2195,10 +2142,7 @@ static esp_err_t state_get(httpd_req_t *req)
      * their own - the pairing countdown, the Wi-Fi signal, the failsafe - and
      * leave the tables out. This is most polls, and it is what turns a 2 s
      * poll from a rebuild of every table into a few hundred bytes. */
-    char query[64], seen[24];
-    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
-        httpd_query_key_value(query, "rev", seen, sizeof(seen)) == ESP_OK &&
-        strcmp(seen, rev) == 0) {
+    if (rev_unchanged(req, rev)) {
         /* Streamed like the full answer: the status is most of this body, and
          * the access state is read from the request headers before the first
          * chunk goes out - see json_stream_t. */
@@ -3453,23 +3397,10 @@ static esp_err_t restart_post(httpd_req_t *req)
  * back on the network instead of in the setup portal. */
 static esp_err_t factory_reset_post(httpd_req_t *req)
 {
-    bool   zigbee_only = false;
-    cJSON *json        = NULL;
-    /* A body that could not be read has been answered, and must not fall through
-     * to the default - which is the reset that erases everything. */
-    if (req->content_len > 0 && !(json = read_json_body(req))) {
-        return ESP_FAIL;
-    }
-    if (json) {
-        cJSON     *scope = cJSON_GetObjectItem(json, "scope");
-        const bool known = !scope || (cJSON_IsString(scope) && (strcmp(scope->valuestring, "all") == 0 ||
-                                                                strcmp(scope->valuestring, "zigbee") == 0));
-        zigbee_only      = known && scope && strcmp(scope->valuestring, "zigbee") == 0;
-        cJSON_Delete(json);
-        /* A scope this build does not know is not read as "everything". */
-        if (!known) {
-            return send_error(req, "400 Bad Request", "scope must be all or zigbee");
-        }
+    bool      zigbee_only;
+    esp_err_t answered;
+    if (!reset_scope_from_body(req, &zigbee_only, &answered)) {
+        return answered;
     }
     /* Leaving the network needs the stack, which the setup hotspot never starts
      * (and the fallback AP stops): refused before anything is erased, rather than

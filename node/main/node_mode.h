@@ -33,11 +33,11 @@ node_mode_t node_mode_decide(bool paired, node_ask_t ask, bool has_network);
 /* Once joined from the unpaired state, Wi-Fi stays for whoever is using the page. */
 #define NODE_JOINED_IDLE_US (2 * 60 * 1000000LL)
 
-/* Whether Wi-Fi's time is up, so this boot should restart into the next mode. All
- * times are in microseconds since boot; last_use is the last HTTP request or the
- * start of the mode, and joined_at is 0 while unjoined. */
-bool node_window_over(node_mode_t mode, int64_t now, int64_t last_use, int64_t joined_at,
-                      uint8_t minutes);
+/* When Wi-Fi's time is up, so this boot should restart into the next mode. All times
+ * are in microseconds since boot; last_use is the last HTTP request or the start of
+ * the mode, and joined_at is 0 while unjoined. */
+#define NODE_WINDOW_NEVER INT64_MAX
+int64_t node_window_end(node_mode_t mode, int64_t last_use, int64_t joined_at, uint8_t minutes);
 
 /* The weakest parent a restart's rejoin will accept, as an LQI, by how many rejoins
  * have found nobody that strong. 0 once it has run out: whoever answers, as the stack

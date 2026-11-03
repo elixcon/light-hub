@@ -78,8 +78,8 @@ were, and the hub shows a link to its page. The modes are:
 | A wired button pressed ten times, 0.5-2.5 s apart | setup hotspot | off |
 
 Wi-Fi closes after 15 minutes without a request, or at once with **Close Wi-Fi now** on the page. The exception is
-ten presses on a node with a network stored: that hotspot closes after 10 minutes, used or not, and waits a minute at
-a time while a device is on it, up to 30 minutes. Ten presses is the way back in when the hub is gone. Five open the node's page to everyone for two minutes, as on a hub. Neither
+ten presses on a node with a network stored: that hotspot closes after 10 minutes, used or not. While somebody is
+using its page it waits a minute at a time, up to 30 minutes. Ten presses is the way back in when the hub is gone. Five open the node's page to everyone for two minutes, as on a hub. Neither
 does anything to the hub's own lock, which a node's buttons cannot open.
 
 ## Giving it away
@@ -140,6 +140,10 @@ Open:
   then online from about 4 minutes in until the node came back at 10 minutes. The link quality it listed changed at the
   same moment, which fits a neighbour scan listing the node, but that was not confirmed. `node_wifi` said `hotspot`
   throughout, so read that rather than `online`.
+- **A hub's warm off leaves a node's light parked at about 1 %.** The hub parks any lamp at a low level before an off that
+  has to change its colour, and remembers the real level for its own next On. A node stores that low level as what it
+  comes back to, so its own page's On came back at 1 %. The local fallback toggles to the same stored level, which was
+  read from the code, not measured.
 - **Current draw** has not been measured.
 - **A plain restart can lose a brightness.** A light set to start off saves no level, as on a hub, so a restart that is
   not a change of mode, such as storing a Wi-Fi network, takes it back to the last one saved. The hub reads what it finds

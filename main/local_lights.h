@@ -67,6 +67,10 @@ esp_err_t local_light_fade_in(uint16_t id, uint8_t level, uint16_t transition_ds
  * back to. Over transition_ds - the fade setting - where a Zigbee lamp's effect
  * is a fixed 0.8 s; 0 means that 0.8 s. */
 esp_err_t local_light_fade_off(uint16_t id, uint16_t transition_ds);
+/* A plain On and Off, whatever kind of light it is, as a lamp takes them: On comes back
+ * to the level it remembers, and Off keeps it. */
+esp_err_t local_light_on(uint16_t id, uint16_t transition_ds);
+esp_err_t local_light_off(uint16_t id, uint16_t transition_ds);
 /* A switch-on (off false) or a fading switch-off as ESPHome fades: the brightness
  * asked of the light moves on smootherstep over transition_ds, and `level` and
  * `mireds` (NULL: the colour is left alone) are what the light's curves give at

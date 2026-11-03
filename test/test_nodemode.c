@@ -62,7 +62,11 @@ int main(void)
         CHECK(node_mode_decide(false, (node_ask_t)ask, false) == NODE_MODE_UNPAIRED);
     }
 
+#define node_window_over(mode, now, last_use, joined_at, minutes) \
+    ((now) >= node_window_end((mode), (last_use), (joined_at), (minutes)))
+
     /* Zigbee alone has no window to close. */
+    CHECK(node_window_end(NODE_MODE_ZIGBEE, 0, 0, 0) == NODE_WINDOW_NEVER);
     CHECK(!node_window_over(NODE_MODE_ZIGBEE, 1000 * MIN, 0, 0, 0));
 
     /* Asked for Wi-Fi: until that many minutes without a request. */

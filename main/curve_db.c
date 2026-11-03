@@ -585,12 +585,13 @@ void curve_db_note_color_sent(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep,
     CDB_UNLOCK();
 }
 
-void curve_db_forget_device(const uint8_t ieee[ZBC_IEEE_LEN])
+/* One endpoint of a device, or with ep 0 all of it. */
+static void forget_curves(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep)
 {
     bool changed = false;
     CDB_LOCK();
     for (int i = 0; i < CONFIG_ZBC_MAX_CURVES; i++) {
-        if (s_curves[i].in_use && memcmp(s_curves[i].ieee, ieee, ZBC_IEEE_LEN) == 0) {
+        if (s_curves[i].in_use && (!ep || s_curves[i].ep == ep) && memcmp(s_curves[i].ieee, ieee, ZBC_IEEE_LEN) == 0) {
             memset(&s_curves[i], 0, sizeof(s_curves[i]));
             changed = true;
         }
@@ -601,20 +602,14 @@ void curve_db_forget_device(const uint8_t ieee[ZBC_IEEE_LEN])
     CDB_UNLOCK();
 }
 
+void curve_db_forget_device(const uint8_t ieee[ZBC_IEEE_LEN])
+{
+    forget_curves(ieee, 0);
+}
+
 void curve_db_forget_endpoint(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep)
 {
-    bool changed = false;
-    CDB_LOCK();
-    for (int i = 0; i < CONFIG_ZBC_MAX_CURVES; i++) {
-        if (s_curves[i].in_use && s_curves[i].ep == ep && memcmp(s_curves[i].ieee, ieee, ZBC_IEEE_LEN) == 0) {
-            memset(&s_curves[i], 0, sizeof(s_curves[i]));
-            changed = true;
-        }
-    }
-    if (changed) {
-        cdb_save_locked();
-    }
-    CDB_UNLOCK();
+    forget_curves(ieee, ep);
 }
 
 esp_err_t curve_db_erase(void)

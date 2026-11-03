@@ -146,6 +146,11 @@ int main(void)
     CHECK(node_fb_result(&fb, p.seq, false, &key));
     CHECK(key == 7);
 
+    /* Everything above has had its verdict: nothing left for the backstop to watch. */
+    CHECK(!node_fb_waiting(&fb));
+    (void)node_fb_press(&fb, 1, NODE_BTN_CLICK, false, 0);
+    CHECK(node_fb_waiting(&fb));
+
     if (failures) {
         printf("%d of %d checks FAILED\n", failures, checks);
         return 1;

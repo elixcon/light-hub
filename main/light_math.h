@@ -23,6 +23,21 @@ extern "C" {
  * the endpoint it has on its own device is kept in mlight_db, not in its address. */
 #define ZBC_LIGHT_EP 1
 
+/* >>> host-test region: levels <<< */
+/* A Zigbee level, 1-254, as a percentage people see, and back. */
+static inline int zbc_level_to_pct(int level)
+{
+    int pct = (level * 100 + 126) / 254;
+    return pct < 1 ? 1 : (pct > 100 ? 100 : pct);
+}
+
+static inline uint8_t zbc_pct_to_level(int pct)
+{
+    int level = (pct * 254 + 50) / 100;
+    return (uint8_t)(level < 1 ? 1 : (level > 254 ? 254 : level));
+}
+/* >>> end host-test region: levels <<< */
+
 /* What a wired light does when the coordinator starts. */
 typedef enum {
     ZBC_LIGHT_BOOT_OFF = 0,

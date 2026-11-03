@@ -1799,13 +1799,9 @@ esp_err_t local_light_set(uint16_t id, zb_onoff_cmd_t cmd)
     return ESP_OK;
 }
 
-esp_err_t local_light_set_level(uint16_t id, uint8_t level, uint16_t transition_ds)
+/* With the lock held, which this gives back. */
+static esp_err_t set_level_locked(live_light_t *l, uint8_t level, uint16_t transition_ds)
 {
-    live_light_t   *l;
-    const esp_err_t err = lock_light(id, NEED_LEVEL, &l);
-    if (err != ESP_OK) {
-        return err;
-    }
     if (level > 0 && s_held) {
         xSemaphoreGive(s_lock);
         return ESP_ERR_NOT_ALLOWED;
@@ -1829,6 +1825,44 @@ esp_err_t local_light_set_level(uint16_t id, uint8_t level, uint16_t transition_
     }
     unlock_changed(l, now);
     return ESP_OK;
+}
+
+esp_err_t local_light_set_level(uint16_t id, uint8_t level, uint16_t transition_ds)
+{
+    live_light_t   *l;
+    const esp_err_t err = lock_light(id, NEED_LEVEL, &l);
+    if (err != ESP_OK) {
+        return err;
+    }
+    return set_level_locked(l, level, transition_ds);
+}
+
+esp_err_t local_light_on(uint16_t id, uint16_t transition_ds)
+{
+    live_light_t   *l;
+    const esp_err_t err = lock_light(id, NEED_SWITCH, &l);
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (is_pwm(l->kind) && transition_ds) {
+        /* Not fade_in, which starts from black: an On that finds a fade still running
+         * carries on from where the light is. */
+        return set_level_locked(l, l->remembered, transition_ds);
+    }
+    xSemaphoreGive(s_lock);
+    return local_light_set(id, ZB_ONOFF_ON);
+}
+
+esp_err_t local_light_off(uint16_t id, uint16_t transition_ds)
+{
+    live_light_t   *l;
+    const esp_err_t err = lock_light(id, NEED_SWITCH, &l);
+    if (err != ESP_OK) {
+        return err;
+    }
+    const bool dims = is_pwm(l->kind);
+    xSemaphoreGive(s_lock);
+    return dims ? local_light_fade_off(id, transition_ds) : local_light_set(id, ZB_ONOFF_OFF);
 }
 
 esp_err_t local_light_fade_in(uint16_t id, uint8_t level, uint16_t transition_ds)

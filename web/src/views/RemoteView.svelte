@@ -13,6 +13,7 @@
 	import ButtonRow from "$lib/components/ButtonRow.svelte";
 	import FirmwareRow from "$lib/components/FirmwareRow.svelte";
 	import NodeWifiCard from "$lib/components/NodeWifiCard.svelte";
+	import { isNode } from "$lib/utils.ts";
 	import { data, refresh } from "$lib/state.svelte.ts";
 	import { navigate } from "$lib/router.svelte.ts";
 	import { post, patch, del } from "$lib/api.ts";
@@ -189,7 +190,7 @@
 	</Card.Root>
 
 	{#if c.device?.ota}
-		{#if !c.device.endpoints.some((x) => x.features.includes("node"))}
+		{#if !isNode(c.device)}
 		<Card.Root class="mt-4">
 			<Card.Content><FirmwareRow device={c.device} /></Card.Content>
 		</Card.Root>

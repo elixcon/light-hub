@@ -52,26 +52,36 @@ void node_touch(void)
     s_last_use = esp_timer_get_time();
 }
 
-int node_window_left_s(void)
+static int64_t window_end(void)
 {
-    if (s_mode == NODE_MODE_ZIGBEE) {
-        return -1;
-    }
-    /* Asked of the rule rather than worked out twice: the first second it says over. */
-    const int64_t now = esp_timer_get_time();
-    for (int s = 0; s <= 3600; s += 5) {
-        if (node_window_over(s_mode, now + s * 1000000LL, s_last_use, node_zb_joined_at(), s_minutes)) {
-            return s;
-        }
-    }
-    return -1;
+    return node_window_end(s_mode, s_last_use, node_zb_joined_at(), s_minutes);
 }
 
-void node_restart_into(node_ask_t ask, uint8_t minutes)
+int node_window_left_s(void)
+{
+    const int64_t end = window_end();
+    if (end == NODE_WINDOW_NEVER) {
+        return -1;
+    }
+    const int64_t left = (end - esp_timer_get_time()) / 1000000;
+    int           s    = left > 0 ? (int)left : 0;
+    /* Ten presses with a network stored: the hotspot's own time may run out first. */
+    wifi_mgr_status_t w;
+    wifi_manager_get_status(&w);
+    return w.temporary && w.returns_in_s < s ? w.returns_in_s : s;
+}
+
+/* Whichever mode comes next, every light comes back as it is now. */
+static void save_for_restart(node_ask_t ask, uint8_t minutes)
 {
     local_lights_save_all();
     node_store_set_resume();
     node_store_set_ask(ask, minutes);
+}
+
+void node_restart_into(node_ask_t ask, uint8_t minutes)
+{
+    save_for_restart(ask, minutes);
     if (ask == NODE_ASK_HOTSPOT) {
         /* Its own one-shot, so it opens the hotspot whatever network is stored. Does
          * not return. */
@@ -88,7 +98,7 @@ static void window_task(void *arg)
     uint8_t last_state = 0xFF;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(1000));
-        if (node_window_over(s_mode, esp_timer_get_time(), s_last_use, node_zb_joined_at(), s_minutes)) {
+        if (esp_timer_get_time() >= window_end()) {
             ESP_LOGW(TAG, "Wi-Fi's time is up: back to Zigbee alone");
             node_restart_into(NODE_ASK_NONE, 0);
         }
@@ -122,9 +132,7 @@ bool ota_extra_boot_good(void)
 /* A firmware upload comes back on Wi-Fi, so the page it came from sees it finish. */
 void ota_before_handoff(void)
 {
-    local_lights_save_all();
-    node_store_set_resume();
-    node_store_set_ask(NODE_ASK_WIFI, 0);
+    save_for_restart(NODE_ASK_WIFI, 0);
 }
 
 void app_main(void)
@@ -154,7 +162,6 @@ void app_main(void)
 
     ota_set_own_table(own_table_start, (size_t)(own_table_end - own_table_start));
 
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
     ESP_ERROR_CHECK(settings_init());
     ESP_ERROR_CHECK(light_db_init());
     ESP_ERROR_CHECK(button_db_init());
@@ -174,6 +181,7 @@ void app_main(void)
 
     const bool wifi = s_mode != NODE_MODE_ZIGBEE;
     if (wifi) {
+        ESP_ERROR_CHECK(esp_event_loop_create_default());   /* only Wi-Fi posts to it */
         ESP_ERROR_CHECK(wifi_manager_start());
         wifi_manager_set_modem_sleep(settings_wifi_sleep());
         ESP_ERROR_CHECK(node_http_start());
@@ -191,5 +199,5 @@ void app_main(void)
         ESP_LOGW(TAG, "Setup hotspot is up: Zigbee stays off");
         return;
     }
-    ESP_ERROR_CHECK(node_zb_start(wifi));
+    ESP_ERROR_CHECK(node_zb_start());
 }

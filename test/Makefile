@@ -46,13 +46,13 @@ SRC_LL     = ../main/local_lights.c
 SRC_UPD    = ../updater/main/updater.c
 SRC_CONV   = ../updater/main/convert.c
 
-TESTS    = test_nodemode test_fallback test_nodezcl test_variant test_gate test_settle test_sweep test_zremote test_remote test_matter test_slug \
+TESTS    = test_framedup test_nodemode test_fallback test_nodezcl test_variant test_gate test_settle test_sweep test_zremote test_remote test_matter test_slug \
            test_unlock test_btnstep test_authkey test_switchpoint test_prewarm test_lightaddr test_cwww test_ramp test_updater test_convert \
            test_sun test_tz test_ntc test_alstate test_linkgap test_reach test_zbota test_fadein \
            test_mctl_gate test_mctl_disc test_clause test_parent test_crash test_ent test_stream test_wled \
            test_config_backup test_idfver test_motion test_delayed test_bdbpool
 REGIONS  = gate-types gate-body settle-types settle-body sweep zremote btnstep motion delayed levels matter slug \
-           unlock authkey switchpoint prewarm fadein lightaddr cwww ramp pchip updater-decide convert-plan alstate linkgap reach zota-wake \
+           authkey switchpoint prewarm fadein lightaddr cwww ramp pchip updater-decide convert-plan alstate linkgap reach zota-wake \
            mctl-gate mctl-disc clause parent crash-scan ent-frame stream wled-parse cfg-plan idf-ver variant \
            bdb-types bdb-table
 INCS     = $(REGIONS:%=%.inc)
@@ -77,10 +77,9 @@ FROM_zremote      = $(SRC_BTN)
 FROM_btnstep      = ../main/btn_gesture.c
 FROM_motion       = $(SRC_BTN)
 FROM_delayed      = $(SRC_BTN)
-FROM_levels       = $(SRC_LIGHT)
+FROM_levels       = ../main/light_math.h
 FROM_matter       = $(SRC_MATTER)
 FROM_slug         = $(SRC_SET)
-FROM_unlock       = ../main/btn_gesture.h
 FROM_authkey      = $(SRC_AUTH)
 FROM_switchpoint  = $(SRC_LIGHT)
 FROM_prewarm      = $(SRC_LIGHT)
@@ -155,7 +154,7 @@ test_sweep:  test_sweep.c  sweep.inc bdb-types.inc
 test_clause: test_clause.c clause.inc bdb-types.inc
 	@$(CC) $(CFLAGS) -o $@ $<
 
-test_btnstep: test_btnstep.c btnstep.inc
+test_btnstep: test_btnstep.c btnstep.inc ../main/btn_gesture.h
 	@$(CC) $(CFLAGS) -o $@ $<
 
 test_zremote: test_zremote.c zremote.inc
@@ -184,7 +183,7 @@ test_reach:  test_reach.c  reach.inc
 test_parent: test_parent.c parent.inc
 	@$(CC) $(CFLAGS) -o $@ $<
 
-test_unlock: test_unlock.c unlock.inc
+test_unlock: test_unlock.c ../main/btn_gesture.h
 	@$(CC) $(CFLAGS) -o $@ $<
 
 test_authkey: test_authkey.c authkey.inc
@@ -246,6 +245,9 @@ test_tz: test_tz.c ../main/tz.c ../main/tz.h
 
 # ntc.c is a leaf as well: the NTC divider and the overheat decision.
 # The Light Node's leaf modules, compiled whole like ntc.c and sun.c.
+test_framedup: test_framedup.c ../main/frame_dup.h
+	@$(CC) $(CFLAGS) -o $@ test_framedup.c
+
 NODE_DIR = ../node/main
 test_nodemode: test_nodemode.c $(NODE_DIR)/node_mode.c $(NODE_DIR)/node_mode.h
 	@$(CC) $(CFLAGS) -I$(NODE_DIR) -o $@ test_nodemode.c $(NODE_DIR)/node_mode.c

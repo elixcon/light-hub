@@ -15,6 +15,7 @@
 #include "ezbee/zdo.h"
 #include "nvs.h"
 
+#include "frame_dup.h"
 #include "light_db.h"
 #include "local_lights.h"
 #include "node_buttons.h"
@@ -78,27 +79,21 @@ static esp_timer_handle_t s_commission_timer;
 static volatile uint8_t   s_commission_mode;
 static bool               s_sync_wanted;
 static bool               s_started;
-static bool               s_with_wifi;
 static volatile int64_t   s_joined_at;
 static uint32_t           s_endpoints_digest;
-
-static node_zb_stats_t    s_stats;
 
 static uint8_t  s_stack_floor;      /* the stack's own minimum join LQI */
 static uint8_t  s_join_floor;       /* what this boot's rejoin was held to; 0 for nothing */
 static unsigned s_rejoins_failed;
-static uint32_t s_joined_after_ms;
 
 void node_zb_stats(node_zb_stats_t *out)
 {
-    *out = s_stats;
-    out->started = s_started;
     if (s_started && esp_zigbee_lock_acquire(pdMS_TO_TICKS(200))) {
         out->joined     = ezb_bdb_dev_joined();
         out->rx_on      = ezb_get_rx_on_when_idle();
         out->join_floor = s_join_floor;
         out->rejoins_failed = (uint8_t)s_rejoins_failed;
-        out->joined_after_ms = s_joined_after_ms;
+        out->joined_after_ms = (uint32_t)(s_joined_at / 1000);
         out->short_addr = ezb_nwk_get_short_address();
         out->pan_id     = ezb_nwk_get_panid();
         out->channel    = ezb_nwk_get_current_channel();
@@ -106,13 +101,11 @@ void node_zb_stats(node_zb_stats_t *out)
         ezb_nwk_info_iterator_t it = EZB_NWK_INFO_ITERATOR_INIT;
         ezb_nwk_neighbor_info_t nb;
         while (ezb_nwk_get_next_neighbor(&it, &nb) == EZB_ERR_NONE) {
-            out->neighbours++;
             if (nb.relationship == EZB_NWK_RELATIONSHIP_PARENT) {
                 out->parent_short = nb.short_addr;
                 out->parent_lqi   = nb.lqi;
                 out->parent_rssi  = nb.rssi;
-                out->parent_type  = nb.device_type;
-                memcpy(out->parent_ieee, &nb.ieee_addr, 8);
+                break;
             }
         }
         esp_zigbee_lock_release();
@@ -157,10 +150,8 @@ static void sync_attrs(void)
         const uint8_t ep = (uint8_t)lights[i].id;
         const node_zcl_report_t r = node_zcl_report(st.on, st.level, st.comes_back_to, st.fading_out);
         esp_zigbee_lock_acquire(portMAX_DELAY);
-        if (r.has_on) {
-            bool on = r.on;
-            set_attr(ep, EZB_ZCL_CLUSTER_ID_ON_OFF, EZB_ZCL_ATTR_ON_OFF_ON_OFF_ID, &on);
-        }
+        bool on = r.on;
+        set_attr(ep, EZB_ZCL_CLUSTER_ID_ON_OFF, EZB_ZCL_ATTR_ON_OFF_ON_OFF_ID, &on);
         if (r.has_level) {
             uint8_t level = r.level;
             set_attr(ep, EZB_ZCL_CLUSTER_ID_LEVEL, EZB_ZCL_ATTR_LEVEL_CURRENT_LEVEL_ID, &level);
@@ -172,7 +163,6 @@ static void sync_attrs(void)
         }
         esp_zigbee_lock_release();
     }
-    s_stats.attr_syncs++;
 }
 
 void node_zb_state_changed(void)
@@ -212,37 +202,27 @@ static uint16_t transition_of(uint8_t ep, uint16_t asked)
 static esp_err_t run_command(const node_ev_t *ev)
 {
     const uint16_t id = ev->dst_ep;
-    zbc_light_t    light;
-    if (!light_db_get(id, &light)) {
+    if (!light_db_get(id, NULL)) {
         return ESP_ERR_NOT_FOUND;
     }
-    const bool dims = zbc_light_pwm_channels(light.kind) > 0;
     const uint16_t ds = transition_of(ev->dst_ep, ev->cmd.transition_ds);
-
-    zbc_local_state_t st = { .on = -1, .level = -1, .mireds = -1 };
-    local_light_get(id, &st);
 
     switch (ev->cmd.kind) {
     case NODE_ZCL_ON:
-        if (!dims || ds == 0) {
-            return local_light_set(id, ZB_ONOFF_ON);
-        }
-        /* Set_level rather than fade_in, which starts from black: an On that finds a fade
-         * still running should carry on from where the light is. */
-        return local_light_set_level(id, st.comes_back_to > 0 ? (uint8_t)st.comes_back_to : 254, ds);
+        return local_light_on(id, ds);
     case NODE_ZCL_OFF:
     case NODE_ZCL_OFF_EFFECT:
-        if (!dims) {
-            return local_light_set(id, ZB_ONOFF_OFF);
-        }
-        return local_light_fade_off(id, ds);
+        return local_light_off(id, ds);
     case NODE_ZCL_TOGGLE:
         return local_light_set(id, ZB_ONOFF_TOGGLE);
-    case NODE_ZCL_LEVEL:
+    case NODE_ZCL_LEVEL: {
+        zbc_local_state_t st = { .on = -1 };
+        local_light_get(id, &st);
         if (st.on <= 0 || st.fading_out) {
             return ESP_OK;   /* ZCL: without "with on/off", a lamp that is off stays so */
         }
         return local_light_set_level(id, ev->cmd.level, ds);
+    }
     case NODE_ZCL_LEVEL_ONOFF:
         return local_light_set_level(id, ev->cmd.level, ds);
     case NODE_ZCL_STOP:
@@ -276,32 +256,11 @@ static void send_default_rsp(const node_ev_t *ev, uint8_t status)
  * becomes a queue item; everything is then done on node_task. */
 static bool frame_is_duplicate(uint16_t src, const ezb_zcl_cmd_hdr_t *h)
 {
-    static struct {
-        int64_t  at;
-        uint16_t src, cluster;
-        uint8_t  ep, cmd, tsn;
-        bool     used;
-    } recent[6];
-    const int64_t now = esp_timer_get_time();
-    int oldest = 0;
-    for (int i = 0; i < (int)(sizeof(recent) / sizeof(recent[0])); i++) {
-        if (recent[i].used && recent[i].src == src && recent[i].ep == h->dst_ep &&
-            recent[i].cluster == h->cluster_id && recent[i].cmd == h->cmd_id && recent[i].tsn == h->tsn &&
-            now - recent[i].at < DUP_WINDOW_US) {
-            return true;
-        }
-        if (recent[i].at < recent[oldest].at) {
-            oldest = i;
-        }
-    }
-    recent[oldest].at = now;
-    recent[oldest].src = src;
-    recent[oldest].cluster = h->cluster_id;
-    recent[oldest].ep = h->dst_ep;
-    recent[oldest].cmd = h->cmd_id;
-    recent[oldest].tsn = h->tsn;
-    recent[oldest].used = true;
-    return false;
+    static zbc_frame_seen_t recent[6];
+    const zbc_frame_seen_t  f = { .addr = src, .cluster = h->cluster_id, .ep = h->dst_ep,
+                                  .cmd = h->cmd_id, .tsn = h->tsn, .fc = h->fc };
+    return zbc_frame_repeated(recent, (int)(sizeof(recent) / sizeof(recent[0])), f, esp_timer_get_time(),
+                              DUP_WINDOW_US);
 }
 
 /* Taken here rather than left to the stack's cluster servers, which step a level
@@ -314,7 +273,6 @@ static bool raw_frame(const ezb_zcl_raw_frame_t *raw)
     }
     const ezb_zcl_cmd_hdr_t *h = raw->header;
     const uint16_t src = h->src_addr.addr_mode == EZB_ADDR_MODE_SHORT ? h->src_addr.u.short_addr : 0xFFFF;
-    s_stats.frames++;
 
     /* The hub, and only the hub: anything on the network can address this cluster. */
     if (h->cluster_id == NODE_PROTO_CLUSTER) {
@@ -339,26 +297,28 @@ static bool raw_frame(const ezb_zcl_raw_frame_t *raw)
         return false;
     }
     if (frame_is_duplicate(src, h)) {
-        s_stats.duplicates++;
         return true;
     }
     const node_ev_t ev = {
         .type = EV_COMMAND, .dst_ep = h->dst_ep, .src_ep = h->src_ep, .tsn = h->tsn, .cmd_id = h->cmd_id,
         .want_rsp = !EZB_ZCL_CMD_FC_IS_DIS_DEFAULT_RSP(h->fc), .src = src, .cluster = h->cluster_id, .cmd = cmd,
     };
-    if (xQueueSend(s_queue, &ev, 0) != pdTRUE) {
-        s_stats.refused++;
-    }
+    xQueueSend(s_queue, &ev, 0);
     return true;
 }
 
 /* ---------------------------------------------------------------- the task */
 
+static void post_event(uint8_t type)
+{
+    const node_ev_t ev = { .type = type };
+    xQueueSend(s_queue, &ev, 0);
+}
+
 static void commission_timer_cb(void *arg)
 {
     (void)arg;
-    const node_ev_t ev = { .type = EV_COMMISSION };
-    xQueueSend(s_queue, &ev, 0);
+    post_event(EV_COMMISSION);
 }
 
 static void schedule_commission(uint8_t mode, int64_t delay_us)
@@ -388,7 +348,6 @@ static void node_task(void *arg)
             case EV_COMMISSION:
                 esp_zigbee_lock_acquire(portMAX_DELAY);
                 if (s_commission_mode == EZB_BDB_MODE_NETWORK_STEERING) {
-                    s_stats.steer_attempts++;
                     /* Set before each attempt: it goes to the parent in the association.
                      * Between attempts the receiver has nothing to hear, and left on it
                      * would hold the antenna against the setup hotspot. */
@@ -399,10 +358,7 @@ static void node_task(void *arg)
                 break;
             case EV_COMMAND: {
                 const esp_err_t err = run_command(&ev);
-                if (err == ESP_OK) {
-                    s_stats.handled++;
-                } else {
-                    s_stats.refused++;
+                if (err != ESP_OK) {
                     ESP_LOGW(TAG, "ep %d cluster 0x%04x cmd 0x%02x: %s", ev.dst_ep, ev.cluster, ev.cmd_id,
                              esp_err_to_name(err));
                 }
@@ -459,18 +415,11 @@ static void node_task(void *arg)
 
 /* ------------------------------------------------------------- the signals */
 
-static void post_event(uint8_t type)
-{
-    const node_ev_t ev = { .type = type };
-    xQueueSend(s_queue, &ev, 0);
-}
-
 static void on_network(const char *how)
 {
     ESP_LOGI(TAG, "%s: network 0x%04x, channel %d, short 0x%04x", how, ezb_nwk_get_panid(),
              ezb_nwk_get_current_channel(), ezb_nwk_get_short_address());
     s_joined_at = esp_timer_get_time();
-    s_joined_after_ms = (uint32_t)(s_joined_at / 1000);
     /* Only a restart's choice is this fussy. A rejoin the stack starts by itself has
      * lost its parent, and any parent is better than none. */
     ezb_nwk_set_min_join_lqi(s_stack_floor);
@@ -661,8 +610,9 @@ static void zb_main_task(void *arg)
         },
     };
 
-    if (s_with_wifi) {
-        /* Without this, whichever of Wi-Fi and 802.15.4 starts first keeps the antenna. */
+    if (node_mode() != NODE_MODE_ZIGBEE) {
+        /* Without this, whichever of Wi-Fi and 802.15.4 starts first keeps the antenna.
+         * With no Wi-Fi to arbitrate against, the arbiter has nothing to do. */
         ESP_ERROR_CHECK(esp_coex_wifi_i154_enable());
     }
     ESP_ERROR_CHECK(esp_zigbee_init(&config));
@@ -730,7 +680,7 @@ static esp_err_t send_to_hub(uint8_t cmd_id, uint8_t *data, uint16_t len, ezb_af
     esp_zigbee_lock_acquire(portMAX_DELAY);
     const ezb_err_t err = ezb_zcl_custom_cmd_req(&cmd);
     esp_zigbee_lock_release();
-    return err == EZB_ERR_NONE ? ESP_OK : ESP_FAIL;
+    return esp_zigbee_err_to_esp(err);
 }
 
 esp_err_t node_zb_send_button(uint8_t key, uint8_t event, uint8_t seq)
@@ -748,9 +698,8 @@ void node_zb_send_wifi_state(uint8_t state, const uint8_t ipv4[4])
     send_to_hub(NODE_CMD_WIFI_STATE, body, sizeof(body), NULL, NULL);
 }
 
-esp_err_t node_zb_start(bool with_wifi)
+esp_err_t node_zb_start(void)
 {
-    s_with_wifi = with_wifi;
     s_queue = xQueueCreate(12, sizeof(node_ev_t));
     if (!s_queue) {
         return ESP_ERR_NO_MEM;

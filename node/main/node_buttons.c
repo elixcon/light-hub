@@ -90,7 +90,10 @@ static void sample_cb(void *arg)
         const bool   used = s_slots[i].used;
         const int8_t pin  = s_slots[i].gpio;
         portEXIT_CRITICAL(&s_mux);
-        if (!used || pin < 0) {
+        if (!used) {
+            break;   /* node_buttons_reload packs them */
+        }
+        if (pin < 0) {
             continue;
         }
         const int level = gpio_get_level(pin);
@@ -115,7 +118,7 @@ static void sample_cb(void *arg)
         }
         portEXIT_CRITICAL(&s_mux);
         if (edge) {
-            zbc_state_bump();
+            node_state_page_changed();
         }
         note_unlock(u);
         const uint8_t ev = gesture_event(emit, is_sw);
@@ -155,8 +158,9 @@ static void buttons_task(void *arg)
     (void)arg;
     for (;;) {
         msg_t m;
-        /* Only to run the backstop: a verdict the stack never gives. */
-        const bool got = xQueueReceive(s_queue, &m, pdMS_TO_TICKS(1000)) == pdTRUE;
+        /* The timeout only runs the backstop: a verdict the stack never gives. */
+        const TickType_t wait = node_fb_waiting(&s_fb) ? pdMS_TO_TICKS(1000) : portMAX_DELAY;
+        const bool got = xQueueReceive(s_queue, &m, wait) == pdTRUE;
         const int64_t now = esp_timer_get_time();
         uint8_t key;
         while (node_fb_tick(&s_fb, now, &key)) {
@@ -234,14 +238,10 @@ bool node_buttons_pin_state(uint16_t id, bool *pressed, int *level)
     return found && pin >= 0;
 }
 
-/* The light a button toggles when the hub is out of reach: its first short-press rule
- * that toggles a wired light of this node. An ordinary rule, so nothing new is stored
- * and a board's other rules are simply not looked at. */
-static uint16_t fallback_light(const zbc_button_t *b)
+uint16_t node_buttons_fallback(const zbc_button_t *b)
 {
-    zbc_button_t copy = *b;
     int n = 0;
-    const zbc_btn_rule_t *r = button_db_rules(&copy, ZBC_EV_SHORT, &n);
+    const zbc_btn_rule_t *r = button_db_rules((zbc_button_t *)b, ZBC_EV_SHORT, &n);
     for (int i = 0; i < n; i++) {
         if (r[i].action == ZBC_ACT_TOGGLE && r[i].ep != 0) {
             const uint16_t id = zbc_light_id_from_ieee(r[i].ieee);
@@ -255,9 +255,7 @@ static uint16_t fallback_light(const zbc_button_t *b)
 
 void node_buttons_reload(void)
 {
-    static bool s_owned[SOC_GPIO_PIN_COUNT];
-    bool wanted[SOC_GPIO_PIN_COUNT] = { 0 };
-
+    uint64_t wanted = 0;
     uint16_t ids[CONFIG_ZBC_MAX_BUTTONS];
     const int n = (int)button_db_list_ids(ids, CONFIG_ZBC_MAX_BUTTONS);
     slot_t next[NODE_MAX_KEYS] = { 0 };
@@ -278,32 +276,14 @@ void node_buttons_reload(void)
             s->key       = b->id <= NODE_MAX_KEYS ? (uint8_t)(b->id - 1) : 0xFF;
             s->inverted  = b->inverted;
             s->is_switch = b->input == ZBC_INPUT_SWITCH;
-            s->fallback  = fallback_light(b);
-            if (b->gpio >= 0 && b->gpio < SOC_GPIO_PIN_COUNT) {
-                const gpio_config_t io = {
-                    .pin_bit_mask = 1ULL << b->gpio,
-                    .mode         = GPIO_MODE_INPUT,
-                    .pull_up_en   = b->pull == ZBC_PULL_UP ? GPIO_PULLUP_ENABLE : GPIO_PULLUP_DISABLE,
-                    .pull_down_en = b->pull == ZBC_PULL_DOWN ? GPIO_PULLDOWN_ENABLE : GPIO_PULLDOWN_DISABLE,
-                    .intr_type    = GPIO_INTR_DISABLE,
-                };
-                if (gpio_config(&io) == ESP_OK) {
-                    wanted[b->gpio] = true;
-                    s_owned[b->gpio] = true;
-                } else {
-                    ESP_LOGW(TAG, "GPIO %d refused by the driver", b->gpio);
-                    s->gpio = -1;
-                }
+            s->fallback  = node_buttons_fallback(b);
+            if (!btn_pin_take(&wanted, b->gpio, b->pull)) {
+                s->gpio = -1;
             }
         }
         free(b);
     }
-    for (int pin = 0; pin < SOC_GPIO_PIN_COUNT; pin++) {
-        if (s_owned[pin] && !wanted[pin]) {
-            gpio_reset_pin(pin);
-            s_owned[pin] = false;
-        }
-    }
+    const bool unlock_self = btn_pins_settle(wanted);
 
     for (int i = 0; i < used; i++) {
         if (next[i].key != 0xFF) {
@@ -337,20 +317,9 @@ void node_buttons_reload(void)
     portEXIT_CRITICAL(&s_mux);
 
 #if CONFIG_ZBC_UNLOCK_GPIO >= 0
-    /* Always watched, so a bare board can be let back into. */
-    const int up = CONFIG_ZBC_UNLOCK_GPIO;
-    if (up < SOC_GPIO_PIN_COUNT && !wanted[up]) {
-        const gpio_config_t io = {
-            .pin_bit_mask = 1ULL << up,
-            .mode         = GPIO_MODE_INPUT,
-            .pull_up_en   = GPIO_PULLUP_ENABLE,
-            .pull_down_en = GPIO_PULLDOWN_DISABLE,
-            .intr_type    = GPIO_INTR_DISABLE,
-        };
-        s_unlock_self = gpio_config(&io) == ESP_OK;
-    } else {
-        s_unlock_self = false;
-    }
+    s_unlock_self = unlock_self;
+#else
+    (void)unlock_self;
 #endif
 }
 

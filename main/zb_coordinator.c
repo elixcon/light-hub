@@ -14,7 +14,6 @@
 #include "esp_zigbee.h"
 #include "ezbee/aps.h"
 #if CONFIG_ZBC_WLED
-#include "node_proto.h"
 #include "ezbee/test_utils.h"   /* ezb_nwk_set_neighbor_info - see ent_keep_neighbour_locked */
 #endif
 #include "ezbee/zha.h"
@@ -22,6 +21,8 @@
 #include "ezbee/zcl/cluster/ota_upgrade.h"
 
 #include "colorspace.h"
+#include "frame_dup.h"
+#include "node_proto.h"
 #include "device_db.h"
 #include "remote.h"
 #include "settings.h"
@@ -674,6 +675,17 @@ void zb_set_endpoint_gone_handler(zb_endpoint_gone_cb_t cb)
 /* A Light Node's lights are edited on the node, so one can go, which no other lamp does.
  * An endpoint it no longer lists goes here too, with what names it, or it would sit in
  * its rooms as a lamp that never answers. */
+/* Its clusters said so when it was interrogated: an endpoint's number proves nothing. */
+static bool device_is_node(const zbc_device_t *dev)
+{
+    for (int i = 0; i < dev->ep_count; i++) {
+        if (dev->eps[i].ep == NODE_CONTROL_EP && (dev->eps[i].features & ZBC_FEAT_NODE)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void node_prune_endpoints(uint16_t saddr, const uint8_t *list, int n)
 {
     uint8_t      ieee[ZBC_IEEE_LEN];
@@ -681,11 +693,7 @@ static void node_prune_endpoints(uint16_t saddr, const uint8_t *list, int n)
     if (!ieee_of(saddr, ieee) || !device_db_get(ieee, &dev)) {
         return;
     }
-    bool node = false;
-    for (int i = 0; i < n && !node; i++) {
-        node = list[i] == NODE_CONTROL_EP;
-    }
-    if (!node) {
+    if (!device_is_node(&dev)) {
         return;
     }
     for (int e = 0; e < dev.ep_count; e++) {
@@ -2576,41 +2584,14 @@ static void log_unknown_frame(uint16_t saddr, const ezb_zcl_cmd_hdr_t *h,
  * lock. */
 #define ZBC_DUP_WINDOW_US (1000 * 1000)
 
-static struct {
-    uint16_t short_addr;
-    uint16_t cluster_id;
-    int64_t  at_us;
-    uint8_t  ep;
-    uint8_t  cmd_id;
-    uint8_t  tsn;
-    uint8_t  fc;
-    uint8_t  used;
-} s_recent_frames[8];
+static zbc_frame_seen_t s_recent_frames[8];
 
 static bool frame_is_duplicate(uint16_t saddr, const ezb_zcl_cmd_hdr_t *h)
 {
-    const int64_t now    = esp_timer_get_time();
-    int           oldest = 0;
-    for (int i = 0; i < (int)(sizeof(s_recent_frames) / sizeof(s_recent_frames[0])); i++) {
-        if (s_recent_frames[i].used && s_recent_frames[i].short_addr == saddr &&
-            s_recent_frames[i].ep == h->src_ep && s_recent_frames[i].cluster_id == h->cluster_id &&
-            s_recent_frames[i].cmd_id == h->cmd_id && s_recent_frames[i].tsn == h->tsn &&
-            s_recent_frames[i].fc == h->fc && now - s_recent_frames[i].at_us < ZBC_DUP_WINDOW_US) {
-            return true;
-        }
-        if (s_recent_frames[i].at_us < s_recent_frames[oldest].at_us) {
-            oldest = i;
-        }
-    }
-    s_recent_frames[oldest].used       = 1;
-    s_recent_frames[oldest].short_addr = saddr;
-    s_recent_frames[oldest].ep         = h->src_ep;
-    s_recent_frames[oldest].cluster_id = h->cluster_id;
-    s_recent_frames[oldest].cmd_id     = h->cmd_id;
-    s_recent_frames[oldest].tsn        = h->tsn;
-    s_recent_frames[oldest].fc         = h->fc;
-    s_recent_frames[oldest].at_us      = now;
-    return false;
+    const zbc_frame_seen_t f = { .addr = saddr, .cluster = h->cluster_id, .ep = h->src_ep,
+                                 .cmd = h->cmd_id, .tsn = h->tsn, .fc = h->fc };
+    return zbc_frame_repeated(s_recent_frames, (int)(sizeof(s_recent_frames) / sizeof(s_recent_frames[0])), f,
+                              esp_timer_get_time(), ZBC_DUP_WINDOW_US);
 }
 
 /* ------------------------------------------------------------ Light Nodes */
@@ -2631,18 +2612,26 @@ static struct {
 } s_node_wifi[ZBC_NODE_WIFI_SLOTS];
 static portMUX_TYPE s_node_wifi_mux = portMUX_INITIALIZER_UNLOCKED;
 
+static int64_t node_wifi_stale_us(uint8_t state)
+{
+    return state == NODE_WIFI_HOTSPOT ? ZBC_NODE_HOTSPOT_STALE_US : ZBC_NODE_WIFI_STALE_US;
+}
+
 static void node_wifi_note(uint16_t saddr, const uint8_t *payload, uint16_t len)
 {
     uint8_t ieee[ZBC_IEEE_LEN];
     if (!payload || len < 5 || !ieee_of(saddr, ieee)) {
         return;
     }
-    const int64_t now = esp_timer_get_time();
-    int slot = 0;
+    const int64_t now  = esp_timer_get_time();
+    int           slot = 0;
+    bool          same = false;   /* what the page already shows, as the minute's repeat is */
     portENTER_CRITICAL(&s_node_wifi_mux);
     for (int i = 0; i < ZBC_NODE_WIFI_SLOTS; i++) {
         if (s_node_wifi[i].used && memcmp(s_node_wifi[i].ieee, ieee, ZBC_IEEE_LEN) == 0) {
             slot = i;
+            same = s_node_wifi[i].state == payload[0] && memcmp(s_node_wifi[i].ipv4, &payload[1], 4) == 0 &&
+                   now - s_node_wifi[i].at_us < node_wifi_stale_us(s_node_wifi[i].state);
             break;
         }
         if (s_node_wifi[i].at_us < s_node_wifi[slot].at_us) {
@@ -2655,7 +2644,9 @@ static void node_wifi_note(uint16_t saddr, const uint8_t *payload, uint16_t len)
     memcpy(s_node_wifi[slot].ieee, ieee, ZBC_IEEE_LEN);
     memcpy(s_node_wifi[slot].ipv4, &payload[1], 4);
     portEXIT_CRITICAL(&s_node_wifi_mux);
-    zbc_state_bump();
+    if (!same) {
+        zbc_state_bump();
+    }
 }
 
 void zb_node_wifi_get(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t *state, uint8_t ipv4[4])
@@ -2666,9 +2657,7 @@ void zb_node_wifi_get(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t *state, uint8_t 
     portENTER_CRITICAL(&s_node_wifi_mux);
     for (int i = 0; i < ZBC_NODE_WIFI_SLOTS; i++) {
         if (s_node_wifi[i].used && memcmp(s_node_wifi[i].ieee, ieee, ZBC_IEEE_LEN) == 0) {
-            const int64_t stale = s_node_wifi[i].state == NODE_WIFI_HOTSPOT ? ZBC_NODE_HOTSPOT_STALE_US
-                                                                            : ZBC_NODE_WIFI_STALE_US;
-            if (now - s_node_wifi[i].at_us < stale) {
+            if (now - s_node_wifi[i].at_us < node_wifi_stale_us(s_node_wifi[i].state)) {
                 *state = s_node_wifi[i].state;
                 memcpy(ipv4, s_node_wifi[i].ipv4, 4);
             }
@@ -2687,11 +2676,7 @@ esp_err_t zb_node_enter_wifi(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t minutes)
     if (!device_db_get(ieee, &dev)) {
         return ESP_ERR_NOT_FOUND;
     }
-    bool node = false;
-    for (int i = 0; i < dev.ep_count && !node; i++) {
-        node = dev.eps[i].ep == NODE_CONTROL_EP && (dev.eps[i].features & ZBC_FEAT_NODE);
-    }
-    if (!node) {
+    if (!device_is_node(&dev)) {
         return ESP_ERR_NOT_SUPPORTED;
     }
     if (!zbc_short_known(dev.short_addr)) {

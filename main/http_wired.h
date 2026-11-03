@@ -9,6 +9,7 @@
 #include "esp_err.h"
 #include "esp_http_server.h"
 
+#include "button_db.h"
 #include "curve_db.h"
 #include "light_db.h"
 
@@ -24,6 +25,12 @@ bool curve_from_json(const cJSON *obj, zbc_curve_t *out);
 
 /* Why a button cannot read this pin, or NULL when it can. */
 const char *button_pin_problem(int pin);
+
+/* A pin button's wiring, as both firmwares' routes write and read it: gpio, inverted,
+ * pull and input. The second says what is wrong with a body, or NULL. Whether another
+ * button or a light has the pin is the caller's to ask. */
+void        button_wiring_to_json(cJSON *o, const zbc_button_t *b);
+const char *button_wiring_from_json(const cJSON *json, zbc_button_t *b);
 
 /* /api/status's thermal and wired members. */
 cJSON *thermal_json(void);

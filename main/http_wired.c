@@ -131,6 +131,57 @@ const char *button_pin_problem(int pin)
     return NULL;
 }
 
+static const char *const PULL_NAMES[]  = { "none", "up", "down" };
+static const char *const INPUT_NAMES[] = { "button", "switch" };
+
+void button_wiring_to_json(cJSON *o, const zbc_button_t *b)
+{
+    if (b->gpio < 0) {
+        cJSON_AddNullToObject(o, "gpio");
+    } else {
+        cJSON_AddNumberToObject(o, "gpio", b->gpio);
+    }
+    cJSON_AddBoolToObject(o, "inverted", b->inverted);
+    cJSON_AddStringToObject(o, "pull", PULL_NAMES[b->pull <= ZBC_PULL_DOWN ? b->pull : 0]);
+    cJSON_AddStringToObject(o, "input", INPUT_NAMES[b->input < ZBC_INPUT_COUNT ? b->input : 0]);
+}
+
+const char *button_wiring_from_json(const cJSON *json, zbc_button_t *b)
+{
+    const cJSON *gpio = cJSON_GetObjectItem(json, "gpio");
+    if (cJSON_IsNull(gpio)) {
+        b->gpio = -1;
+    } else if (cJSON_IsNumber(gpio)) {
+        const int   pin = gpio->valueint;
+        const char *why = button_pin_problem(pin);
+        if (why) {
+            return why;
+        }
+        b->gpio = (int8_t)pin;
+    }
+    const cJSON *inverted = cJSON_GetObjectItem(json, "inverted");
+    if (cJSON_IsBool(inverted)) {
+        b->inverted = cJSON_IsTrue(inverted);
+    }
+    const cJSON *pull = cJSON_GetObjectItem(json, "pull");
+    if (pull) {
+        const int p = name_index(PULL_NAMES, 3, pull);
+        if (p < 0) {
+            return "pull must be none, up or down";
+        }
+        b->pull = (uint8_t)p;
+    }
+    const cJSON *input = cJSON_GetObjectItem(json, "input");
+    if (input) {
+        const int k = name_index(INPUT_NAMES, ZBC_INPUT_COUNT, input);
+        if (k < 0) {
+            return "input must be button or switch";
+        }
+        b->input = (uint8_t)k;
+    }
+    return NULL;
+}
+
 /* --------------------------------------------------------------- wired lights */
 
 /* A wired light is created and wired here, and otherwise used through the

@@ -59,6 +59,9 @@ node_fb_press_t node_fb_press(node_fb_t *fb, uint8_t key, uint8_t ev, bool has_l
 /* The stack's verdict on a frame. True, with the key, when its local action is due. */
 bool node_fb_result(node_fb_t *fb, uint8_t seq, bool delivered, uint8_t *key);
 
+/* Whether any frame still waits for its verdict, so node_fb_tick has anything to do. */
+bool node_fb_waiting(const node_fb_t *fb);
+
 /* Run now and then. True, with the key, when a confirmation has waited too long; call
  * again until false. */
 bool node_fb_tick(node_fb_t *fb, int64_t now, uint8_t *key);

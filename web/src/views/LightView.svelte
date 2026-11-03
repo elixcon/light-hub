@@ -16,6 +16,7 @@
 	import MixCurves from "$lib/components/MixCurves.svelte";
 	import FirmwareRow from "$lib/components/FirmwareRow.svelte";
 	import NodeWifiCard from "$lib/components/NodeWifiCard.svelte";
+	import { isNode } from "$lib/utils.ts";
 	import { data, pending, key, value, epPct, isRemoteEp, findEp, findGroup, refresh, schedule, seenIeee,
 		setOnOff, setLevel, sendCommand, getOffEpoch } from "$lib/state.svelte.ts";
 	import { api, post, patch, del } from "$lib/api.ts";
@@ -498,7 +499,7 @@
 		</Card.Root>
 	{/if}
 
-	{#if !node}<NodeWifiCard device={d} />{/if}
+	<NodeWifiCard device={d} />
 
 	<!-- Device -->
 	<Card.Root class="mt-4">
@@ -530,7 +531,7 @@
 			{#if matter && d.bridged}
 				<div class="text-muted-foreground text-xs">A lamp added to the hub later appears here after <b>Rescan device</b>.</div>
 			{/if}
-			{#if !wired && !matter && !d.endpoints.some((x) => x.features.includes("node"))}<FirmwareRow device={d} />{/if}
+			{#if !wired && !matter && !isNode(d)}<FirmwareRow device={d} />{/if}
 			<div class="flex flex-wrap gap-2">
 				{#if matter && !d.needs_pairing}<Button variant="outline" onclick={rescan}>Rescan device</Button>{/if}
 				<Button variant="destructive" onclick={remove}><Trash /> Remove device</Button>

@@ -6,6 +6,7 @@
 	import Toast from "$lib/components/Toast.svelte";
 	import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
 	import LockScreen from "$lib/components/LockScreen.svelte";
+	import StatusChips from "$lib/components/StatusChips.svelte";
 	import LightView from "../views/LightView.svelte";
 	import NodeHome from "./NodeHome.svelte";
 	import NodeButton from "./NodeButton.svelte";
@@ -46,11 +47,7 @@
 					<a href="#/settings" class="text-primary underline-offset-4 hover:underline">Settings</a>
 				</nav>
 			</div>
-			<div class="mt-1.5 flex flex-wrap gap-1.5 text-xs">
-				{#each chips as c, i (i)}
-					<span class="bg-card rounded-full px-2 py-0.5 {c.bad ? 'text-destructive font-medium' : 'text-primary'}">{c.text}</span>
-				{/each}
-			</div>
+			<StatusChips {chips} />
 		</header>
 		{#if route.name === "light"}
 			<LightView ieee={route.params.ieee} ep={Number(route.params.ep)} node />

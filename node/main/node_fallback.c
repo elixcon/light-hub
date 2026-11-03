@@ -56,6 +56,16 @@ bool node_fb_result(node_fb_t *fb, uint8_t seq, bool delivered, uint8_t *key)
     return false;
 }
 
+bool node_fb_waiting(const node_fb_t *fb)
+{
+    for (int i = 0; i < NODE_FB_PENDING; i++) {
+        if (fb->pending[i].used) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool node_fb_tick(node_fb_t *fb, int64_t now, uint8_t *key)
 {
     for (int i = 0; i < NODE_FB_PENDING; i++) {

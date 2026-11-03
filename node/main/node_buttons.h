@@ -8,6 +8,8 @@
 
 #include "esp_err.h"
 
+#include "button_db.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -19,6 +21,11 @@ void      node_buttons_reload(void);
 
 /* The debounced state and raw level of a button's pin, for the page. */
 bool      node_buttons_pin_state(uint16_t id, bool *pressed, int *level);
+
+/* The light a button toggles when the hub is out of reach: its first short-press rule
+ * that toggles a wired light of this node, or 0. An ordinary rule, so nothing new is
+ * stored and a board's other rules are simply not looked at. */
+uint16_t  node_buttons_fallback(const zbc_button_t *b);
 
 /* The frame's verdict, from the Zigbee task: spinlock only, no blocking. */
 void      node_buttons_delivered(uint8_t seq, bool delivered);

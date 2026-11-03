@@ -397,6 +397,14 @@ esp_err_t device_db_clear_features(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep,
     return err;
 }
 
+static esp_err_t erase_endpoint_locked(zbc_device_t *dev, int i)
+{
+    memmove(&dev->eps[i], &dev->eps[i + 1], (size_t)(dev->ep_count - i - 1) * sizeof(dev->eps[0]));
+    dev->ep_count--;
+    memset(&dev->eps[dev->ep_count], 0, sizeof(dev->eps[0]));
+    return db_save_locked();              /* which bumps the state revision */
+}
+
 esp_err_t device_db_remove_endpoint(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep)
 {
     DB_LOCK();
@@ -410,10 +418,7 @@ esp_err_t device_db_remove_endpoint(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep
             err = ESP_ERR_INVALID_STATE;
             break;
         }
-        memmove(&dev->eps[i], &dev->eps[i + 1], (size_t)(dev->ep_count - i - 1) * sizeof(dev->eps[0]));
-        dev->ep_count--;
-        memset(&dev->eps[dev->ep_count], 0, sizeof(dev->eps[0]));
-        err = db_save_locked();           /* which bumps the state revision */
+        err = erase_endpoint_locked(dev, i);
         break;
     }
     DB_UNLOCK();
@@ -427,10 +432,7 @@ esp_err_t device_db_drop_endpoint(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep)
     esp_err_t     err = dev ? ESP_OK : ESP_ERR_NOT_FOUND;
     for (int i = 0; dev && i < dev->ep_count; i++) {
         if (dev->eps[i].ep == ep) {
-            memmove(&dev->eps[i], &dev->eps[i + 1], (size_t)(dev->ep_count - i - 1) * sizeof(dev->eps[0]));
-            dev->ep_count--;
-            memset(&dev->eps[dev->ep_count], 0, sizeof(dev->eps[0]));
-            err = db_save_locked();
+            err = erase_endpoint_locked(dev, i);
             break;
         }
     }

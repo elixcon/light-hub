@@ -11,6 +11,10 @@ extern "C" {
 
 node_mode_t node_mode(void);
 
+/* The page should look again, and the hub has nothing new to hear: a pin's live
+ * reading. zbc_state_bump is for all the rest. Any task. */
+void node_state_page_changed(void);
+
 /* The page was used: Wi-Fi's time starts again. */
 void node_touch(void);
 

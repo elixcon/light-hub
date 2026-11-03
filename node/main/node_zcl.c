@@ -66,7 +66,7 @@ bool node_zcl_decode(uint16_t cluster_id, uint8_t cmd_id, const uint8_t *payload
 
 node_zcl_report_t node_zcl_report(int on, int level, int comes_back_to, bool fading_out)
 {
-    node_zcl_report_t r = { .has_on = on >= 0, .on = on > 0 && !fading_out };
+    node_zcl_report_t r = { .on = on > 0 && !fading_out };
     const int shown = fading_out && comes_back_to > 0 ? comes_back_to : level;
     if (shown >= 0) {
         r.has_level = true;

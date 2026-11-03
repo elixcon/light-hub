@@ -18,6 +18,7 @@
 #include "al_db.h"
 #include "device_db.h"
 #include "group_db.h"
+#include "light_math.h"
 #include "sun.h"
 #include "zb_coordinator.h"
 
@@ -27,8 +28,6 @@ extern "C" {
 
 /* ZCL level 1-254 <-> percent 1-100. Level 0 is "off" territory, so the scale
  * starts at 1 and a request for 1 % still produces a level the lamp can show. */
-int      zbc_level_to_pct(int level);
-uint8_t  zbc_pct_to_level(int pct);
 
 const zbc_endpoint_t *lighting_find_endpoint(const zbc_device_t *dev, uint8_t ep);
 

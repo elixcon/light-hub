@@ -83,6 +83,15 @@ cJSON *wifi_json(void);
 /* This firmware and the updater beside it. */
 cJSON *ota_json(void);
 
+/* The last members of /api/status, the same in both: uptime, why this boot happened, the
+ * last crash, and which image this is. */
+void   stream_firmware_status(json_stream_t *js, bool *first);
+/* Whether `?rev=` is what the page saw last time, so nothing has changed since. */
+bool   rev_unchanged(httpd_req_t *req, const char *rev);
+/* The scope of POST /api/factory_reset. False when there is to be no reset: the request
+ * has been answered, and the handler returns *ret. */
+bool   reset_scope_from_body(httpd_req_t *req, bool *zigbee_only, esp_err_t *ret);
+
 /* Routes the hub and the node serve alike. */
 esp_err_t index_get(httpd_req_t *req);
 esp_err_t auth_state_get(httpd_req_t *req);
