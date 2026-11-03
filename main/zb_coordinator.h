@@ -214,6 +214,18 @@ typedef void (*zb_remote_cb_t)(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, uin
                                zb_remote_ev_t ev);
 void zb_set_remote_handler(zb_remote_cb_t cb);
 
+/* A Light Node has stopped listing this endpoint: a light deleted on the node. Called
+ * in the Zigbee task, before the endpoint goes from device_db. */
+typedef void (*zb_endpoint_gone_cb_t)(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep);
+void zb_set_endpoint_gone_handler(zb_endpoint_gone_cb_t cb);
+
+/* Asks a Light Node to open Wi-Fi for `minutes` without a request (0: its default). It
+ * restarts to do so, and comes back on Zigbee unless it had to open its hotspot.
+ * ESP_ERR_NOT_SUPPORTED for anything but a node. */
+esp_err_t zb_node_enter_wifi(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t minutes);
+/* What it last said about its Wi-Fi: node_wifi_state_t and its address. */
+void      zb_node_wifi_get(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t *state, uint8_t ipv4[4]);
+
 /* What a motion sensor reported on its Occupancy Sensing cluster: `occupied`
  * as the sensor sent it, and `reports_clear` whether this sensor has ever been
  * heard saying "unoccupied" itself - a Xiaomi never does, a Hue does, and the

@@ -1,4 +1,4 @@
-/* Host test for the press-5-times failsafe in main/buttons.c.
+/* Host test for the press-5-times failsafe in main/btn_gesture.h.
  *
  * The failsafe is the one way back into a coordinator whose keys are lost, so
  * both of its failures are expensive: a rhythm it refuses to recognise leaves
@@ -6,7 +6,7 @@
  * easily - a hold, a bouncing contact, a Hue button's stream of Steps - opens
  * the web UI to the whole network. Neither shows in a serial log.
  *
- * unlock.inc is extracted from main/buttons.c by the Makefile, never copied.
+ * The header has no ESP-IDF in it, so it is included whole.
  *
  *   make -C test
  */
@@ -15,10 +15,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* From buttons.h - the only thing the region is written against. */
-#define BTN_DEBOUNCE_US (30 * 1000)
-
-#include "unlock.inc"
+#include "../main/btn_gesture.h"
 
 static int failures;
 static int checks;

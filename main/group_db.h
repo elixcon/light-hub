@@ -61,6 +61,7 @@ void      group_db_note_level(uint16_t id, int pct);
 
 /* Drops a device from every group it is in; called when it is unpaired. */
 void      group_db_forget_device(const uint8_t ieee[ZBC_IEEE_LEN]);
+void      group_db_forget_endpoint(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep);
 
 esp_err_t group_db_erase(void);
 

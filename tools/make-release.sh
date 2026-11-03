@@ -1,5 +1,7 @@
 #!/bin/sh
-# Packages a finished `idf.py build` as the files a release carries:
+# Packages a finished `idf.py build` as the files a release carries, for the hub or
+# (`tools/make-release.sh node/build dist`) the Light Node, each named after its
+# project:
 #
 #   elixcon_light_hub-<version>-factory.bin  bootloader, table, updater and coordinator
 #                                            in one image for a blank board, written at
@@ -34,7 +36,7 @@ desc() {
 }
 project=$(desc project_path)
 
-rm -rf "$out"
+# Two projects can go into one directory. Only what this one will write is replaced.
 mkdir -p "$out"
 out=$(CDPATH='' cd -- "$out" && pwd)
 
@@ -51,7 +53,8 @@ version=$(desc project_version)
 [ "$version" != 1 ] || { echo "make-release: the build has no version - git describe failed" >&2; exit 1; }
 # The updater is built from the same commit in the same build, so it carries
 # the same version.
-name="elixcon_light_hub-$version"
+app=$(desc project_name)
+name="$app-$version"
 mv "$out/factory.bin" "$out/$name-factory.bin"
 usb="$name-usb"
 mkdir "$out/$usb"
@@ -65,13 +68,14 @@ sed 1d flash_args | while read -r _offset file; do
     mkdir -p "$out/$usb/$(dirname "$file")"
     cp "$file" "$out/$usb/$file"
 done
-cp elixcon_light_hub.bin "$out/$name.bin"
-cp elixcon_light_hub.elf "$out/$name.elf"
+cp "$app.bin" "$out/$name.bin"
+cp "$app.elf" "$out/$name.elf"
 cp updater/elixcon_light_hub_updater.bin "$out/elixcon_light_hub_updater-$version.bin"
 
 cd "$out"
 python3 -m zipfile -c "$usb.zip" "$usb"
 rm -rf "$usb"
+rm -f SHA256SUMS
 if command -v sha256sum >/dev/null 2>&1; then
     sha256sum -- * > SHA256SUMS
 else

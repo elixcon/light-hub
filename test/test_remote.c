@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "node_proto.h"
 #include "remote.h"
 
 static int s_checks;
@@ -354,6 +355,29 @@ static void test_a_wheel_click_is_not_a_turn(void)
  * later the command a bound lamp would get: Toggle, On or Off. Its hold has no
  * release, so it is a tick that silence ends. The trailing command is an echo
  * when it follows the action; alone, it is a whole gesture already counted. */
+/* A Light Node's wired buttons, on its own cluster: decoded by the cluster whatever the
+ * model says, since that is what makes it a node. */
+static void test_a_light_nodes_buttons(void)
+{
+    s_model = ZB_REMOTE_MODEL_OTHER;
+    const uint8_t click[]   = { 2, NODE_BTN_CLICK }, hold[] = { 2, NODE_BTN_HOLD };
+    const uint8_t release[] = { 2, NODE_BTN_RELEASE }, flip[] = { 7, NODE_BTN_SINGLE };
+    const uint8_t local[]   = { 2, NODE_BTN_LOCAL }, unknown[] = { 2, 99 }, high[] = { 8, NODE_BTN_CLICK };
+    const uint8_t second[]  = { 2, NODE_BTN_SECOND };
+    cmd_is(NODE_PROTO_CLUSTER, NODE_CMD_BUTTON, second,  2, ZB_REMOTE_AGAIN,   2, "a press close behind a click");
+    cmd_is(NODE_PROTO_CLUSTER, NODE_CMD_BUTTON, click,   2, ZB_REMOTE_CLICK,   2, "a click, which a second may make a double");
+    cmd_is(NODE_PROTO_CLUSTER, NODE_CMD_BUTTON, hold,    2, ZB_REMOTE_HOLD,    2, "a hold");
+    cmd_is(NODE_PROTO_CLUSTER, NODE_CMD_BUTTON, release, 2, ZB_REMOTE_RELEASE, 2, "its release");
+    cmd_is(NODE_PROTO_CLUSTER, NODE_CMD_BUTTON, flip,    2, ZB_REMOTE_SINGLE,  7, "a switch's flip, final at once");
+    /* Already toggled at the node: acted on here too, it would toggle twice. */
+    cmd_is(NODE_PROTO_CLUSTER, NODE_CMD_BUTTON, local,   2, ZB_REMOTE_IGNORED, 2, "a press the node acted on itself");
+    cmd_is(NODE_PROTO_CLUSTER, NODE_CMD_BUTTON, unknown, 2, ZB_REMOTE_NONE,    2, "an event nobody sends");
+    cmd_is(NODE_PROTO_CLUSTER, NODE_CMD_BUTTON, high,    2, ZB_REMOTE_NONE, 0xEE, "a key past the last");
+    cmd_is(NODE_PROTO_CLUSTER, NODE_CMD_BUTTON, click,   1, ZB_REMOTE_NONE, 0xEE, "too short");
+    cmd_is(NODE_PROTO_CLUSTER, NODE_CMD_BUTTON, NULL,    0, ZB_REMOTE_NONE, 0xEE, "empty");
+    cmd_is(NODE_PROTO_CLUSTER, NODE_CMD_WIFI_STATE, click, 2, ZB_REMOTE_NONE, 0xEE, "its Wi-Fi state is not a press");
+}
+
 static void test_the_tuya_button(void)
 {
     s_model = ZB_REMOTE_MODEL_TUYA_BUTTON;
@@ -432,6 +456,7 @@ int main(void)
     test_the_wheel_reaches_the_bottom();
     test_a_wheel_click_is_not_a_turn();
     test_the_tuya_button();
+    test_a_light_nodes_buttons();
     test_everything_else_is_not_a_press();
     test_a_null_key_is_allowed();
     printf("all %d checks passed\n", s_checks);

@@ -27,8 +27,6 @@ extern "C" {
  * typed, and the DNS label derived from it. 32 is what both ends allow - Matter's
  * NodeLabel caps there, and wifi_mgr_status_t::hostname is char[32]. */
 #define ZBC_COORD_NAME_LEN     32
-#define ZBC_COORD_NAME_DEFAULT "Elixcon Light Hub"
-#define ZBC_COORD_HOST_DEFAULT "zigbee"
 
 esp_err_t settings_init(void);
 

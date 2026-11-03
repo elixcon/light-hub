@@ -83,6 +83,10 @@ void ota_set_own_table(const uint8_t *table, size_t len);
 esp_err_t ota_handle_updater_image(httpd_req_t *req);
 esp_err_t ota_handle_updater_run(httpd_req_t *req);
 
+/* Weak, with defaults here, for a firmware to override: see ota.c. */
+bool ota_extra_boot_good(void);
+void ota_before_handoff(void);
+
 /* ---------------------------------------------------------------- uploads */
 
 /* Takes the bytes of the file part, in order, in pieces of any size. Returns

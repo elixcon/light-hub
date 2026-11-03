@@ -443,15 +443,28 @@ static int restore_slot(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, bool creat
     return spare;
 }
 
-void lighting_forget_device(const uint8_t ieee[ZBC_IEEE_LEN])
+/* One endpoint of a device, or with ep 0 all of it. */
+static void forget_restore(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep)
 {
     portENTER_CRITICAL(&s_restore_mux);
     for (size_t i = 0; i < sizeof(s_restore) / sizeof(s_restore[0]); i++) {
-        if (s_restore[i].used && memcmp(s_restore[i].ieee, ieee, ZBC_IEEE_LEN) == 0) {
+        if (s_restore[i].used && (!ep || s_restore[i].ep == ep) && memcmp(s_restore[i].ieee, ieee, ZBC_IEEE_LEN) == 0) {
             memset(&s_restore[i], 0, sizeof(s_restore[i]));
         }
     }
     portEXIT_CRITICAL(&s_restore_mux);
+}
+
+void lighting_forget_device(const uint8_t ieee[ZBC_IEEE_LEN])
+{
+    forget_restore(ieee, 0);
+}
+
+void lighting_forget_endpoint(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep)
+{
+    group_db_forget_endpoint(ieee, ep);
+    curve_db_forget_endpoint(ieee, ep);
+    forget_restore(ieee, ep);
 }
 
 static void remember_level(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, int pct)
@@ -596,20 +609,6 @@ static int endpoint_lit(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, const zbc_
     sent_belief(ieee, ep, &sent_off, &sent_us);
     return zbc_believed_on(e->on_off, sent_off, sent_us, esp_timer_get_time());
 }
-
-/* >>> host-test region: levels <<< */
-int zbc_level_to_pct(int level)
-{
-    int pct = (level * 100 + 126) / 254;
-    return pct < 1 ? 1 : (pct > 100 ? 100 : pct);
-}
-
-uint8_t zbc_pct_to_level(int pct)
-{
-    int level = (pct * 254 + 50) / 100;
-    return (uint8_t)(level < 1 ? 1 : (level > 254 ? 254 : level));
-}
-/* >>> end host-test region: levels <<< */
 
 const zbc_endpoint_t *lighting_find_endpoint(const zbc_device_t *dev, uint8_t ep)
 {
@@ -1311,9 +1310,12 @@ static esp_err_t off_endpoint(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep,
      * its restore level lives in local_lights.c, where a dim would overwrite the
      * level it comes back at, the same trap set_brightness_ex is avoided for.
      * The off goes first: a colour that finds the light fading out travels with
-     * that fade, warming as the light dims, rather than on a clock of its own. */
+     * that fade, warming as the light dims, rather than on a clock of its own.
+     * A Light Node's lights are wired too, and all of this holds at its end of the
+     * frames: dimmed here, a node would come back at 1 % by itself, as on its own
+     * page or its local fallback, with no hub to remember the level for it. */
     esp_err_t err;
-    if (zbc_light_id_from_ieee(ieee) != 0) {
+    if (zbc_light_id_from_ieee(ieee) != 0 || device_db_is_node(ieee)) {
         err = glide  ? glide_off(ieee, ep, e, transition_ds)
             : fade   ? out_fade_off(ieee, ep, transition_ds)
                      : switch_endpoint(ieee, ep, ZB_ONOFF_OFF);

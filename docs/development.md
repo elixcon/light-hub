@@ -32,6 +32,20 @@ hotspot.
 The built web page, `main/www/index.html`, is committed, so `idf.py build` never needs Node. Its
 source is the Svelte 5 project in `web/`; see [web/README.md](../web/README.md) for building it.
 
+## The Light Node
+
+`node/` is a second project, a Zigbee end device for wired lights and buttons: see
+[Light Node](light-node.md). It has to be a project of its own, because `CONFIG_ZB_ZED` selects another
+Zigbee library at compile time. `idf.py -C node build` builds it and the same updater, against the same
+`partitions.csv`, through `cmake/zbc_updater.cmake`. It compiles what it shares with the hub from `main/` by
+path, as the updater does, so those files stay free of the hub's rule, room and Matter code:
+`local_lights.c`, `light_db.c`, `button_db.c`, `btn_gesture.c`, `http_util.c`, `http_wired.c`, `ota.c` and more.
+
+`main/node_proto.h` is the private cluster between the two. `node_mode.c`, `node_fallback.c` and `node_zcl.c`
+are leaf modules with host tests. A node changes mode by restarting, so there is no path from one mode to
+another to get wrong. A restart that is not a power cut brings every light back as it was
+(`local_lights_save_all`, `local_lights_resume_once`).
+
 ## Tests
 
 The logic that is hard to exercise on hardware has host tests: the per-endpoint command gate, the

@@ -51,6 +51,10 @@ typedef enum {
      * nothing, on every press. */
     ZB_REMOTE_SINGLE,
     ZB_REMOTE_TRIPLE,    /* the device itself says three */
+    /* A press close behind a click, from a device that timed the gap itself (see
+     * NODE_BTN_SECOND). A double on a key that wants one, and otherwise a press of
+     * its own, so two quick taps on a plain toggle still toggle twice. */
+    ZB_REMOTE_AGAIN,
 } zb_remote_ev_t;
 
 /* The remotes whose frames need to be told apart from another remote's same

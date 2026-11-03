@@ -19,18 +19,13 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "btn_gesture.h"
 #include "button_db.h"
 #include "remote.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-/* All in microseconds, because that is what esp_timer_get_time() speaks. */
-#define BTN_POLL_US      (10 * 1000)    /* sample rate */
-#define BTN_DEBOUNCE_US  (30 * 1000)    /* three identical samples before believing one */
-#define BTN_LONG_US     (600 * 1000)    /* a hold announces itself while still held */
-#define BTN_DOUBLE_US   (300 * 1000)    /* gap from release to the next press */
 
 /* Two different things.
  *
@@ -48,48 +43,6 @@ extern "C" {
  * speed is unchanged, because each command is worked out from how long the
  * button has been held, not by adding a step to the last one. */
 #define BTN_STEP_US     (250 * 1000)
-#define BTN_REPEAT_US  (1000 * 1000)
-
-/* One gesture. LONG arrives while the button is still down, and is followed by a
- * LONG_REPEAT every BTN_REPEAT_US until it is let go. */
-typedef enum {
-    ZBC_EMIT_NONE = 0,
-    ZBC_EMIT_SHORT,
-    ZBC_EMIT_LONG,
-    ZBC_EMIT_LONG_REPEAT,
-    ZBC_EMIT_LONG_RELEASE,   /* the hold ended - stop the lamps where they are */
-    ZBC_EMIT_DOUBLE,
-    ZBC_EMIT_TRIPLE,         /* only ever from a remote that counted it itself */
-    ZBC_EMIT_MOTION,         /* a sensor: motion after a quiet room */
-    ZBC_EMIT_CLEAR,          /* a sensor: no motion for its clear_s */
-} zbc_btn_emit_t;
-
-typedef struct {
-    uint8_t raw;             /* last raw reading, already un-inverted */
-    uint8_t stable;          /* what we believe: 1 = pressed */
-    uint8_t swallow;         /* the rest of this press is already spoken for */
-    uint8_t pending_short;   /* a short press waiting out the double-press window */
-    int64_t raw_since;       /* when the raw reading last changed */
-    int64_t pressed_at;
-    int64_t released_at;
-    uint8_t long_fired;
-    int64_t next_repeat;
-    uint8_t primed;          /* a switch: the position it was found in is known */
-} zbc_btn_fsm_t;
-
-/* One 10 ms tick for one button. `level` is the pin as read; `inverted` says a
- * low pin means pressed. `want_double` is false when this button has no
- * double-press rules, and then a short press is emitted the instant the button
- * comes up instead of waiting out the window - otherwise every single click on
- * every button in the house would feel 300 ms late. */
-zbc_btn_emit_t btn_step(zbc_btn_fsm_t *st, int level, bool inverted,
-                        bool want_double, int64_t now_us);
-
-/* The same for a switch that stays where it is put: every debounced flip, either
- * way, is one ZBC_EMIT_SHORT, and nothing else is ever emitted. The position it
- * is in when first read - at boot, or after its wiring changed - is taken as
- * it stands, so a switch left on does not toggle the light at every restart. */
-zbc_btn_emit_t btn_switch_step(zbc_btn_fsm_t *st, int level, bool inverted, int64_t now_us);
 
 /* How long a hold runs before it is ended by the clock rather than by the
  * remote. A release is a single frame on a link that drops them, and without a
@@ -214,11 +167,6 @@ bool buttons_pin_state(uint16_t id, bool *pressed, int *level);
  * double press has no repeats and no release, so those are posted directly.
  * hold_ms is ignored for anything but a long press, and 0 means a default. */
 esp_err_t buttons_fire(uint16_t id, zbc_btn_event_t ev, int hold_ms);
-
-/* Why this pin cannot be used, or NULL when it can. GPIO knowledge lives here
- * rather than in the web layer, which has no business knowing where the flash
- * is wired. -1 means "no pin yet" and is allowed. */
-const char *buttons_pin_problem(int gpio);
 
 #ifdef __cplusplus
 }

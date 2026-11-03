@@ -10,7 +10,7 @@
 #    factory one - so the coordinator would be written over the updater.
 #
 # So the app is built against a derived table listing only what the app may be
-# flashed to, and the root CMakeLists.txt puts the real table and the updater
+# flashed to, and cmake/zbc_updater.cmake puts the real table and the updater
 # back into the flash targets. The derived table is generated at every
 # configure and never committed: two tables kept by hand would drift, and the
 # first sign would be a box whose flash layout is not the one it was built for.
@@ -21,7 +21,10 @@
 # runs first, the CONFIG override is what it reads; if second, the
 # PARTITION_CSV_PATH override replaces what it computed.
 
-set(ZBC_PARTITIONS_CSV "${PROJECT_DIR}/partitions.csv")
+# A project elsewhere in the tree (node/) says which table it means before project().
+if(NOT ZBC_PARTITIONS_CSV)
+    set(ZBC_PARTITIONS_CSV "${PROJECT_DIR}/partitions.csv")
+endif()
 set(ZBC_PARTITIONS_APP_CSV "${BUILD_DIR}/partitions-app.csv")
 
 file(STRINGS "${ZBC_PARTITIONS_CSV}" _zbc_rows)

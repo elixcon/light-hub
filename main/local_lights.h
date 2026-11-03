@@ -26,12 +26,24 @@ typedef struct {
     int8_t  on;
     int16_t level;
     int32_t mireds;
+    /* Where it comes back to. Not `level` while a ramp runs: that is how far the ramp
+     * has got, and a switch-on that took it for this would remember a fade's low point. */
+    int16_t comes_back_to;
+    bool    fading_out;     /* on, but only until a fade-out ends */
 } zbc_local_state_t;
 
 /* Drives every wired pin to its power-on state and starts the task that runs the
  * fades. Before buttons_start, and before the setup-portal return in app_main,
  * so a wired light is never left floating. */
 esp_err_t local_lights_start(void);
+
+/* For a restart that is no power cut (the node changing mode): save_all writes down
+ * what every light is doing, whatever its power-on setting, and resume_once, called
+ * before local_lights_start in the next boot, brings them back to that instead of
+ * to their power-on setting. A state a light with power_on "off" never stores
+ * otherwise, and which that setting ignores at any other boot. */
+void      local_lights_save_all(void);
+void      local_lights_resume_once(void);
 
 /* Re-reads light_db, re-plans the PWM timers and channels, and reconfigures what
  * changed, handing back any pin no longer used. A light whose wiring did not
@@ -55,6 +67,10 @@ esp_err_t local_light_fade_in(uint16_t id, uint8_t level, uint16_t transition_ds
  * back to. Over transition_ds - the fade setting - where a Zigbee lamp's effect
  * is a fixed 0.8 s; 0 means that 0.8 s. */
 esp_err_t local_light_fade_off(uint16_t id, uint16_t transition_ds);
+/* A plain On and Off, whatever kind of light it is, as a lamp takes them: On comes back
+ * to the level it remembers, and Off keeps it. */
+esp_err_t local_light_on(uint16_t id, uint16_t transition_ds);
+esp_err_t local_light_off(uint16_t id, uint16_t transition_ds);
 /* A switch-on (off false) or a fading switch-off as ESPHome fades: the brightness
  * asked of the light moves on smootherstep over transition_ds, and `level` and
  * `mireds` (NULL: the colour is left alone) are what the light's curves give at

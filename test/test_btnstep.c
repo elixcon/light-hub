@@ -1,4 +1,4 @@
-/* Host test for the pin gesture machines in buttons.c: btn_step (a push button)
+/* Host test for the pin gesture machines in btn_gesture.c: btn_step (a push button)
  * and btn_switch_step (a switch that stays where it is put).
  *
  * Extracted from the source at build time (region `btnstep`). What matters here
@@ -13,34 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-/* From buttons.h - what the machines are written against. */
-#define BTN_DEBOUNCE_US  (30 * 1000)
-#define BTN_LONG_US     (600 * 1000)
-#define BTN_DOUBLE_US   (300 * 1000)
-#define BTN_REPEAT_US  (1000 * 1000)
-
-typedef enum {
-    ZBC_EMIT_NONE = 0,
-    ZBC_EMIT_SHORT,
-    ZBC_EMIT_LONG,
-    ZBC_EMIT_LONG_REPEAT,
-    ZBC_EMIT_LONG_RELEASE,
-    ZBC_EMIT_DOUBLE,
-    ZBC_EMIT_TRIPLE,
-} zbc_btn_emit_t;
-
-typedef struct {
-    uint8_t raw;
-    uint8_t stable;
-    uint8_t swallow;
-    uint8_t pending_short;
-    int64_t raw_since;
-    int64_t pressed_at;
-    int64_t released_at;
-    uint8_t long_fired;
-    int64_t next_repeat;
-    uint8_t primed;
-} zbc_btn_fsm_t;
+#include "../main/btn_gesture.h"
 
 #include "btnstep.inc"
 
@@ -125,10 +98,86 @@ static void test_button(void)
     ok(bt_run(&st, 0, 100, &now, false) == ZBC_EMIT_LONG_RELEASE, "push button: release ends the hold");
 }
 
+/* Holds a level for `ms` on the eager machine, adding up what it emits. */
+static void eager_run(zbc_btn_fsm_t *st, int level, int ms, int64_t *now, int *seen)
+{
+    for (int t = 0; t < ms; t += 10) {
+        *now += TICK;
+        seen[btn_step_eager(st, level, false, *now)]++;
+    }
+}
+
+/* A node's button. What matters shows on a wall: a double that toggles twice instead,
+ * or a click that fires again when the window closes. */
+static void test_eager(void)
+{
+    int64_t now = 1000000;
+
+    /* One tap: told once as it comes up, and not again when the window closes. */
+    zbc_btn_fsm_t st = { 0 };
+    int seen[ZBC_EMIT_TRIPLE + 1] = { 0 };
+    eager_run(&st, 0, 100, &now, seen);
+    eager_run(&st, 1, 100, &now, seen);
+    ok(seen[ZBC_EMIT_SHORT] == 0, "nothing while the button is down");
+    eager_run(&st, 0, 50, &now, seen);
+    ok(seen[ZBC_EMIT_SHORT] == 1, "a tap is told as it comes up, with no wait");
+    eager_run(&st, 0, 500, &now, seen);
+    ok(seen[ZBC_EMIT_SHORT] == 1 && seen[ZBC_EMIT_DOUBLE] == 0, "and only once");
+
+    /* The double that made two toggles on real hardware: a 210 ms gap and a 150 ms
+     * press, 360 ms from one release to the next. */
+    int d[ZBC_EMIT_TRIPLE + 1] = { 0 };
+    zbc_btn_fsm_t dbl = { 0 };
+    eager_run(&dbl, 1, 100, &now, d);
+    eager_run(&dbl, 0, 210, &now, d);
+    ok(d[ZBC_EMIT_SHORT] == 1, "the first press has gone out");
+    eager_run(&dbl, 1, 50, &now, d);
+    ok(d[ZBC_EMIT_DOUBLE] == 1, "the second is a double on the way down");
+    eager_run(&dbl, 1, 100, &now, d);
+    eager_run(&dbl, 0, 500, &now, d);
+    ok(d[ZBC_EMIT_SHORT] == 1 && d[ZBC_EMIT_DOUBLE] == 1, "and nothing follows it");
+
+    /* A third press is a press again, as on a hub's own button. */
+    eager_run(&dbl, 1, 100, &now, d);
+    eager_run(&dbl, 0, 50, &now, d);
+    ok(d[ZBC_EMIT_SHORT] == 2 && d[ZBC_EMIT_DOUBLE] == 1, "after a double, a new press");
+
+    /* Too slow for a double: two presses. */
+    int s[ZBC_EMIT_TRIPLE + 1] = { 0 };
+    zbc_btn_fsm_t slow = { 0 };
+    eager_run(&slow, 1, 100, &now, s);
+    eager_run(&slow, 0, 400, &now, s);
+    eager_run(&slow, 1, 100, &now, s);
+    eager_run(&slow, 0, 100, &now, s);
+    ok(s[ZBC_EMIT_SHORT] == 2 && s[ZBC_EMIT_DOUBLE] == 0, "past the window it is two presses");
+
+    /* A hold is no click, and a press right after one is not its second. */
+    int h[ZBC_EMIT_TRIPLE + 1] = { 0 };
+    zbc_btn_fsm_t hold = { 0 };
+    eager_run(&hold, 1, 800, &now, h);
+    ok(h[ZBC_EMIT_LONG] == 1, "a hold announces itself");
+    eager_run(&hold, 0, 100, &now, h);
+    ok(h[ZBC_EMIT_LONG_RELEASE] == 1 && h[ZBC_EMIT_SHORT] == 0, "and its end is no click");
+    eager_run(&hold, 1, 100, &now, h);
+    eager_run(&hold, 0, 100, &now, h);
+    ok(h[ZBC_EMIT_SHORT] == 1 && h[ZBC_EMIT_DOUBLE] == 0, "a press after a hold is a click");
+
+    /* The rest of a double's second press is spoken for, however long it lasts. */
+    int l[ZBC_EMIT_TRIPLE + 1] = { 0 };
+    zbc_btn_fsm_t lng = { 0 };
+    eager_run(&lng, 1, 100, &now, l);
+    eager_run(&lng, 0, 200, &now, l);
+    eager_run(&lng, 1, 1000, &now, l);
+    eager_run(&lng, 0, 100, &now, l);
+    ok(l[ZBC_EMIT_DOUBLE] == 1 && l[ZBC_EMIT_LONG] == 0 && l[ZBC_EMIT_LONG_RELEASE] == 0,
+       "a double held down does not also become a hold");
+}
+
 int main(void)
 {
     test_switch();
     test_button();
+    test_eager();
     printf("all %d checks passed\n", s_checks);
     return 0;
 }

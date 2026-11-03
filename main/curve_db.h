@@ -169,6 +169,7 @@ void      curve_db_note_color_sent(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep,
 void      curve_db_forget_sent(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep);
 
 void      curve_db_forget_device(const uint8_t ieee[ZBC_IEEE_LEN]);
+void      curve_db_forget_endpoint(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep);
 esp_err_t curve_db_erase(void);
 
 /* Whether a stored blob of this table is one the boot load takes rather than

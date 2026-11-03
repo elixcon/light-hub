@@ -21,7 +21,7 @@
  *   its last brightness on the way, and flash a lamp whose curve is dark at the
  *   one asked for. An On waits for a brightness to replace it.
  *
- * levels.inc and matter.inc are extracted from main/lighting.c and
+ * levels.inc and matter.inc are extracted from main/light_math.h and
  * main/matter_bridge.cpp by the Makefile, never copied.
  *
  *   make -C test

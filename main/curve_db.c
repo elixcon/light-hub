@@ -33,74 +33,6 @@ static SemaphoreHandle_t s_lock;
 
 /* ------------------------------------------------------------------ maths */
 
-/* >>> host-test region: pchip <<< */
-/* Fritsch-Carlson monotone cubic Hermite interpolation.
- *
- * The two tangents of a segment are the average of the secants either side,
- * except where the secants change sign (a turning point, tangent 0) or where the
- * average would be steep enough for the cubic to overshoot - the classic bound is
- * three times the smaller neighbouring secant. That clamp is the whole trick: it
- * is what keeps the curve inside the box its control points define, so a
- * brightness ramp can never dip or bulge past the values the user placed. */
-float zbc_pchip(const uint8_t *xs, const float *ys, int n, float t)
-{
-    if (n < 2) {
-        return n == 1 ? ys[0] : 0.0f;
-    }
-    if (t <= xs[0]) {
-        return ys[0];
-    }
-    if (t >= xs[n - 1]) {
-        return ys[n - 1];
-    }
-
-    int i = 0;
-    while (i < n - 2 && t > xs[i + 1]) {
-        i++;
-    }
-
-    const float h = (float)xs[i + 1] - (float)xs[i];
-    const float d = (ys[i + 1] - ys[i]) / h;
-
-    /* Secants of the neighbouring segments, falling back to this one at the ends
-     * so the curve leaves the first point and meets the last one cleanly. */
-    const float d_prev = i > 0 ? (ys[i] - ys[i - 1]) / ((float)xs[i] - (float)xs[i - 1]) : d;
-    const float d_next = i < n - 2 ? (ys[i + 2] - ys[i + 1]) / ((float)xs[i + 2] - (float)xs[i + 1]) : d;
-
-    float m0, m1;
-    if (i == 0) {
-        m0 = d;
-    } else if (d_prev * d <= 0.0f) {
-        m0 = 0.0f;
-    } else {
-        m0 = (d_prev + d) / 2.0f;
-        const float limit = 3.0f * fminf(fabsf(d_prev), fabsf(d));
-        if (fabsf(m0) > limit) {
-            m0 = m0 > 0.0f ? limit : -limit;
-        }
-    }
-    if (i == n - 2) {
-        m1 = d;
-    } else if (d * d_next <= 0.0f) {
-        m1 = 0.0f;
-    } else {
-        m1 = (d + d_next) / 2.0f;
-        const float limit = 3.0f * fminf(fabsf(d), fabsf(d_next));
-        if (fabsf(m1) > limit) {
-            m1 = m1 > 0.0f ? limit : -limit;
-        }
-    }
-
-    const float s  = (t - (float)xs[i]) / h;
-    const float s2 = s * s;
-    const float s3 = s2 * s;
-    return (2.0f * s3 - 3.0f * s2 + 1.0f) * ys[i]
-         + (s3 - 2.0f * s2 + s) * h * m0
-         + (-2.0f * s3 + 3.0f * s2) * ys[i + 1]
-         + (s3 - s2) * h * m1;
-}
-/* >>> end host-test region: pchip <<< */
-
 static float curve_eval(const zbc_curve_t *c, int input_pct)
 {
     float ys[ZBC_CURVE_MAX_POINTS];
@@ -653,12 +585,13 @@ void curve_db_note_color_sent(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep,
     CDB_UNLOCK();
 }
 
-void curve_db_forget_device(const uint8_t ieee[ZBC_IEEE_LEN])
+/* One endpoint of a device, or with ep 0 all of it. */
+static void forget_curves(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep)
 {
     bool changed = false;
     CDB_LOCK();
     for (int i = 0; i < CONFIG_ZBC_MAX_CURVES; i++) {
-        if (s_curves[i].in_use && memcmp(s_curves[i].ieee, ieee, ZBC_IEEE_LEN) == 0) {
+        if (s_curves[i].in_use && (!ep || s_curves[i].ep == ep) && memcmp(s_curves[i].ieee, ieee, ZBC_IEEE_LEN) == 0) {
             memset(&s_curves[i], 0, sizeof(s_curves[i]));
             changed = true;
         }
@@ -667,6 +600,16 @@ void curve_db_forget_device(const uint8_t ieee[ZBC_IEEE_LEN])
         cdb_save_locked();
     }
     CDB_UNLOCK();
+}
+
+void curve_db_forget_device(const uint8_t ieee[ZBC_IEEE_LEN])
+{
+    forget_curves(ieee, 0);
+}
+
+void curve_db_forget_endpoint(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep)
+{
+    forget_curves(ieee, ep);
 }
 
 esp_err_t curve_db_erase(void)

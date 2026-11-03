@@ -3,6 +3,8 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "esp_ota_ops.h"
+#include "esp_partition.h"
 #include "freertos/FreeRTOS.h"
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -97,8 +99,26 @@ static bool tz_name_valid(const char *name)
  * is "elixcon-light-hub", and deriving it would move every box that has never
  * been named from zigbee.local to a new address. Once a name is set, the two are
  * derived from each other and stay in step. */
-static char s_name[ZBC_COORD_NAME_LEN] = ZBC_COORD_NAME_DEFAULT;
-static char s_host[ZBC_COORD_NAME_LEN] = ZBC_COORD_HOST_DEFAULT;
+static const char *s_default_name = "Elixcon Light Hub";
+static const char *s_default_host = "zigbee";
+static char s_name[ZBC_COORD_NAME_LEN] = "Elixcon Light Hub";
+static char s_host[ZBC_COORD_NAME_LEN] = "zigbee";
+
+/* A Light Node must not answer as the hub it joins: both would be zigbee.local. Asked of
+ * the image in the app partition, not of this build: the updater beside a node is the
+ * hub's build, and is what is on the network during an update. */
+static void default_names_from_app(void)
+{
+    const esp_partition_t *app = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, NULL);
+    esp_app_desc_t         desc;
+    if (app && esp_ota_get_partition_description(app, &desc) == ESP_OK &&
+        strncmp(desc.project_name, "elixcon_light_node", sizeof(desc.project_name)) == 0) {
+        s_default_name = "Elixcon Light Node";
+        s_default_host = "light-node";
+        strlcpy(s_name, s_default_name, sizeof(s_name));
+        strlcpy(s_host, s_default_host, sizeof(s_host));
+    }
+}
 
 /* >>> host-test region: slug <<< */
 /* A name is one field and has to serve two masters: it is shown to people (the
@@ -145,6 +165,7 @@ static bool slugify(const char *in, char *out, size_t cap)
 
 esp_err_t settings_init(void)
 {
+    default_names_from_app();
     nvs_handle_t nvs;
     if (nvs_open(SETTINGS_NVS_NAMESPACE, NVS_READONLY, &nvs) != ESP_OK) {
         return ESP_OK;   /* nothing stored yet; the defaults stand */
@@ -433,8 +454,8 @@ esp_err_t settings_set_name(const char *name)
      * and a name that is live but not persisted comes back changed at the next
      * boot. The hostname does not take effect until then in any case - see the
      * three use sites in wifi_manager.c. */
-    strlcpy(s_name, clear ? ZBC_COORD_NAME_DEFAULT : name, sizeof(s_name));
-    strlcpy(s_host, clear ? ZBC_COORD_HOST_DEFAULT : host, sizeof(s_host));
+    strlcpy(s_name, clear ? s_default_name : name, sizeof(s_name));
+    strlcpy(s_host, clear ? s_default_host : host, sizeof(s_host));
     ESP_LOGI(TAG, "Renamed to \"%s\"; http://%s.local after the restart", s_name, s_host);
     return ESP_OK;
 }

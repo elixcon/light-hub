@@ -12,6 +12,8 @@
 	import ViewHeader from "$lib/components/ViewHeader.svelte";
 	import ButtonRow from "$lib/components/ButtonRow.svelte";
 	import FirmwareRow from "$lib/components/FirmwareRow.svelte";
+	import NodeWifiCard from "$lib/components/NodeWifiCard.svelte";
+	import { isNode } from "$lib/utils.ts";
 	import { data, refresh } from "$lib/state.svelte.ts";
 	import { navigate } from "$lib/router.svelte.ts";
 	import { post, patch, del } from "$lib/api.ts";
@@ -122,6 +124,8 @@
 {#if !c}
 	<p class="text-muted-foreground mt-6 text-sm">This remote is gone.</p>
 {:else}
+	{#if c.device}<NodeWifiCard device={c.device} />{/if}
+
 	<Card.Root class="mt-4">
 		<Card.Content class="flex flex-col gap-5">
 			{#if c.device}
@@ -186,9 +190,11 @@
 	</Card.Root>
 
 	{#if c.device?.ota}
+		{#if !isNode(c.device)}
 		<Card.Root class="mt-4">
 			<Card.Content><FirmwareRow device={c.device} /></Card.Content>
 		</Card.Root>
+		{/if}
 	{/if}
 {/if}
 

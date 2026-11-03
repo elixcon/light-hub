@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Elixcon Light Hub updater</title>
+<title>Elixcon updater</title>
 <style>
   :root { color-scheme: light dark; --bg: #f6f6f4; --fg: #1b1b1a; --muted: #6b6b66; --card: #fff;
           --line: #deded9; --accent: #2f6fdb; --bad: #b3261e; }
@@ -37,12 +37,12 @@
 </head>
 <body>
 <main>
-  <h1>Elixcon Light Hub updater</h1>
+  <h1>Elixcon updater</h1>
   <p id="msg">Connecting…</p>
   <p class="muted" id="versions"></p>
 
   <form id="signin" hidden>
-    <p>This coordinator is secured. Enter a key to upload firmware.</p>
+    <p>This device is secured. Enter a key to upload firmware.</p>
     <input type="text" id="key" autocomplete="off" autocapitalize="characters" placeholder="K7M2Q-9XH4T-R3WZP-6NBVA">
     <button type="submit">Sign in</button>
   </form>
@@ -61,7 +61,7 @@
     <p id="cv-why"></p>
     <form id="cv-form">
       <p>The converted device joins this Wi-Fi network and comes back as the updater at
-         <code>http://zigbee.local</code>, ready for the coordinator firmware. Leave it empty to set Wi-Fi from its setup hotspot instead.</p>
+         <code>http://zigbee.local</code>, ready for its firmware. Leave it empty to set Wi-Fi from its setup hotspot instead.</p>
       <label>Wi-Fi network <input type="text" id="cv-ssid" maxlength="32" autocomplete="off"></label>
       <label>Password <input type="password" id="cv-pass" maxlength="64" autocomplete="off"></label>
       <label class="check"><input type="checkbox" id="cv-ack">
@@ -85,7 +85,7 @@ const PHASES = {
   bootloader: "Step 3 of 5: writing the bootloader. Do not cut the power.",
   table: "Step 4 of 5: writing the partition table. Do not cut the power.",
   settings: "Step 5 of 5: preparing the new layout…",
-  done: "Converted. The device restarts and joins the network you gave; open http://zigbee.local (or its address from your router) to upload the coordinator firmware.",
+  done: "Converted. The device restarts and joins the network you gave; open http://zigbee.local (or its address from your router) to upload its firmware.",
 };
 
 async function show() {
@@ -93,7 +93,7 @@ async function show() {
     const r = await fetch("/api/status", { cache: "no-store" });
     const s = await r.json();
     $("msg").textContent = s.message;
-    $("versions").textContent = "Updater " + s.version + (s.convert ? "" : " · coordinator " + (s.app_version || "not installed"));
+    $("versions").textContent = "Updater " + s.version + (s.convert ? "" : " · firmware " + (s.app_version || "not installed"));
     $("signin").hidden = s.authorized;
     $("upload").hidden = !s.authorized || s.convert;
     $("convert").hidden = !s.authorized || !s.convert;
@@ -179,7 +179,7 @@ $("signin").onsubmit = async (ev) => {
   if (r.ok) { note(""); show(); } else { note("That key is not known here.", true); }
 };
 
-/* Back to the coordinator's own page once it answers instead of this one. */
+/* Back to the firmware's own page once it answers instead of this one. */
 function waitForCoordinator() {
   setTimeout(async () => {
     try {
@@ -203,7 +203,7 @@ $("upload").onsubmit = (ev) => {
   xhr.onload = () => {
     if (xhr.status === 200 && xhr.responseText.startsWith("Update Successful")) {
       $("bar").removeAttribute("value");
-      note("Installed - starting the coordinator. This page moves on by itself.");
+      note("Installed - starting it. This page moves on by itself.");
       waitForCoordinator();
       return;
     }

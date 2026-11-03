@@ -7,6 +7,9 @@ the 802.15.4 radio, joins Wi-Fi on the same chip, bridges each room to Matter an
 web UI. Target: 4 MB flash, built with `-Os`. User-facing docs are in `docs/`; `docs/development.md`
 has the source layout, the crash-decoding procedure and the shared-radio settings.
 
+`node/` is a second firmware, the Light Node: a Zigbee end device for wired lights and buttons, with
+Wi-Fi only for configuration. See the section of that name below.
+
 Source comments and `web/README.md` point at sections of this file by name ("State is never
 assumed", "Commands go through a per-endpoint gate", "Move/Stop", the remote section). Keep those
 headings when editing.
@@ -20,6 +23,7 @@ idf.py -p /dev/cu.usbmodem* flash monitor   # bootloader, full partition table, 
 idf.py app-flash                   # coordinator only
 idf.py updater-flash               # updater only
 idf.py -C updater build            # the updater on its own
+idf.py -C node build               # the Light Node and the same updater
 idf.py menuconfig                  # options under "Elixcon Light Hub" (main/Kconfig.projbuild)
 ```
 
@@ -38,7 +42,7 @@ Web UI (`web/`, Node):
 
 ```sh
 npm install
-npm run build        # writes ../main/www/index.html, then the 150 KB gzipped size gate
+npm run build        # writes both pages, ../main/www and ../node/main/www, each under the 150 KB gzipped gate
 npm run dev          # HMR, proxies /api and /update to http://zigbee.local (ZBC_TARGET=http://host:port)
 npm run dev:mock     # HMR against mock/server.mjs, no hardware needed
 npm run check        # svelte-check
@@ -47,11 +51,11 @@ npm test             # all; one file: node --test test/curves.test.ts
 
 CI (`.github/workflows/firmware.yml`) builds from `sdkconfig.defaults`. `sdkconfig` is local and
 gitignored, so put new defaults in `sdkconfig.defaults`. CI also fails if the committed
-`main/www/index.html` differs from what `web/` builds.
+`main/www/index.html` or `node/main/www/index.html` differs from what `web/` builds.
 
 Release files (factory image, USB zip, app and updater images, ELF): `tools/make-release.sh build
-dist` after `idf.py build`. A `v*` tag makes CI publish them as a GitHub release. The firmware
-version is `git describe`, so tag first.
+dist` after `idf.py build`, and `tools/make-release.sh node/build dist` for the node. A `v*` tag makes
+CI publish them as a GitHub release. The firmware version is `git describe`, so tag first.
 
 ## Architecture
 
@@ -59,11 +63,12 @@ version is `git describe`, so tag first.
 
 `partitions.csv` has a 1 MiB `updater` (factory) and one `app` (ota_0) instead of two OTA slots. An
 update restarts into the updater (`updater/`), which writes `app` and restarts into it, and an image
-that never confirms rolls back to the updater. The root `CMakeLists.txt` builds `updater/` as an
+that never confirms rolls back to the updater. `cmake/zbc_updater.cmake` builds `updater/` as an
 ExternalProject. `components/partition_layout` makes the coordinator build against a derived table
 without the updater row, `build/partitions-app.csv`, generated at every configure and never
-committed. The root CMake then swaps the full table back into the flash targets. The data partitions'
-offsets must never move: a USB flash of a new table has to keep every stored setting.
+committed. `cmake/zbc_updater.cmake`, shared with the node, then swaps the full table back into the
+flash targets. The data partitions' offsets must never move: a USB flash of a new table has to keep
+every stored setting.
 `updater/main/convert.c` rewrites other firmwares' tables (Shelly, ESPHome) and this project's older
 one.
 
@@ -99,12 +104,37 @@ The updater compiles shared modules (`wifi_manager.c`, `settings.c`, `auth.c`, `
   lamps (`matter_priv.h` is internal and runs on the CHIP thread; `matter_ctl.h` is the C API). No
   Thread: the radio runs Zigbee.
 - Leaf modules have no ESP-IDF dependencies and compile whole in host tests: `remote.c`,
-  `colorspace.c`, `sun.c`, `tz.c`, `ntc.c`, `zb_ota_file.c`, `light_math.h`. Keep them that way.
+  `colorspace.c`, `sun.c`, `tz.c`, `ntc.c`, `zb_ota_file.c`, `light_math.h`, `frame_dup.h`, `btn_gesture.h`,
+  `node_proto.h`, and in
+  `node/main` `node_mode.c`, `node_fallback.c`, `node_zcl.c`. Keep them that way.
 - `main/CMakeLists.txt` links several `-Wl,--wrap=` hooks: the 802.15.4 driver (`radio_ed.c`
   restarts energy scans the driver abandons, `radio_coex.c` counts frames and adjusts send
   priority), `esp_panic_handler` (`crash_log.c`), and the heap per-task hooks (`heap_watch.c`).
 - `main.c` fixes the startup order: NVS, crash log, config restore, registries, Wi-Fi, HTTP, Zigbee,
   Matter.
+
+### The Light Node
+
+`node/` is a project of its own, because `CONFIG_ZB_ZED` selects another Zigbee library at compile
+time. It builds against the same `partitions.csv` with the same updater, and compiles what it shares
+from `main/` by path, so keep those files free of rules, rooms and Matter: `local_lights.c`,
+`light_db.c`, `button_db.c`, `btn_gesture.c`, `http_util.c`, `http_wired.c`, `ota.c`, `wifi_manager.c`.
+`node_state_rev.c` replaces `state_rev.c`, so a change wakes the attribute sync.
+
+- To the hub it is an ordinary lamp per light, with its receiver on. A light's endpoint is its
+  `light_db` id. Endpoint 200 carries private cluster `0xFC80` (`main/node_proto.h`), which is how the
+  hub recognises a node: from its clusters, as with any device.
+- `raw_frame` in `node_zb.c` takes lamp commands from the stack so `local_lights.c` does the fade, and
+  the attributes follow `local_light_get`, per "State is never assumed".
+- Modes are chosen at boot (`node_mode.c`) and changed by restarting. Only `NODE_MODE_ZIGBEE` is normal,
+  and it starts no Wi-Fi or HTTP. A paired node's hotspot keeps Zigbee off.
+- A hub's warm off treats a node's light as wired (`off_endpoint`): no dim first, because the level it
+  comes back to lives on the node, and a dim would overwrite it.
+- A button's gesture goes to the hub as a key of the control endpoint, and the rules are the hub's. A
+  local fallback light runs only once the stack has given up on a press; see `node_fallback.h` for how
+  a double toggle is avoided.
+- Any restart of an image on trial is a rollback. Clear the stack's data with `node_zb_forget_network`
+  (NVS namespace `zigbee`), not `esp_zigbee_factory_reset`, which restarts.
 
 ### Threading rules
 

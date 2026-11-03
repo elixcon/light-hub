@@ -13,123 +13,13 @@
 #include "auth.h"
 #include "buttons.h"
 #include "lighting.h"
+#include "node_proto.h"
 #include "settings.h"
 #include "state_rev.h"
 #include "wifi_manager.h"
 #include "zb_coordinator.h"
 
 static const char *TAG = "buttons";
-
-/* ------------------------------------------------------------ the gesture machine */
-
-/* >>> host-test region: btnstep <<< */
-
-/* No ESP-IDF below this line and none above it in this function - see buttons.h.
- * Everything it needs arrives as arguments so a host build can drive it. */
-zbc_btn_emit_t btn_step(zbc_btn_fsm_t *st, int level, bool inverted,
-                        bool want_double, int64_t now_us)
-{
-    const uint8_t pressed = (uint8_t)(inverted ? (level == 0) : (level != 0));
-
-    if (pressed != st->raw) {
-        st->raw       = pressed;
-        st->raw_since = now_us;
-    }
-
-    int edge = 0;   /* +1 down, -1 up */
-    if (pressed != st->stable && now_us - st->raw_since >= BTN_DEBOUNCE_US) {
-        st->stable = pressed;
-        edge       = pressed ? 1 : -1;
-    }
-
-    if (edge > 0) {
-        st->pressed_at = now_us;
-        st->long_fired = 0;
-        if (st->pending_short) {
-            /* The second press of a double. It is announced on the way down
-             * rather than on the way up, which is what makes a double-click feel
-             * immediate; the rest of this press is then spoken for. */
-            st->pending_short = 0;
-            st->swallow       = 1;
-            return ZBC_EMIT_DOUBLE;
-        }
-        st->swallow = 0;
-        return ZBC_EMIT_NONE;
-    }
-
-    if (edge < 0) {
-        const uint8_t was_long = st->long_fired;
-        const uint8_t swallowed = st->swallow;
-        st->long_fired = 0;
-        st->swallow    = 0;
-        if (was_long) {
-            /* The lamps are part-way through a ramp that nothing else will end.
-             * This is the event that stops them where the finger left them. */
-            return ZBC_EMIT_LONG_RELEASE;
-        }
-        if (swallowed) {
-            return ZBC_EMIT_NONE;   /* already reported as a double press */
-        }
-        if (want_double) {
-            st->pending_short = 1;
-            st->released_at   = now_us;
-            return ZBC_EMIT_NONE;
-        }
-        return ZBC_EMIT_SHORT;
-    }
-
-    if (st->stable) {
-        if (st->swallow) {
-            return ZBC_EMIT_NONE;
-        }
-        if (!st->long_fired && now_us - st->pressed_at >= BTN_LONG_US) {
-            st->long_fired  = 1;
-            st->next_repeat = now_us + BTN_REPEAT_US;
-            return ZBC_EMIT_LONG;
-        }
-        if (st->long_fired && now_us >= st->next_repeat) {
-            st->next_repeat = now_us + BTN_REPEAT_US;
-            return ZBC_EMIT_LONG_REPEAT;
-        }
-        return ZBC_EMIT_NONE;
-    }
-
-    if (st->pending_short && now_us - st->released_at >= BTN_DOUBLE_US) {
-        st->pending_short = 0;
-        return ZBC_EMIT_SHORT;
-    }
-    return ZBC_EMIT_NONE;
-}
-
-zbc_btn_emit_t btn_switch_step(zbc_btn_fsm_t *st, int level, bool inverted, int64_t now_us)
-{
-    const uint8_t pos = (uint8_t)(inverted ? (level == 0) : (level != 0));
-
-    if (!st->primed) {
-        /* First reading: remember it, and believe it once it has held for the
-         * debounce, without calling that a flip. */
-        if (st->raw_since == 0 || pos != st->raw) {
-            st->raw       = pos;
-            st->raw_since = now_us ? now_us : 1;
-        }
-        if (now_us - st->raw_since >= BTN_DEBOUNCE_US) {
-            st->stable = pos;
-            st->primed = 1;
-        }
-        return ZBC_EMIT_NONE;
-    }
-
-    if (pos != st->raw) {
-        st->raw       = pos;
-        st->raw_since = now_us;
-    }
-    if (pos != st->stable && now_us - st->raw_since >= BTN_DEBOUNCE_US) {
-        st->stable = pos;
-        return ZBC_EMIT_SHORT;
-    }
-    return ZBC_EMIT_NONE;
-}
-/* >>> end host-test region: btnstep <<< */
 
 /* --------------------------------------------------- the remote gesture machine */
 
@@ -256,6 +146,13 @@ zbc_btn_emit_t zbtn_step(zbc_zbtn_fsm_t *st, zb_remote_ev_t ev, bool want_double
         st->pending_click = 0;
         return ZBC_EMIT_SHORT;
 
+    case ZB_REMOTE_AGAIN:
+        /* Not timed here: the device did, so it holds even when the radio delayed the
+         * frame past the window, and a click already acted on is then followed by the
+         * double the person meant. */
+        st->pending_click = 0;
+        return want_double ? ZBC_EMIT_DOUBLE : ZBC_EMIT_SHORT;
+
     case ZB_REMOTE_CLICK:
         if (st->pending_click && now_us - st->clicked_at < BTN_DOUBLE_US) {
             st->pending_click = 0;
@@ -311,92 +208,22 @@ zbc_btn_emit_t zbtn_step(zbc_zbtn_fsm_t *st, zb_remote_ev_t ev, bool want_double
     return ZBC_EMIT_NONE;
 }
 
+/* Whether a press counts towards opening the box. Clicks on the on/off key only: a Hue
+ * Smart Button decodes each Level Step as a click on key 1 or 2, and sends one about
+ * every 800 ms while held, so counting those would let a four-second hold open it.
+ *
+ * And not a Light Node's buttons, which go where the hub's wires do not reach, perhaps
+ * outside, and which have a five and a ten of their own: pressing ten times to get back
+ * into a node must not open the hub as well. By endpoint, as near as this gets to the
+ * device's clusters; another remote that happens to use it only loses this way in. */
+bool remote_press_unlocks(zb_remote_ev_t ev, uint8_t key, uint8_t ep)
+{
+    return (ev == ZB_REMOTE_CLICK || ev == ZB_REMOTE_SINGLE) && key == 0 && ep != NODE_CONTROL_EP;
+}
+
 /* >>> end host-test region: zremote <<< */
 
 /* ------------------------------------------------------------ the failsafe gesture */
-
-/* >>> host-test region: unlock <<< */
-
-/* Five presses, each 0.5-2.5 s after the one before, open the web UI to everyone
- * for a couple of minutes - see auth.c. Keep going at the same pace and the tenth
- * restarts the box into its setup hotspot, keeping the stored Wi-Fi - see
- * wifi_manager_setup_hotspot(). One series rather than two gestures: the web UI
- * opening half way there costs nothing, and there is one thing to remember. A
- * stumble anywhere starts the series over from one.
- *
- * The rhythm is what makes it deliberate: a double click is far quicker, a hold
- * produces no presses at all, and nobody switching a light keeps a steady pace
- * five times running, let alone ten.
- *
- * It counts press-down edges beside the gesture machines rather than inside them,
- * so it sees every press whatever rules the button has - and the lights those
- * presses switch still switch, because hiding them would mean delaying every
- * click in the house. A pure function of (state, input, now) with no ESP-IDF, for
- * the reason btn_step is one. */
-#define UNLOCK_TAPS        5
-#define HOTSPOT_TAPS       10
-#define UNLOCK_GAP_MIN_US  (500 * 1000)
-/* 2.5 s, not 1.5 s: a steady press that feels like "about once a second"
- * arrives every 1.9-2.1 s. The rhythm is what makes it deliberate, not its
- * speed. */
-#define UNLOCK_GAP_MAX_US  (2500 * 1000)
-
-typedef struct {
-    int64_t raw_since;   /* the 64-bit fields first, so the bytes after them pack */
-    int64_t last_tap_us;
-    uint8_t raw;         /* last raw reading, already un-inverted */
-    uint8_t stable;      /* debounced: 1 = pressed */
-    uint8_t count;       /* presses so far in this series */
-} zbc_unlock_fsm_t;
-
-typedef enum {
-    UNLOCK_NONE = 0,
-    UNLOCK_OPEN,      /* the fifth press in rhythm: open the web UI */
-    UNLOCK_HOTSPOT,   /* the tenth: restart into the setup hotspot */
-} zbc_unlock_t;
-
-/* One press, and what it completed. */
-static zbc_unlock_t unlock_tap(zbc_unlock_fsm_t *st, int64_t now_us)
-{
-    /* No "is a series running" test is needed: from a count of zero, both
-     * branches land on one, including for the very first press after boot. */
-    const int64_t gap = now_us - st->last_tap_us;
-    if (gap >= UNLOCK_GAP_MIN_US && gap <= UNLOCK_GAP_MAX_US) {
-        st->count++;
-    } else {
-        /* Out of rhythm. Not a reset to zero: this press is the first of a new
-         * series, or a stumble on the second press would cost two. */
-        st->count = 1;
-    }
-    st->last_tap_us = now_us;
-    /* The series runs on past the fifth press, so that is an equality test: the
-     * sixth to ninth complete nothing. */
-    if (st->count == UNLOCK_TAPS) {
-        return UNLOCK_OPEN;
-    }
-    if (st->count >= HOTSPOT_TAPS) {
-        st->count = 0;
-        return UNLOCK_HOTSPOT;
-    }
-    return UNLOCK_NONE;
-}
-
-/* One 10 ms sample of a pin, debounced exactly as btn_step debounces it. */
-static zbc_unlock_t unlock_level(zbc_unlock_fsm_t *st, int level, bool inverted, int64_t now_us)
-{
-    const uint8_t pressed = (uint8_t)(inverted ? (level == 0) : (level != 0));
-    if (pressed != st->raw) {
-        st->raw       = pressed;
-        st->raw_since = now_us;
-    }
-    if (pressed != st->stable && now_us - st->raw_since >= BTN_DEBOUNCE_US) {
-        st->stable = pressed;
-        return pressed ? unlock_tap(st, now_us) : UNLOCK_NONE;
-    }
-    return UNLOCK_NONE;
-}
-
-/* >>> end host-test region: unlock <<< */
 
 /* ------------------------------------------------------------ the motion machine */
 
@@ -742,65 +569,6 @@ typedef struct {
     int64_t  clear_us;
 } btn_wiring_t;
 
-/* Pins we configured, so one that stops being used is handed back rather than
- * left pulled in whatever direction it happened to have. */
-static bool s_owned[SOC_GPIO_PIN_COUNT];
-
-/* Returns whether the failsafe pin is left to the sampler to watch on its own. */
-static bool apply_pins(const btn_wiring_t *w, size_t n)
-{
-    bool wanted[SOC_GPIO_PIN_COUNT] = { 0 };
-
-    for (size_t i = 0; i < n; i++) {
-        const int pin = w[i].gpio;
-        if (pin < 0 || pin >= SOC_GPIO_PIN_COUNT) {
-            continue;
-        }
-        wanted[pin] = true;
-
-        gpio_config_t io = {
-            .pin_bit_mask = 1ULL << pin,
-            .mode         = GPIO_MODE_INPUT,
-            .pull_up_en   = w[i].pull == ZBC_PULL_UP   ? GPIO_PULLUP_ENABLE   : GPIO_PULLUP_DISABLE,
-            .pull_down_en = w[i].pull == ZBC_PULL_DOWN ? GPIO_PULLDOWN_ENABLE : GPIO_PULLDOWN_DISABLE,
-            .intr_type    = GPIO_INTR_DISABLE,
-        };
-        esp_err_t err = gpio_config(&io);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "GPIO %d refused by the driver (0x%x)", pin, err);
-            wanted[pin] = false;
-            continue;
-        }
-        s_owned[pin] = true;
-    }
-
-    for (int pin = 0; pin < SOC_GPIO_PIN_COUNT; pin++) {
-        if (s_owned[pin] && !wanted[pin]) {
-            gpio_reset_pin(pin);
-            s_owned[pin] = false;
-        }
-    }
-
-    /* The failsafe pin is watched whether or not anybody made a button of it, so
-     * a bare board can always be let back into. A button on that pin wins: its
-     * wiring is the truth, and its own slot counts the presses. Not recorded in
-     * s_owned, so the loop above never hands it back. */
-#if CONFIG_ZBC_UNLOCK_GPIO >= 0
-    const int up = CONFIG_ZBC_UNLOCK_GPIO;
-    if (up < SOC_GPIO_PIN_COUNT && !wanted[up]) {
-        gpio_config_t io = {
-            .pin_bit_mask = 1ULL << up,
-            .mode         = GPIO_MODE_INPUT,
-            .pull_up_en   = GPIO_PULLUP_ENABLE,
-            .pull_down_en = GPIO_PULLDOWN_DISABLE,
-            .intr_type    = GPIO_INTR_DISABLE,
-        };
-        return gpio_config(&io) == ESP_OK;
-    }
-#endif
-    return false;
-}
-
 /* Matching on the source as well as the pin: a button switched from a pin to
  * a remote is a different button as far as a half-finished gesture is
  * concerned, and carrying one over would invent a press. */
@@ -872,7 +640,11 @@ void buttons_reload(void)
     }
     free(b);
 
-    const bool    unlock_self = apply_pins(w, n);
+    uint64_t wanted = 0;
+    for (size_t i = 0; i < n; i++) {
+        btn_pin_take(&wanted, w[i].gpio, w[i].pull);
+    }
+    const bool    unlock_self = btn_pins_settle(wanted);
     const int64_t now         = esp_timer_get_time();
     bool          placed[CONFIG_ZBC_MAX_BUTTONS] = { false };
 
@@ -1824,27 +1596,6 @@ static void buttons_task(void *arg)
 
 /* ---------------------------------------------------------------------- public */
 
-const char *buttons_pin_problem(int gpio)
-{
-    if (gpio == -1) {
-        return NULL;                       /* a button without a pin is just unfinished */
-    }
-    if (gpio < 0 || gpio >= SOC_GPIO_PIN_COUNT) {
-        return "that pin does not exist on this chip";
-    }
-#if CONFIG_IDF_TARGET_ESP32C6
-    /* GPIO 12 and 13 are the USB port's D- and D+, and allowed: the console is
-     * the UART, and a converted Shelly wires its wall switch input to GPIO 12.
-     * Using one disconnects USB serial while the pin is configured; flashing over
-     * USB still works from the ROM bootloader (hold BOOT while plugging in). The
-     * page says so beside those two pins. */
-    if (gpio >= 24 && gpio <= 30) {
-        return "GPIO 24-30 are wired to the flash chip";
-    }
-#endif
-    return NULL;
-}
-
 esp_err_t buttons_start(void)
 {
     if (s_queue) {
@@ -1947,10 +1698,7 @@ void buttons_remote_event(const uint8_t ieee[ZBC_BTN_IEEE_LEN], uint8_t ep, uint
             s_live[i].last_event_us = now;
             zbc_state_bump();         /* "last heard" on the button's page */
             emit = zbtn_step(&s_live[i].zfsm, ev, s_live[i].want_double, now);
-            /* Clicks on the on/off key only. A Hue Smart Button decodes each Level
-             * Step as a click on key 1 or 2, and sends one about every 800 ms while
-             * held - so counting those would let a four-second hold open the box. */
-            if ((ev == ZB_REMOTE_CLICK || ev == ZB_REMOTE_SINGLE) && key == 0) {
+            if (remote_press_unlocks(ev, key, ep)) {
                 unlocked = unlock_tap(&s_live[i].unlock, now);
             }
         }

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import OtaProgress from "$lib/components/OtaProgress.svelte";
 	import * as Card from "$lib/components/ui/card";
 	import { Button } from "$lib/components/ui/button";
 	import { Input } from "$lib/components/ui/input";
@@ -364,14 +365,7 @@
 			Updater {s?.ota?.updater ?? "unknown"}. The updater is the small second firmware that installs this one. Replace it only with the elixcon_light_hub_updater.bin built alongside the firmware; the coordinator keeps running while it is written.
 		</div>
 		<div><Button variant="ghost" size="sm" disabled={ota.busy} onclick={() => updaterInput.click()}>Replace updater…</Button></div>
-		{#if ota.shown}
-			{#if ota.fraction === null}
-				<div class="bg-muted h-2 w-full overflow-hidden rounded-full"><div class="bg-primary h-full w-1/3 animate-pulse rounded-full"></div></div>
-			{:else}
-				<Progress value={ota.fraction * 100} class="h-2" />
-			{/if}
-			<div class="text-muted-foreground text-xs">{ota.message}</div>
-		{/if}
+		<OtaProgress />
 	</Card.Content>
 </Card.Root>
 

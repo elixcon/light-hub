@@ -147,6 +147,7 @@ void app_main(void)
         ESP_LOGW(TAG, "SNTP did not start; Adaptive Lighting waits for a clock");
     }
 
+    zb_set_endpoint_gone_handler(lighting_forget_endpoint);
     ESP_ERROR_CHECK(zb_coordinator_start());
     ESP_LOGI(TAG, "Zigbee coordinator running");
 

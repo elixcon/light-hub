@@ -219,7 +219,7 @@ const char *updater_message(void)
     case UPD_STAY_FAILED:
         return "The last update did not start, so the coordinator is not running. Upload a working image.";
     case UPD_STAY_EMPTY:
-        return "No working coordinator firmware is installed. Upload one to start it.";
+        return "No working firmware is installed. Upload one to start it.";
     default:
         return "Starting the coordinator.";
     }

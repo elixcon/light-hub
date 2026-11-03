@@ -10,6 +10,7 @@
 #include "nvs_flash.h"
 
 #include "device_db.h"
+#include "node_proto.h"
 #include "state_rev.h"
 
 static const char *TAG = "device_db";
@@ -397,6 +398,14 @@ esp_err_t device_db_clear_features(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep,
     return err;
 }
 
+static esp_err_t erase_endpoint_locked(zbc_device_t *dev, int i)
+{
+    memmove(&dev->eps[i], &dev->eps[i + 1], (size_t)(dev->ep_count - i - 1) * sizeof(dev->eps[0]));
+    dev->ep_count--;
+    memset(&dev->eps[dev->ep_count], 0, sizeof(dev->eps[0]));
+    return db_save_locked();              /* which bumps the state revision */
+}
+
 esp_err_t device_db_remove_endpoint(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep)
 {
     DB_LOCK();
@@ -410,11 +419,23 @@ esp_err_t device_db_remove_endpoint(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep
             err = ESP_ERR_INVALID_STATE;
             break;
         }
-        memmove(&dev->eps[i], &dev->eps[i + 1], (size_t)(dev->ep_count - i - 1) * sizeof(dev->eps[0]));
-        dev->ep_count--;
-        memset(&dev->eps[dev->ep_count], 0, sizeof(dev->eps[0]));
-        err = db_save_locked();           /* which bumps the state revision */
+        err = erase_endpoint_locked(dev, i);
         break;
+    }
+    DB_UNLOCK();
+    return err;
+}
+
+esp_err_t device_db_drop_endpoint(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep)
+{
+    DB_LOCK();
+    zbc_device_t *dev = find_by_ieee(ieee);
+    esp_err_t     err = dev ? ESP_OK : ESP_ERR_NOT_FOUND;
+    for (int i = 0; dev && i < dev->ep_count; i++) {
+        if (dev->eps[i].ep == ep) {
+            err = erase_endpoint_locked(dev, i);
+            break;
+        }
     }
     DB_UNLOCK();
     return err;
@@ -500,6 +521,18 @@ esp_err_t device_db_set_attr_by_short(uint16_t short_addr, uint8_t ep, zbc_attr_
     esp_err_t err = persist ? db_save_locked() : ESP_OK;
     DB_UNLOCK();
     return err;
+}
+
+bool device_db_is_node(const uint8_t ieee[ZBC_IEEE_LEN])
+{
+    bool node = false;
+    DB_LOCK();
+    const zbc_device_t *dev = find_by_ieee(ieee);
+    for (int i = 0; dev && i < dev->ep_count && !node; i++) {
+        node = dev->eps[i].ep == NODE_CONTROL_EP && (dev->eps[i].features & ZBC_FEAT_NODE);
+    }
+    DB_UNLOCK();
+    return node;
 }
 
 uint16_t device_db_features_by_short(uint16_t short_addr, uint8_t ep)
@@ -718,35 +751,6 @@ esp_err_t device_db_erase(void)
     }
     DB_UNLOCK();
     return err;
-}
-
-void zbc_ieee_to_str(const uint8_t ieee[ZBC_IEEE_LEN], char out[19])
-{
-    snprintf(out, 19, "0x%02x%02x%02x%02x%02x%02x%02x%02x",
-             ieee[0], ieee[1], ieee[2], ieee[3], ieee[4], ieee[5], ieee[6], ieee[7]);
-}
-
-bool zbc_str_to_ieee(const char *str, uint8_t out[ZBC_IEEE_LEN])
-{
-    if (!str) {
-        return false;
-    }
-    if (str[0] == '0' && (str[1] == 'x' || str[1] == 'X')) {
-        str += 2;
-    }
-    if (strlen(str) != ZBC_IEEE_LEN * 2) {
-        return false;
-    }
-    for (int i = 0; i < ZBC_IEEE_LEN; i++) {
-        char byte[3] = { str[i * 2], str[i * 2 + 1], 0 };
-        char *end    = NULL;
-        long v       = strtol(byte, &end, 16);
-        if (end != byte + 2) {
-            return false;
-        }
-        out[i] = (uint8_t)v;
-    }
-    return true;
 }
 
 esp_err_t device_db_set_lqa(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t lqa)

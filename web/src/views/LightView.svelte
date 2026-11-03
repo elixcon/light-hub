@@ -15,6 +15,8 @@
 	import SwitchPointEditor from "$lib/components/SwitchPointEditor.svelte";
 	import MixCurves from "$lib/components/MixCurves.svelte";
 	import FirmwareRow from "$lib/components/FirmwareRow.svelte";
+	import NodeWifiCard from "$lib/components/NodeWifiCard.svelte";
+	import { isNode } from "$lib/utils.ts";
 	import { data, pending, key, value, epPct, isRemoteEp, findEp, findGroup, refresh, schedule, seenIeee,
 		setOnOff, setLevel, sendCommand, getOffEpoch } from "$lib/state.svelte.ts";
 	import { api, post, patch, del } from "$lib/api.ts";
@@ -40,7 +42,8 @@
 	import { channelsOf, curvesFromJson, curvesFromMix, curvesToJson, type MixCurves as Curves,
 		type MixCurvesJson } from "$lib/mix.ts";
 
-	let { ieee, ep }: { ieee: string; ep: number } = $props();
+	/* `node`: on a Light Node's own page, where curves and rooms are the hub's. */
+	let { ieee, ep, node = false }: { ieee: string; ep: number; node?: boolean } = $props();
 
 	const found = $derived(findEp(ieee, ep));
 	const d = $derived(found?.device);
@@ -75,7 +78,7 @@
 
 	async function load() {
 		const id = `${ieee}/${ep}`;
-		if (c.loaded === id || !e) return;
+		if (c.loaded === id || !e || node) return;
 		c.loaded = id;
 		try {
 			const cs = await api(`/api/devices/${ieee}/ep/${ep}/curves`);
@@ -266,6 +269,13 @@
 		<Card.Root class="mt-4"><Card.Content class="text-muted-foreground text-sm">
 			This is a remote: it sends presses rather than answering commands. Set up its buttons under <a href="#/remotes" class="text-primary underline underline-offset-4">Remotes</a>.
 		</Card.Content></Card.Root>
+	{:else if node}
+		{#if dims}
+			<Card.Root class="mt-4"><Card.Content>
+				<Label class="mb-2 block">Try it</Label>
+				<LevelSlider {pct} {on} label="Test brightness" onsend={(v) => setLevel(ieee, ep, v)} />
+			</Card.Content></Card.Root>
+		{/if}
 	{:else if f.includes("onoff")}
 		<!-- Response -->
 		<Card.Root class="mt-4">
@@ -473,7 +483,7 @@
 					<label class="flex items-center gap-2"><input type="radio" name="lpolarity" class="accent-primary" checked={!!d.active_low} onchange={() => saveWiring({ active_low: true })} /> LOW (GND) — {pwm ? "drivers with an inverting input" : "\"low-level trigger\" relay modules"}</label>
 				</div>
 				<div class="flex flex-col gap-2 text-sm">
-					<span class="font-medium">When the coordinator starts</span>
+					<span class="font-medium">{node ? "When it starts" : "When the coordinator starts"}</span>
 					<div class="flex flex-wrap gap-x-4 gap-y-2">
 						{#each POWER_ON as [v, label] (v)}
 							<label class="flex items-center gap-2"><input type="radio" name="lpoweron" class="accent-primary" checked={(d.power_on ?? "off") === v} onchange={() => saveWiring({ power_on: v })} /> {label}</label>
@@ -489,6 +499,8 @@
 		</Card.Root>
 	{/if}
 
+	<NodeWifiCard device={d} />
+
 	<!-- Device -->
 	<Card.Root class="mt-4">
 		<Card.Header><Card.Title>Device</Card.Title></Card.Header>
@@ -503,7 +515,7 @@
 				{:else}
 					<dt>Model</dt><dd class="text-foreground">{[d.manufacturer, d.model].filter(Boolean).join(" · ") || "unknown"}</dd>
 				{/if}
-				<dt>Address</dt><dd class="text-foreground font-mono text-xs">{d.ieee} · endpoint {e.ep}</dd>
+				{#if !node}<dt>Address</dt><dd class="text-foreground font-mono text-xs">{d.ieee} · endpoint {e.ep}</dd>{/if}
 				{#if matter}
 					<dt>Matter</dt><dd class="text-foreground">node <span class="font-mono text-xs">{d.node_id}</span> · endpoint {d.remote_ep}{d.bridged ? " · behind a hub" : ""}</dd>
 					<dt>Vendor</dt><dd class="text-foreground font-mono text-xs">{hex4(d.vendor_id ?? 0)} · product {hex4(d.product_id ?? 0)}</dd>
@@ -514,12 +526,12 @@
 					<dt>Link</dt><dd class="text-foreground">{linkText(d)}{d.online ? "" : " · offline"}</dd>
 					<dt>Last seen</dt><dd class="text-foreground">{agoS(d.last_seen_s_ago)}</dd>
 				{/if}
-				<dt>Rooms</dt><dd class="text-foreground">{groupsOf.length ? groupsOf.join(", ") : "none"}</dd>
+				{#if !node}<dt>Rooms</dt><dd class="text-foreground">{groupsOf.length ? groupsOf.join(", ") : "none"}</dd>{/if}
 			</dl>
 			{#if matter && d.bridged}
 				<div class="text-muted-foreground text-xs">A lamp added to the hub later appears here after <b>Rescan device</b>.</div>
 			{/if}
-			{#if !wired && !matter}<FirmwareRow device={d} />{/if}
+			{#if !wired && !matter && !isNode(d)}<FirmwareRow device={d} />{/if}
 			<div class="flex flex-wrap gap-2">
 				{#if matter && !d.needs_pairing}<Button variant="outline" onclick={rescan}>Rescan device</Button>{/if}
 				<Button variant="destructive" onclick={remove}><Trash /> Remove device</Button>

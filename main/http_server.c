@@ -28,6 +28,9 @@
 #include "device_db.h"
 #include "group_db.h"
 #include "http_server.h"
+#include "http_util.h"
+#include "http_wired.h"
+#include "node_proto.h"
 #include "light_db.h"
 #include "lighting.h"
 #include "local_lights.h"
@@ -53,408 +56,9 @@ static const char *TAG = "http";
 
 /* Devices we have not heard from in a while are shown as stale in the UI. */
 #define OFFLINE_AFTER_US (10 * 60 * 1000000LL)
-/* A whole button - its wiring and every gesture's rules - is the largest body
- * anything posts here: about 1.8 KB with a full pool of rules that each name a
- * light. */
-#define MAX_BODY_LEN     4096
-
-extern const uint8_t index_html_start[] asm("_binary_index_html_gz_start");
-extern const uint8_t index_html_end[]   asm("_binary_index_html_gz_end");
-
 static httpd_handle_t s_server;
 
-/* ------------------------------------------------------------- utilities */
-
-static esp_err_t send_json(httpd_req_t *req, cJSON *root, const char *status)
-{
-    char *body = cJSON_PrintUnformatted(root);
-    cJSON_Delete(root);
-    if (!body) {
-        return httpd_resp_send_500(req);
-    }
-    heap_watch_note_body(strlen(body));
-    httpd_resp_set_status(req, status);
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    esp_err_t err = httpd_resp_sendstr(req, body);
-    free(body);
-    return err;
-}
-
-/* A JSON response written as it is built, in chunks.
- *
- * send_json holds the whole cJSON tree and then its printed text at once, and
- * cJSON costs five to six bytes of heap per byte of JSON: a full /api/state
- * would take about 58 KB of a heap with about 88 KB free. Here each device,
- * group or button is built, printed into one small buffer and freed before the
- * next, and the buffer goes out as a chunk whenever it fills.
- *
- * Once the first chunk is out the status is sent, so a failure after that can
- * only end the response early; json_stream_end then answers ESP_FAIL and the
- * server drops the connection, which the page treats as a failed poll. */
-#define JSON_STREAM_BUF 2048
-
-static esp_err_t send_error(httpd_req_t *req, const char *status, const char *message);
-
-typedef struct {
-    httpd_req_t *req;
-    char        *buf;
-    size_t       len;
-    size_t       total;
-    bool         failed;
-} json_stream_t;
-
-static bool json_stream_begin(json_stream_t *js, httpd_req_t *req)
-{
-    *js = (json_stream_t){ .req = req, .buf = malloc(JSON_STREAM_BUF) };
-    if (!js->buf) {
-        return false;
-    }
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    return true;
-}
-
-static void json_stream_flush(json_stream_t *js)
-{
-    if (js->len && !js->failed && httpd_resp_send_chunk(js->req, js->buf, js->len) != ESP_OK) {
-        js->failed = true;
-    }
-    js->total += js->len;
-    js->len = 0;
-}
-
-static void json_stream_raw(json_stream_t *js, const char *text)
-{
-    for (size_t n = strlen(text); n;) {
-        if (js->len == JSON_STREAM_BUF) {
-            json_stream_flush(js);
-        }
-        const size_t take = MIN(n, JSON_STREAM_BUF - js->len);
-        memcpy(js->buf + js->len, text, take);
-        js->len += take;
-        text += take;
-        n -= take;
-    }
-}
-
-/* Writes `sep` and the item, and frees the item. Printed straight into the
- * buffer when it fits there, or into an empty one; only an item larger than
- * the whole buffer is printed on its own, which nothing streamed here now is.
- * False when it could not be printed at all - nothing was written. */
-static bool json_stream_item(json_stream_t *js, const char *sep, cJSON *item)
-{
-    if (!item) {
-        return false;
-    }
-    const size_t seplen = strlen(sep);
-    bool         done   = false;
-    for (int attempt = 0; attempt < 2 && !done; attempt++) {
-        if (attempt == 1) {
-            json_stream_flush(js);
-        }
-        /* cJSON_PrintPreallocated wants a few bytes more than it writes. */
-        const size_t room = JSON_STREAM_BUF - js->len;
-        if (room > seplen + 6 &&
-            cJSON_PrintPreallocated(item, js->buf + js->len + seplen, (int)(room - seplen), false)) {
-            memcpy(js->buf + js->len, sep, seplen);
-            js->len += seplen + strlen(js->buf + js->len + seplen);
-            done = true;
-        }
-    }
-    if (!done) {
-        char *text = cJSON_PrintUnformatted(item);
-        if (text) {
-            json_stream_raw(js, sep);
-            json_stream_raw(js, text);
-            free(text);
-            done = true;
-        }
-    }
-    cJSON_Delete(item);
-    return done;
-}
-
-/* An object member's value: null rather than nothing, so the JSON stays whole. */
-static void json_stream_value(json_stream_t *js, cJSON *item)
-{
-    if (!json_stream_item(js, "", item)) {
-        json_stream_raw(js, "null");
-    }
-}
-
-/* An array element, with the comma when it is not the first. An element that
- * could not be built is left out, never written as null - the page reads a
- * device's fields without checking for one. */
-static void json_stream_element(json_stream_t *js, bool *first, cJSON *item)
-{
-    if (json_stream_item(js, *first ? "" : ",", item)) {
-        *first = false;
-    }
-}
-
-/* An object member's name, with the comma when it is not the first. The braces
- * are the caller's and the value follows, so a member can be left out - or be
- * an object streamed in turn - without the separators going wrong. */
-static void json_stream_key(json_stream_t *js, bool *first, const char *name)
-{
-    json_stream_raw(js, *first ? "\"" : ",\"");
-    json_stream_raw(js, name);
-    json_stream_raw(js, "\":");
-    *first = false;
-}
-
-/* A member whose value is one small tree, built and freed here. */
-static void json_stream_member(json_stream_t *js, bool *first, const char *name, cJSON *value)
-{
-    json_stream_key(js, first, name);
-    json_stream_value(js, value);
-}
-
-/* A table could not be copied. Before anything went out that is an ordinary
- * error answer; after, the response is cut off, so the page keeps what it
- * showed and polls again - an empty list would read as every device gone. */
-static esp_err_t json_stream_fail(json_stream_t *js)
-{
-    if (js->total == 0 && !js->failed) {
-        free(js->buf);
-        js->buf = NULL;
-        return send_error(js->req, "500 Internal Server Error", "out of memory");
-    }
-    js->failed = true;
-    free(js->buf);
-    js->buf = NULL;
-    return ESP_FAIL;
-}
-
-static esp_err_t json_stream_end(json_stream_t *js)
-{
-    json_stream_flush(js);
-    if (!js->failed && httpd_resp_send_chunk(js->req, NULL, 0) != ESP_OK) {
-        js->failed = true;
-    }
-    free(js->buf);
-    js->buf = NULL;
-    heap_watch_note_body(js->total);
-    return js->failed ? ESP_FAIL : ESP_OK;
-}
-
-static esp_err_t send_error(httpd_req_t *req, const char *status, const char *message)
-{
-    cJSON *root = cJSON_CreateObject();
-    cJSON_AddStringToObject(root, "error", message);
-    return send_json(req, root, status);
-}
-
-static esp_err_t send_ok(httpd_req_t *req, const char *status)
-{
-    cJSON *root = cJSON_CreateObject();
-    cJSON_AddBoolToObject(root, "ok", true);
-    return send_json(req, root, status);
-}
-
-static void add_kelvin(cJSON *obj, const char *name, int32_t mireds)
-{
-    if (mireds <= 0) {
-        cJSON_AddNullToObject(obj, name);
-    } else {
-        cJSON_AddNumberToObject(obj, name, 1000000 / mireds);
-    }
-}
-
-/* Reads the request body and parses it as JSON. Returns NULL on any problem,
- * having already answered the request. */
-static cJSON *read_json_body(httpd_req_t *req)
-{
-    if (req->content_len <= 0 || req->content_len > MAX_BODY_LEN) {
-        send_error(req, "400 Bad Request", "body missing or too large");
-        return NULL;
-    }
-    char *buf = malloc(req->content_len + 1);
-    if (!buf) {
-        send_error(req, "500 Internal Server Error", "out of memory");
-        return NULL;
-    }
-    /* Looped: one recv is not one body. esp_http_server hands over whatever has
-     * arrived, and a body split across TCP segments would otherwise be parsed
-     * half-read and rejected as malformed. ota.c's multipart parser handles the
-     * same. */
-    int received = 0;
-    int timeouts = 0;
-    while (received < req->content_len) {
-        int n = httpd_req_recv(req, buf + received, req->content_len - received);
-        /* Bounded, as ota.c bounds it: esp_http_server serves one request at a
-         * time, and a client that announces a body and never sends it would
-         * otherwise hold the only server task for ever - from the unguarded
-         * sign-in route, without a key. */
-        if (n == HTTPD_SOCK_ERR_TIMEOUT && ++timeouts < 3) {
-            continue;
-        }
-        if (n <= 0) {
-            free(buf);
-            send_error(req, "400 Bad Request", "could not read body");
-            return NULL;
-        }
-        received += n;
-    }
-    buf[received] = '\0';
-
-    cJSON *json = cJSON_Parse(buf);
-    free(buf);
-    if (!json) {
-        send_error(req, "400 Bad Request", "body is not valid JSON");
-        return NULL;
-    }
-    return json;
-}
-
-/* Copies path segment `index` of the URI (0 = first) into out. */
-static bool uri_segment(const char *uri, int index, char *out, size_t out_size)
-{
-    const char *p = uri;
-    for (int i = 0; i <= index; i++) {
-        while (*p == '/') {
-            p++;
-        }
-        if (*p == '\0') {
-            return false;
-        }
-        if (i == index) {
-            size_t n = 0;
-            while (p[n] && p[n] != '/' && p[n] != '?') {
-                n++;
-            }
-            if (n >= out_size) {
-                return false;
-            }
-            memcpy(out, p, n);
-            out[n] = '\0';
-            return true;
-        }
-        while (*p && *p != '/') {
-            p++;
-        }
-    }
-    return false;
-}
-
-/* --------------------------------------------------------------- access */
-
-/* Finding the key a request carries is auth_http.c's, shared with the updater,
- * which has to accept the same cookie. Who needs one is decided here. */
-
-typedef enum {
-    ACCESS_LOCKED = 0,
-    ACCESS_SETUP,      /* the provisioning AP: whoever is on it is standing at the board */
-    ACCESS_OPEN,       /* no keys yet */
-    ACCESS_FAILSAFE,   /* a button was pressed five times */
-} access_mode_t;
-
-static const char *const ACCESS_NAMES[] = { "locked", "setup", "open", "failsafe" };
-
-/* Whether a request with no key gets in, and why. The setup portal is open on
- * purpose: the person on its network is within Wi-Fi range of the board, the
- * captive-portal browsers phones open throw cookies away, and a lock on the one
- * page that gets the box onto a network would be a lock on the only way back. */
-static access_mode_t access_mode(void)
-{
-    if (wifi_manager_mode() == WIFI_MGR_MODE_AP) {
-        return ACCESS_SETUP;
-    }
-    if (auth_key_count() == 0) {
-        return ACCESS_OPEN;
-    }
-    if (auth_failsafe_left_s() > 0) {
-        return ACCESS_FAILSAFE;
-    }
-    return ACCESS_LOCKED;
-}
-
-typedef esp_err_t (*route_fn_t)(httpd_req_t *req);
-
-/* Every route but three is registered through this, with the real handler in
- * user_ctx - so a route added later cannot forget to check, which a line at the
- * top of each handler could. */
-static esp_err_t guarded(httpd_req_t *req)
-{
-    const uint16_t id = auth_http_presented_key(req, NULL, NULL);
-    if (id) {
-        auth_touch(id);
-    } else if (access_mode() == ACCESS_LOCKED) {
-        /* The upload reads its reason from this header, and its body has to stay
-         * ESPHome's - see ota.c. */
-        if (strncmp(req->uri, "/update", 7) == 0) {
-            httpd_resp_set_hdr(req, "X-Ota-Error", "This browser is not signed in to the coordinator");
-        }
-        return send_error(req, "401 Unauthorized", "locked");
-    }
-    heap_watch_request_begin();
-    const esp_err_t err = ((route_fn_t)req->user_ctx)(req);
-    heap_watch_request_end(req);
-    return err;
-}
-
-/* The three routes a locked caller reaches, measured like the guarded ones. */
-static esp_err_t watched(httpd_req_t *req)
-{
-    heap_watch_request_begin();
-    const esp_err_t err = ((route_fn_t)req->user_ctx)(req);
-    heap_watch_request_end(req);
-    return err;
-}
-
-static cJSON *auth_json(httpd_req_t *req)
-{
-    const access_mode_t mode = access_mode();
-    const uint16_t      id   = auth_http_presented_key(req, NULL, NULL);
-    zbc_auth_key_t      k;
-
-    cJSON *a = cJSON_CreateObject();
-    cJSON_AddStringToObject(a, "mode", ACCESS_NAMES[mode]);
-    cJSON_AddBoolToObject(a, "authorized", id != 0 || mode != ACCESS_LOCKED);
-    cJSON_AddNumberToObject(a, "keys", auth_key_count());
-    cJSON_AddNumberToObject(a, "failsafe_left_s", auth_failsafe_left_s());
-    if (id && auth_get(id, &k)) {
-        cJSON *cur = cJSON_AddObjectToObject(a, "current");
-        cJSON_AddNumberToObject(cur, "id", k.id);
-        cJSON_AddStringToObject(cur, "name", k.name);
-    } else {
-        cJSON_AddNullToObject(a, "current");
-    }
-    return a;
-}
-
 /* ------------------------------------------------------------- handlers */
-
-static esp_err_t index_get(httpd_req_t *req)
-{
-    /* The page changes with every firmware image and never between two, so the
-     * image's own hash is its ETag. A browser that revalidates (no-cache below)
-     * then gets a 304 and its cached copy instead of the whole page on every
-     * reload, which a phone makes every time the page is brought to the front. */
-    char build[17];
-    char etag[24];
-    esp_app_get_elf_sha256(build, sizeof(build));
-    snprintf(etag, sizeof(etag), "\"%s\"", build);
-    httpd_resp_set_hdr(req, "ETag", etag);
-    /* The page changes with every firmware image, and a browser left to guess
-     * keeps showing the old one after an update. */
-    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
-
-    char have[32];
-    if (httpd_req_get_hdr_value_str(req, "If-None-Match", have, sizeof(have)) == ESP_OK &&
-        strcmp(have, etag) == 0) {
-        httpd_resp_set_status(req, "304 Not Modified");
-        return httpd_resp_send(req, NULL, 0);
-    }
-
-    /* Embedded gzipped (see main/CMakeLists.txt), so the whole length is sent:
-     * dropping a trailing byte, as a text embed would, truncates the stream. */
-    httpd_resp_set_type(req, "text/html");
-    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
-    return httpd_resp_send(req, (const char *)index_html_start,
-                           index_html_end - index_html_start);
-}
 
 /* The three views the UI polls, split out from their handlers so `/api/state`
  * can answer with all of them at once. esp_http_server serves one request at a
@@ -473,30 +77,6 @@ static esp_err_t index_get(httpd_req_t *req)
  * Every member goes through json_stream_member / json_stream_key, so a piece
  * that could not be built is a null member rather than a broken object, and a
  * member left out takes its separator with it. */
-
-static cJSON *wifi_json(void)
-{
-    wifi_mgr_status_t wifi;
-    wifi_manager_get_status(&wifi);
-
-    cJSON *w = cJSON_CreateObject();
-    cJSON_AddStringToObject(w, "mode", wifi.mode == WIFI_MGR_MODE_AP ? "ap" : "sta");
-    cJSON_AddBoolToObject(w, "connected", wifi.connected);
-    cJSON_AddStringToObject(w, "ssid", wifi.ssid);
-    cJSON_AddStringToObject(w, "ip", wifi.ip);
-    cJSON_AddStringToObject(w, "hostname", wifi.hostname);
-    cJSON_AddNumberToObject(w, "rssi", wifi.rssi);
-    cJSON_AddNumberToObject(w, "channel", wifi.channel);
-    cJSON_AddBoolToObject(w, "weak_uplink", wifi.weak);
-    /* A hotspot started by ten button presses, which goes back to the stored
-     * network by itself - the setup page shows where to and when. */
-    cJSON_AddBoolToObject(w, "temporary_hotspot", wifi.temporary);
-    if (wifi.temporary) {
-        cJSON_AddStringToObject(w, "home_ssid", wifi.home_ssid);
-        cJSON_AddNumberToObject(w, "returns_in_s", wifi.returns_in_s);
-    }
-    return w;
-}
 
 /* Only while there is no network: what the stack has said since boot, so a
  * formation that goes nowhere can be read here rather than on a serial port
@@ -692,71 +272,6 @@ static void stream_zigbee(json_stream_t *js)
     json_stream_raw(js, "}");
 }
 
-/* Overheat protection. On every poll, like the rest of the status, so the
- * temperature moves without a revision bump; a change of state bumps one. */
-static cJSON *thermal_json(void)
-{
-    thermal_status_t th;
-    thermal_get(&th);
-    cJSON *t = cJSON_CreateObject();
-    static const char *const THERMAL_STATES[] = { "ok", "hot", "fault" };
-    cJSON_AddStringToObject(t, "state", !th.configured ? "off" : THERMAL_STATES[th.state < 3 ? th.state : 2]);
-    if (th.configured && th.have) {
-        cJSON_AddNumberToObject(t, "temp_c", th.deci_c / 10.0);
-        cJSON_AddNumberToObject(t, "max_c", th.max_deci_c / 10.0);
-    } else {
-        cJSON_AddNullToObject(t, "temp_c");
-        cJSON_AddNullToObject(t, "max_c");
-    }
-    cJSON_AddNumberToObject(t, "trip_c", th.trip_c);
-    cJSON_AddNumberToObject(t, "release_c", th.trip_c - ZBC_THERMAL_RELEASE_DECI_C / 10.0);
-    cJSON_AddNumberToObject(t, "trips", th.trips);
-    cJSON_AddNumberToObject(t, "mv", th.mv);
-    cJSON_AddBoolToObject(t, "held", local_lights_held());
-    return t;
-}
-
-/* The wired lights' fade task: how often it came late while something moved.
- * Free-running since boot, like the radio counters - sample around a fade. */
-static cJSON *wired_json(void)
-{
-    local_lights_fade_stats_t f;
-    local_lights_fade_stats(&f);
-    cJSON *w = cJSON_CreateObject();
-    cJSON_AddNumberToObject(w, "fade_ticks", f.ticks);
-    cJSON_AddNumberToObject(w, "fade_late", f.late);
-    cJSON_AddNumberToObject(w, "fade_max_gap_ms", f.max_gap_ms);
-    return w;
-}
-
-/* This firmware and the updater beside it. */
-static cJSON *ota_json(void)
-{
-    cJSON *o = cJSON_CreateObject();
-    cJSON_AddStringToObject(o, "partition", ota_running_label());
-    cJSON_AddBoolToObject(o, "pending_verify", ota_pending_verify());
-    /* Which updater a box has, and whether it is whole: the coordinator will
-     * not hand an update over to one that does not verify, and the page offers
-     * to replace it. */
-    const char *updater = ota_updater_version();
-    if (updater) {
-        cJSON_AddStringToObject(o, "updater", updater);
-    } else {
-        cJSON_AddNullToObject(o, "updater");
-    }
-    const char *updater_problem = ota_updater_problem();
-    cJSON_AddBoolToObject(o, "updater_valid", updater_problem == NULL);
-    if (updater_problem) {
-        cJSON_AddStringToObject(o, "updater_problem", updater_problem);
-    } else {
-        cJSON_AddNullToObject(o, "updater_problem");
-    }
-    /* "old" until the updater has rewritten the partition table with room for
-     * Zigbee device firmware - see partitions.csv. */
-    cJSON_AddStringToObject(o, "layout", zb_ota_has_partition() ? "current" : "old");
-    return o;
-}
-
 /* heap_watch's three tables, a row at a time: with the watch built in they are
  * the largest thing here, and a row is a few dozen bytes. The sink closes the
  * array it opened when the next one begins, and stream_heap closes the last. */
@@ -829,23 +344,12 @@ static void stream_status(json_stream_t *js, bool heap_tables)
     json_stream_member(js, &first, "wled", wled_status_json());
 #endif
     json_stream_member(js, &first, "device_count", cJSON_CreateNumber(device_db_count()));
-    json_stream_member(js, &first, "uptime_s",
-                       cJSON_CreateNumber((double)(esp_timer_get_time() / 1000000)));
-    /* Why this boot happened, so "the board seems to have crashed" can be told
-     * from a power cut - and where the last crash was, since there is no core
-     * dump partition and the panic handler prints only to the serial port. */
-    json_stream_member(js, &first, "reset_reason",
-                       cJSON_CreateString(crash_log_reset_reason_name(esp_reset_reason())));
-    json_stream_member(js, &first, "last_crash", crash_log_json());
-    json_stream_member(js, &first, "version",
-                       cJSON_CreateString(esp_app_get_description()->version));
-    /* Unique per image, where `version` is only the git description - two
-     * builds from one uncommitted tree share it. The UI reloads itself when this
-     * changes, so it has to change whenever the firmware does. */
-    char build[17];
-    esp_app_get_elf_sha256(build, sizeof(build));
-    json_stream_member(js, &first, "build", cJSON_CreateString(build));
-    json_stream_member(js, &first, "ota", ota_json());
+    stream_firmware_status(js, &first);
+    cJSON *ota = ota_json();
+    /* "old" until the updater has rewritten the partition table with room for
+     * Zigbee device firmware - see partitions.csv. */
+    cJSON_AddStringToObject(ota, "layout", zb_ota_has_partition() ? "current" : "old");
+    json_stream_member(js, &first, "ota", ota);
     json_stream_key(js, &first, "heap");
     stream_heap(js, heap_tables);
     json_stream_raw(js, "}");
@@ -859,32 +363,6 @@ static esp_err_t status_get(httpd_req_t *req)
     }
     stream_status(&js, true);
     return json_stream_end(&js);
-}
-
-/* NULL when the snapshot cannot be allocated; the caller answers 500. */
-/* zbc_light_boot_t, as the API spells it. */
-static const char *const LIGHT_BOOT_NAMES[ZBC_LIGHT_BOOT_COUNT] = { "off", "on", "last" };
-static const char *const LIGHT_KIND_NAMES[ZBC_LIGHT_KIND_COUNT] = { "onoff", "cwww", "dim", "cwnwww" };
-static const char *const LIGHT_MIX_NAMES[ZBC_MIX_COUNT]         = { "constant", "full", "custom" };
-/* A light's mixing curves, by ZBC_CH_* as the API names them. */
-static const char *const LIGHT_CH_NAMES[ZBC_PWM_MAX_LIGHT_CH]  = { "cold", "neutral", "warm" };
-
-/* {"points": [[x, y], ...]}, or null for a channel with no curve - the shape a
- * brightness curve has, so the page edits both with one chart. */
-static cJSON *mix_curve_to_json(const zbc_mix_curve_t *c)
-{
-    if (c->n == 0) {
-        return cJSON_CreateNull();
-    }
-    cJSON *obj    = cJSON_CreateObject();
-    cJSON *points = cJSON_AddArrayToObject(obj, "points");
-    for (int i = 0; i < c->n; i++) {
-        cJSON *pair = cJSON_CreateArray();
-        cJSON_AddItemToArray(pair, cJSON_CreateNumber(c->x[i]));
-        cJSON_AddItemToArray(pair, cJSON_CreateNumber(c->y[i]));
-        cJSON_AddItemToArray(points, pair);
-    }
-    return obj;
 }
 
 /* One device as /api/devices and /api/state list it. */
@@ -927,44 +405,7 @@ static cJSON *device_to_json(const zbc_device_t *dev, int64_t now)
         cJSON_AddBoolToObject(d, "needs_pairing", mctl_running() && !mctl_has_fabric());
     }
     if (light_id && light_db_get(light_id, &light)) {
-        cJSON_AddNumberToObject(d, "id", light_id);
-        if (light.gpio < 0) {
-            cJSON_AddNullToObject(d, "gpio");
-        } else {
-            cJSON_AddNumberToObject(d, "gpio", light.gpio);
-        }
-        cJSON_AddBoolToObject(d, "active_low", light.active_low);
-        cJSON_AddStringToObject(d, "power_on",
-                                LIGHT_BOOT_NAMES[light.boot < ZBC_LIGHT_BOOT_COUNT ? light.boot : 0]);
-        cJSON_AddStringToObject(d, "kind",
-                                LIGHT_KIND_NAMES[light.kind < ZBC_LIGHT_KIND_COUNT ? light.kind : 0]);
-        if (light.gpio_warm < 0) {
-            cJSON_AddNullToObject(d, "gpio_warm");
-        } else {
-            cJSON_AddNumberToObject(d, "gpio_warm", light.gpio_warm);
-        }
-        cJSON_AddNumberToObject(d, "pwm_hz", light.pwm_hz);
-        const int phase = local_light_pwm_phase(light_id);
-        if (phase < 0) {
-            cJSON_AddNullToObject(d, "pwm_phase");
-        } else {
-            cJSON_AddNumberToObject(d, "pwm_phase", phase);
-        }
-        cJSON_AddNumberToObject(d, "cold_kelvin", light.cold_k);
-        cJSON_AddNumberToObject(d, "warm_kelvin", light.warm_k);
-        if (light.gpio_neutral < 0) {
-            cJSON_AddNullToObject(d, "gpio_neutral");
-        } else {
-            cJSON_AddNumberToObject(d, "gpio_neutral", light.gpio_neutral);
-        }
-        cJSON_AddNumberToObject(d, "neutral_kelvin", light.neutral_k);
-        cJSON_AddStringToObject(d, "mix", LIGHT_MIX_NAMES[light.mix < ZBC_MIX_COUNT ? light.mix : 0]);
-        cJSON *curves = cJSON_AddObjectToObject(d, "mix_curves");
-        for (int c = 0; curves && c < ZBC_PWM_MAX_LIGHT_CH; c++) {
-            cJSON_AddItemToObject(curves, LIGHT_CH_NAMES[c], mix_curve_to_json(&light.curve[c]));
-        }
-        /* Held off by the overheat protection; switching on is refused. */
-        cJSON_AddBoolToObject(d, "held", local_lights_held());
+        wired_light_to_json(d, light_id, &light);
     }
 
     bool fresh = dev->last_seen_us > 0 && (now - dev->last_seen_us) < OFFLINE_AFTER_US;
@@ -1069,6 +510,21 @@ static cJSON *device_to_json(const zbc_device_t *dev, int64_t now)
          * because it really does advertise the cluster. */
         if (src->features & ZBC_FEAT_SWITCH) {
             cJSON_AddItemToArray(feat, cJSON_CreateString("switch"));
+        }
+        /* A Light Node: the page offers to open its Wi-Fi. */
+        if (src->features & ZBC_FEAT_NODE) {
+            static const char *const WIFI[] = { "off", "joining", "station", "hotspot" };
+            uint8_t state = NODE_WIFI_OFF, ip[4];
+            zb_node_wifi_get(dev->ieee, &state, ip);
+            cJSON_AddItemToArray(feat, cJSON_CreateString("node"));
+            cJSON_AddStringToObject(ep, "node_wifi", state < 4 ? WIFI[state] : "off");
+            if (state == NODE_WIFI_STATION) {
+                char addr[16];
+                snprintf(addr, sizeof(addr), "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
+                cJSON_AddStringToObject(ep, "node_ip", addr);
+            } else {
+                cJSON_AddNullToObject(ep, "node_ip");
+            }
         }
         /* The page offers a Hue dimmer's holds and double presses only once
          * they can arrive. */
@@ -1323,12 +779,6 @@ static uint16_t transition_ds_from_json(const cJSON *json)
 }
 
 /* The non-empty "name" string, or NULL. */
-static const char *name_from_json(const cJSON *json)
-{
-    const cJSON *name = cJSON_GetObjectItem(json, "name");
-    return cJSON_IsString(name) && name->valuestring[0] != '\0' ? name->valuestring : NULL;
-}
-
 /* POST /api/devices/{ieee}/ep/{ep}/onoff */
 static esp_err_t device_onoff_post(httpd_req_t *req, const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep)
 {
@@ -1531,38 +981,6 @@ static cJSON *chroma_to_json(const zbc_chroma_path_t *p)
 /* Reads {"points": [[x,y], ...]}. A missing or null member leaves the curve off.
  * Returns false only on a malformed member, so the caller can answer 400 rather
  * than quietly storing something the user did not ask for. */
-static bool curve_from_json(const cJSON *obj, zbc_curve_t *out)
-{
-    memset(out, 0, sizeof(*out));
-    if (!obj || cJSON_IsNull(obj)) {
-        return true;
-    }
-    const cJSON *points = cJSON_GetObjectItem(obj, "points");
-    if (!cJSON_IsArray(points)) {
-        return false;
-    }
-    int n = cJSON_GetArraySize(points);
-    if (n < 2 || n > ZBC_CURVE_MAX_POINTS) {
-        return false;
-    }
-    for (int i = 0; i < n; i++) {
-        const cJSON *pair = cJSON_GetArrayItem(points, i);
-        if (!cJSON_IsArray(pair) || cJSON_GetArraySize(pair) != 2) {
-            return false;
-        }
-        const cJSON *x = cJSON_GetArrayItem(pair, 0);
-        const cJSON *y = cJSON_GetArrayItem(pair, 1);
-        if (!cJSON_IsNumber(x) || !cJSON_IsNumber(y) ||
-            x->valueint < 0 || x->valueint > 255 || y->valueint < 0 || y->valueint > 65535) {
-            return false;
-        }
-        out->x[i] = (uint8_t)x->valueint;
-        out->y[i] = (uint16_t)y->valueint;
-    }
-    out->n = (uint8_t)n;
-    return true;
-}
-
 /* Reads {"stops": [{"at":1,"hue":307,"sat":78}, {"at":100,"kelvin":6000}, ...]}.
  *
  * Only the shape is checked here. The rules about where the stops may sit - two
@@ -1703,6 +1121,26 @@ static esp_err_t device_dispatch(httpd_req_t *req)
     uint8_t ieee[ZBC_IEEE_LEN];
     if (!zbc_str_to_ieee(ieee_str, ieee)) {
         return send_error(req, "400 Bad Request", "malformed device address");
+    }
+
+    /* /api/devices/{ieee}/wifi: a Light Node, to open its Wi-Fi. Like every command it
+     * answers 202: what the node then does arrives in its own frames. */
+    char sub[8];
+    if (req->method == HTTP_POST && uri_segment(req->uri, 3, sub, sizeof(sub)) && strcmp(sub, "wifi") == 0) {
+        uint8_t minutes = 0;
+        if (req->content_len > 0) {
+            cJSON *json = read_json_body(req);
+            if (!json) {
+                return ESP_FAIL;
+            }
+            const cJSON *m = cJSON_GetObjectItem(json, "minutes");
+            if (cJSON_IsNumber(m) && m->valueint > 0 && m->valueint <= 240) {
+                minutes = (uint8_t)m->valueint;
+            }
+            cJSON_Delete(json);
+        }
+        const esp_err_t err = zb_node_enter_wifi(ieee, minutes);
+        return err == ESP_OK ? send_ok(req, "202 Accepted") : send_command_result(req, ieee, err);
     }
 
     char tail[16];
@@ -1929,21 +1367,6 @@ static const char *event_name(uint8_t src, int ev)
     }
     return EVENT_NAMES[ev];
 }
-static const char *const PULL_NAMES[]   = { "none", "up", "down" };
-static const char *const INPUT_NAMES[]  = { "button", "switch" };
-
-static int name_index(const char *const *names, int n, const cJSON *item)
-{
-    if (!cJSON_IsString(item)) {
-        return -1;
-    }
-    for (int i = 0; i < n; i++) {
-        if (strcmp(names[i], item->valuestring) == 0) {
-            return i;
-        }
-    }
-    return -1;
-}
 
 static cJSON *button_to_json(const zbc_button_t *b)
 {
@@ -1966,14 +1389,7 @@ static cJSON *button_to_json(const zbc_button_t *b)
         cJSON_AddNullToObject(obj, "ep");
         cJSON_AddNullToObject(obj, "key");
     }
-    if (b->gpio < 0) {
-        cJSON_AddNullToObject(obj, "gpio");
-    } else {
-        cJSON_AddNumberToObject(obj, "gpio", b->gpio);
-    }
-    cJSON_AddBoolToObject(obj, "inverted", b->inverted);
-    cJSON_AddStringToObject(obj, "pull", PULL_NAMES[b->pull <= ZBC_PULL_DOWN ? b->pull : 0]);
-    cJSON_AddStringToObject(obj, "input", INPUT_NAMES[b->input < ZBC_INPUT_COUNT ? b->input : 0]);
+    button_wiring_to_json(obj, b);
 
     /* The live reading: how a wiring mistake shows on the page. */
     bool pressed = false;
@@ -2345,43 +1761,9 @@ static const char *button_from_json(const cJSON *json, zbc_button_t *out, uint16
         /* The pin fields are meaningless now, and valid_button says so. */
         out->gpio = -1;
     } else {
-        const cJSON *gpio = cJSON_GetObjectItem(json, "gpio");
-        if (cJSON_IsNull(gpio)) {
-            out->gpio = -1;
-        } else if (cJSON_IsNumber(gpio)) {
-            const int pin = gpio->valueint;
-            const char *why = buttons_pin_problem(pin);
-            if (why) {
-                return why;
-            }
-            zbc_thermal_cfg_t th;
-            settings_thermal(&th);
-            if (pin >= 0 && pin == th.gpio) {
-                return "that pin reads the overheat sensor";
-            }
-            out->gpio = (int8_t)pin;
-        }
-
-        const cJSON *inverted = cJSON_GetObjectItem(json, "inverted");
-        if (cJSON_IsBool(inverted)) {
-            out->inverted = cJSON_IsTrue(inverted);
-        }
-
-        const cJSON *pull = cJSON_GetObjectItem(json, "pull");
-        if (pull) {
-            const int p = name_index(PULL_NAMES, 3, pull);
-            if (p < 0) {
-                return "pull must be none, up or down";
-            }
-            out->pull = (uint8_t)p;
-        }
-        const cJSON *input = cJSON_GetObjectItem(json, "input");
-        if (input) {
-            const int k = name_index(INPUT_NAMES, ZBC_INPUT_COUNT, input);
-            if (k < 0) {
-                return "input must be button or switch";
-            }
-            out->input = (uint8_t)k;
+        const char *why = button_wiring_from_json(json, out);
+        if (why) {
+            return why;
         }
     }
 
@@ -2573,303 +1955,6 @@ static esp_err_t button_dispatch(httpd_req_t *req)
     return send_error(req, "404 Not Found", "no such button route");
 }
 
-/* --------------------------------------------------------------- wired lights */
-
-/* A wired light is created and wired here, and otherwise used through the
- * ordinary device routes under its made-up address - switching, curves, group
- * membership, rename and delete. See light_db.h. */
-
-/* POST /api/lights  {"name": "Porch"} -> {"id", "ieee", "ep"} */
-static esp_err_t lights_post(httpd_req_t *req)
-{
-    cJSON *json = read_json_body(req);
-    if (!json) {
-        return ESP_FAIL;
-    }
-    const char *name = name_from_json(json);
-    if (!name) {
-        cJSON_Delete(json);
-        return send_error(req, "400 Bad Request", "name is required");
-    }
-    uint16_t  id  = 0;
-    esp_err_t err = light_db_create(name, &id);
-    cJSON_Delete(json);
-
-    if (err == ESP_ERR_NO_MEM) {
-        return send_error(req, "507 Insufficient Storage", "no room for another wired light");
-    }
-    if (err != ESP_OK) {
-        return send_error(req, "500 Internal Server Error", "could not create the light");
-    }
-
-    uint8_t ieee[ZBC_IEEE_LEN];
-    char    ieee_str[19];
-    zbc_light_ieee(id, ieee);
-    zbc_ieee_to_str(ieee, ieee_str);
-
-    cJSON *root = cJSON_CreateObject();
-    cJSON_AddNumberToObject(root, "id", id);
-    cJSON_AddStringToObject(root, "ieee", ieee_str);
-    cJSON_AddNumberToObject(root, "ep", ZBC_LIGHT_EP);
-    return send_json(req, root, "201 Created");
-}
-
-/* Why the chip could not run every PWM light once `cand` is stored for light
- * `id`, or NULL. The same plan local_lights_reload runs, so nothing is accepted
- * here that would then sit dark. */
-static const char *pwm_plan_problem(const zbc_light_t *cand, uint16_t id)
-{
-    zbc_light_t    all[CONFIG_ZBC_MAX_LIGHTS];
-    const size_t   n                            = light_db_snapshot(all, CONFIG_ZBC_MAX_LIGHTS);
-    uint16_t       hz[CONFIG_ZBC_MAX_LIGHTS]    = { 0 };
-    uint8_t        chans[CONFIG_ZBC_MAX_LIGHTS] = { 0 };
-    zbc_pwm_slot_t slot[CONFIG_ZBC_MAX_LIGHTS];
-    uint16_t       timer_hz[ZBC_PWM_TIMERS];
-    for (size_t i = 0; i < n; i++) {
-        const zbc_light_t *l  = all[i].id == id ? cand : &all[i];
-        const uint8_t      ch = zbc_light_pwm_channels(l->kind);
-        /* Only a light with every pin chosen takes its channels, as in reload. */
-        if (ch && l->gpio >= 0 && (ch < 2 || l->gpio_warm >= 0) && (ch < 3 || l->gpio_neutral >= 0)) {
-            hz[i]    = l->pwm_hz;
-            chans[i] = ch;
-        }
-    }
-    return zbc_pwm_plan(hz, chans, n, slot, timer_hz);
-}
-
-/* A kelvin field, if present. Returns a reason on refusal. */
-static const char *kelvin_from_json(const cJSON *json, const char *field, uint16_t *out)
-{
-    const cJSON *k = cJSON_GetObjectItem(json, field);
-    if (!k) {
-        return NULL;
-    }
-    if (!cJSON_IsNumber(k) || k->valueint < ZBC_LIGHT_KELVIN_MIN || k->valueint > ZBC_LIGHT_KELVIN_MAX) {
-        return "a colour temperature must be 1000-10000 K";
-    }
-    *out = (uint16_t)k->valueint;
-    return NULL;
-}
-
-/* Fills `out` from the request body, leaving whatever the body does not mention
- * as it was. Returns a reason on refusal, NULL on success. */
-static const char *light_from_json(const cJSON *json, zbc_light_t *out, uint16_t id)
-{
-    const cJSON *name = cJSON_GetObjectItem(json, "name");
-    if (cJSON_IsString(name)) {
-        if (name->valuestring[0] == '\0') {
-            return "a light needs a name";
-        }
-        strlcpy(out->name, name->valuestring, sizeof(out->name));
-    }
-
-    const cJSON *gpio = cJSON_GetObjectItem(json, "gpio");
-    if (cJSON_IsNull(gpio)) {
-        out->gpio = -1;
-    } else if (cJSON_IsNumber(gpio)) {
-        const char *why = local_light_pin_problem(gpio->valueint);
-        if (why) {
-            return why;
-        }
-        out->gpio = (int8_t)gpio->valueint;
-    } else if (gpio) {
-        return "gpio must be a pin number or null";
-    }
-
-    const cJSON *low = cJSON_GetObjectItem(json, "active_low");
-    if (cJSON_IsBool(low)) {
-        out->active_low = cJSON_IsTrue(low);
-    }
-
-    const cJSON *boot = cJSON_GetObjectItem(json, "power_on");
-    if (boot) {
-        const int i = name_index(LIGHT_BOOT_NAMES, ZBC_LIGHT_BOOT_COUNT, boot);
-        if (i < 0) {
-            return "power_on must be off, on or last";
-        }
-        out->boot = (uint8_t)i;
-    }
-
-    const cJSON *kind = cJSON_GetObjectItem(json, "kind");
-    if (kind) {
-        const int i = name_index(LIGHT_KIND_NAMES, ZBC_LIGHT_KIND_COUNT, kind);
-        if (i < 0) {
-            return "kind must be onoff, dim, cwww or cwnwww";
-        }
-        out->kind = (uint8_t)i;
-    }
-
-    const cJSON *warm = cJSON_GetObjectItem(json, "gpio_warm");
-    if (cJSON_IsNull(warm)) {
-        out->gpio_warm = -1;
-    } else if (cJSON_IsNumber(warm)) {
-        const char *why = local_light_pin_problem(warm->valueint);
-        if (why) {
-            return why;
-        }
-        out->gpio_warm = (int8_t)warm->valueint;
-    } else if (warm) {
-        return "gpio_warm must be a pin number or null";
-    }
-
-    const cJSON *neutral = cJSON_GetObjectItem(json, "gpio_neutral");
-    if (cJSON_IsNull(neutral)) {
-        out->gpio_neutral = -1;
-    } else if (cJSON_IsNumber(neutral)) {
-        const char *why = local_light_pin_problem(neutral->valueint);
-        if (why) {
-            return why;
-        }
-        out->gpio_neutral = (int8_t)neutral->valueint;
-    } else if (neutral) {
-        return "gpio_neutral must be a pin number or null";
-    }
-
-    const cJSON *hz = cJSON_GetObjectItem(json, "pwm_hz");
-    if (hz) {
-        if (!cJSON_IsNumber(hz) || hz->valueint < (int)ZBC_PWM_HZ_MIN || hz->valueint > (int)ZBC_PWM_HZ_MAX) {
-            return "pwm_hz must be 100-19531";
-        }
-        out->pwm_hz = (uint16_t)hz->valueint;
-    }
-
-    const char *kwhy = kelvin_from_json(json, "cold_kelvin", &out->cold_k);
-    if (!kwhy) {
-        kwhy = kelvin_from_json(json, "warm_kelvin", &out->warm_k);
-    }
-    if (!kwhy) {
-        kwhy = kelvin_from_json(json, "neutral_kelvin", &out->neutral_k);
-    }
-    if (kwhy) {
-        return kwhy;
-    }
-    if (out->warm_k >= out->cold_k) {
-        return "the warm white has to be warmer - fewer kelvin - than the cold white";
-    }
-    const bool three = out->kind == ZBC_LIGHT_CNW;
-    if (three && (out->neutral_k <= out->warm_k || out->neutral_k >= out->cold_k)) {
-        return "the neutral white has to lie between the warm and the cold white";
-    }
-
-    const cJSON *mix = cJSON_GetObjectItem(json, "mix");
-    if (mix) {
-        const int i = name_index(LIGHT_MIX_NAMES, ZBC_MIX_COUNT, mix);
-        if (i < 0) {
-            return "mix must be constant, full or custom";
-        }
-        out->mix = (uint8_t)i;
-    }
-
-    /* {"cold": {"points": [[x, y], ...]} | null, "neutral": ..., "warm": ...};
-     * a channel left out keeps its curve. */
-    const cJSON *curves = cJSON_GetObjectItem(json, "mix_curves");
-    if (curves && !cJSON_IsObject(curves)) {
-        return "mix_curves must be an object of cold, neutral and warm";
-    }
-    for (int c = 0; curves && c < ZBC_PWM_MAX_LIGHT_CH; c++) {
-        const cJSON *item = cJSON_GetObjectItem(curves, LIGHT_CH_NAMES[c]);
-        if (!item) {
-            continue;
-        }
-        zbc_curve_t     parsed;
-        zbc_mix_curve_t mc = { 0 };
-        bool            ok = curve_from_json(item, &parsed) && parsed.n <= ZBC_MIX_MAX_POINTS;
-        for (int k = 0; ok && k < parsed.n; k++) {
-            ok      = parsed.y[k] <= 100;
-            mc.x[k] = parsed.x[k];
-            mc.y[k] = (uint8_t)parsed.y[k];
-        }
-        mc.n = parsed.n;
-        if (!ok || !zbc_mix_curve_valid(&mc)) {
-            return "a mixing curve has 2-6 points, from 1 to 100 and ascending, each 0-100 %";
-        }
-        out->curve[c] = mc;
-    }
-
-    const bool tunable = zbc_light_tunable(out->kind);
-    if (tunable && out->gpio >= 0 && out->gpio == out->gpio_warm) {
-        return "the cold and warm white need two different pins";
-    }
-    if (three && out->gpio_neutral >= 0 && (out->gpio_neutral == out->gpio || out->gpio_neutral == out->gpio_warm)) {
-        return "the neutral white needs a pin of its own";
-    }
-
-    /* A pin is driven by one light or read by one button, never both: a button
-     * on a light's pin would read its own light, and a light on a button's pin
-     * would short the button. */
-    if (light_db_pin_taken(out->gpio, id)) {
-        return "another light already uses that pin";
-    }
-    if (button_db_pin_taken(out->gpio, 0)) {
-        return "a button already uses that pin";
-    }
-    if (tunable && light_db_pin_taken(out->gpio_warm, id)) {
-        return "another light already uses the warm white pin";
-    }
-    if (tunable && button_db_pin_taken(out->gpio_warm, 0)) {
-        return "a button already uses the warm white pin";
-    }
-    if (three && light_db_pin_taken(out->gpio_neutral, id)) {
-        return "another light already uses the neutral white pin";
-    }
-    if (three && button_db_pin_taken(out->gpio_neutral, 0)) {
-        return "a button already uses the neutral white pin";
-    }
-    return pwm_plan_problem(out, id);
-}
-
-/* PATCH /api/lights/{id}  {"name", "gpio", "active_low", "power_on"}, any subset */
-static esp_err_t light_patch(httpd_req_t *req, uint16_t id)
-{
-    zbc_light_t l;
-    if (!light_db_get(id, &l)) {
-        return send_error(req, "404 Not Found", "unknown light");
-    }
-    cJSON *json = read_json_body(req);
-    if (!json) {
-        return ESP_FAIL;
-    }
-    const char *why = light_from_json(json, &l, id);
-    cJSON_Delete(json);
-    if (why) {
-        /* Conflicts with something else on the board, rather than a bad value. */
-        const bool conflict = strstr(why, "already uses") || strstr(why, "no PWM");
-        return send_error(req, conflict ? "409 Conflict" : "400 Bad Request", why);
-    }
-
-    esp_err_t err = light_db_set(id, &l);
-    if (err == ESP_ERR_INVALID_ARG) {
-        return send_error(req, "400 Bad Request", "that light configuration does not make sense");
-    }
-    if (err != ESP_OK) {
-        return send_error(req, "500 Internal Server Error", "could not store the light");
-    }
-    /* Now rather than at the next reboot, for the reason buttons_reload is. */
-    local_lights_reload();
-    return send_ok(req, "200 OK");
-}
-
-static esp_err_t light_dispatch(httpd_req_t *req)
-{
-    ESP_LOGI(TAG, "<- %s", req->uri);
-    char id_str[8];
-    if (!uri_segment(req->uri, 2, id_str, sizeof(id_str))) {
-        if (req->method == HTTP_POST) {
-            return lights_post(req);
-        }
-        return send_error(req, "404 Not Found", "no such light route");
-    }
-    int id = atoi(id_str);
-    if (id <= 0 || id > 0xffff) {
-        return send_error(req, "400 Bad Request", "malformed light id");
-    }
-    char tail[16];
-    if (req->method == HTTP_PATCH && !uri_segment(req->uri, 3, tail, sizeof(tail))) {
-        return light_patch(req, (uint16_t)id);
-    }
-    return send_error(req, "404 Not Found", "no such light route");
-}
-
 /* The last few presses from any paired remote, newest first.
  *
  * A remote cannot be configured from its cluster list: an Aqara wireless switch
@@ -3057,10 +2142,7 @@ static esp_err_t state_get(httpd_req_t *req)
      * their own - the pairing countdown, the Wi-Fi signal, the failsafe - and
      * leave the tables out. This is most polls, and it is what turns a 2 s
      * poll from a rebuild of every table into a few hundred bytes. */
-    char query[64], seen[24];
-    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
-        httpd_query_key_value(query, "rev", seen, sizeof(seen)) == ESP_OK &&
-        strcmp(seen, rev) == 0) {
+    if (rev_unchanged(req, rev)) {
         /* Streamed like the full answer: the status is most of this body, and
          * the access state is read from the request headers before the first
          * chunk goes out - see json_stream_t. */
@@ -3733,15 +2815,6 @@ static esp_err_t group_dispatch(httpd_req_t *req)
     return send_error(req, "404 Not Found", "no such group route");
 }
 
-/* Started with 3072 bytes: esp_restart() can confirm an image on trial on this
- * stack (ota.c's confirm_on_restart), which writes flash and logs. */
-static void reboot_task(void *arg)
-{
-    (void)arg;
-    vTaskDelay(pdMS_TO_TICKS(500));  /* let the response reach the browser */
-    esp_restart();
-}
-
 /* GET /api/settings */
 static esp_err_t settings_get(httpd_req_t *req)
 {
@@ -4180,39 +3253,6 @@ static esp_err_t settings_post(httpd_req_t *req)
     return sent;
 }
 
-static esp_err_t wifi_scan_get(httpd_req_t *req)
-{
-    wifi_ap_record_t *records = NULL;
-    uint16_t          count   = 0;
-    esp_err_t         err     = wifi_manager_scan(&records, &count);
-    if (err != ESP_OK) {
-        return send_error(req, "503 Service Unavailable", "scan failed");
-    }
-
-    cJSON *array = cJSON_CreateArray();
-    for (uint16_t i = 0; i < count; i++) {
-        cJSON *ap = cJSON_CreateObject();
-        cJSON_AddStringToObject(ap, "ssid", (const char *)records[i].ssid);
-        cJSON_AddNumberToObject(ap, "rssi", records[i].rssi);
-        /* Which channel, so a Zigbee channel can be chosen against what is
-         * actually on the air rather than against a guess. */
-        cJSON_AddNumberToObject(ap, "channel", records[i].primary);
-        /* A 40 MHz network covers the channel next to it as well. */
-        if (records[i].second == WIFI_SECOND_CHAN_ABOVE || records[i].second == WIFI_SECOND_CHAN_BELOW) {
-            cJSON_AddStringToObject(ap, "second", records[i].second == WIFI_SECOND_CHAN_ABOVE ? "above" : "below");
-        } else {
-            cJSON_AddNullToObject(ap, "second");
-        }
-        cJSON_AddBoolToObject(ap, "open", records[i].authmode == WIFI_AUTH_OPEN);
-        cJSON_AddItemToArray(array, ap);
-    }
-    free(records);
-
-    cJSON *root = cJSON_CreateObject();
-    cJSON_AddItemToObject(root, "networks", array);
-    return send_json(req, root, "200 OK");
-}
-
 /* POST /api/zigbee/scan starts a channel survey (zb_channel_survey_start); GET
  * says how it is going and what it found. The page ranks the channels itself,
  * from this and /api/wifi/scan. */
@@ -4268,102 +3308,6 @@ static esp_err_t zigbee_scan_get(httpd_req_t *req)
         cJSON_AddItemToArray(nets, n);
     }
     return send_json(req, root, "200 OK");
-}
-
-static esp_err_t wifi_post(httpd_req_t *req)
-{
-    cJSON *json = read_json_body(req);
-    if (!json) {
-        return ESP_FAIL;
-    }
-    cJSON *ssid = cJSON_GetObjectItem(json, "ssid");
-    cJSON *pass = cJSON_GetObjectItem(json, "password");
-    if (!cJSON_IsString(ssid) || ssid->valuestring[0] == '\0') {
-        cJSON_Delete(json);
-        return send_error(req, "400 Bad Request", "ssid is required");
-    }
-
-    esp_err_t err = wifi_manager_set_credentials(ssid->valuestring,
-                                                 cJSON_IsString(pass) ? pass->valuestring : "");
-    cJSON_Delete(json);
-    if (err != ESP_OK) {
-        return send_error(req, "500 Internal Server Error", "could not store credentials");
-    }
-
-    ESP_LOGI(TAG, "New Wi-Fi credentials stored, restarting");
-    send_ok(req, "200 OK");
-    xTaskCreate(reboot_task, "reboot", 3072, NULL, 5, NULL);
-    return ESP_OK;
-}
-
-/* POST /api/wifi/resume - ends a button-started setup hotspot early, restarting
- * onto the network that is still stored. */
-/* POST /api/wifi/test {"ssid", "password"} - tries a network from the setup
- * hotspot before storing it (see wifi_manager_test); GET /api/wifi/test says how
- * it went. The page polls the GET: the hotspot hops to the network's channel as
- * soon as the check associates, so a phone may miss an answer or two. */
-static esp_err_t wifi_test_post(httpd_req_t *req)
-{
-    cJSON *json = read_json_body(req);
-    if (!json) {
-        return ESP_FAIL;
-    }
-    const cJSON *ssid = cJSON_GetObjectItem(json, "ssid");
-    const cJSON *pass = cJSON_GetObjectItem(json, "password");
-    esp_err_t    err  = cJSON_IsString(ssid)
-                            ? wifi_manager_test(ssid->valuestring, cJSON_IsString(pass) ? pass->valuestring : "")
-                            : ESP_ERR_INVALID_ARG;
-    cJSON_Delete(json);
-    if (err == ESP_ERR_INVALID_ARG) {
-        return send_error(req, "400 Bad Request", "a network name of up to 32 characters, and a password of up to 64");
-    }
-    if (err == ESP_ERR_INVALID_STATE) {
-        return send_error(req, "409 Conflict", "a network can only be checked from the setup hotspot");
-    }
-    if (err == ESP_ERR_NOT_FINISHED) {
-        return send_error(req, "409 Conflict", "a check is already running");
-    }
-    if (err != ESP_OK) {
-        char why[64];
-        snprintf(why, sizeof(why), "the check could not start (%s)", esp_err_to_name(err));
-        return send_error(req, "500 Internal Server Error", why);
-    }
-    return send_ok(req, "202 Accepted");
-}
-
-static esp_err_t wifi_test_get(httpd_req_t *req)
-{
-    static const char *const NAMES[] = {
-        [WIFI_TEST_IDLE] = "idle",           [WIFI_TEST_RUNNING] = "checking",
-        [WIFI_TEST_JOINED] = "joined",       [WIFI_TEST_WRONG_PASSWORD] = "wrong_password",
-        [WIFI_TEST_NOT_FOUND] = "not_found", [WIFI_TEST_NO_ADDRESS] = "no_address",
-        [WIFI_TEST_FAILED] = "failed",       [WIFI_TEST_NOT_SAVED] = "not_saved",
-    };
-    wifi_test_status_t t;
-    wifi_manager_test_status(&t);
-    cJSON *root = cJSON_CreateObject();
-    cJSON_AddStringToObject(root, "state", NAMES[t.state]);
-    cJSON_AddStringToObject(root, "ssid", t.ssid);
-    cJSON_AddNumberToObject(root, "reason", t.reason);
-    if (t.ip[0]) {
-        cJSON_AddStringToObject(root, "ip", t.ip);
-    } else {
-        cJSON_AddNullToObject(root, "ip");
-    }
-    return send_json(req, root, "200 OK");
-}
-
-static esp_err_t wifi_resume_post(httpd_req_t *req)
-{
-    wifi_mgr_status_t wifi;
-    wifi_manager_get_status(&wifi);
-    if (!wifi.temporary) {
-        return send_error(req, "409 Conflict", "the setup hotspot was not started by the button");
-    }
-    ESP_LOGI(TAG, "Leaving the setup hotspot for \"%s\"", wifi.home_ssid);
-    send_ok(req, "200 OK");
-    xTaskCreate(reboot_task, "reboot", 3072, NULL, 5, NULL);
-    return ESP_OK;
 }
 
 #if CONFIG_ZBC_CRASH_TEST
@@ -4453,23 +3397,10 @@ static esp_err_t restart_post(httpd_req_t *req)
  * back on the network instead of in the setup portal. */
 static esp_err_t factory_reset_post(httpd_req_t *req)
 {
-    bool   zigbee_only = false;
-    cJSON *json        = NULL;
-    /* A body that could not be read has been answered, and must not fall through
-     * to the default - which is the reset that erases everything. */
-    if (req->content_len > 0 && !(json = read_json_body(req))) {
-        return ESP_FAIL;
-    }
-    if (json) {
-        cJSON     *scope = cJSON_GetObjectItem(json, "scope");
-        const bool known = !scope || (cJSON_IsString(scope) && (strcmp(scope->valuestring, "all") == 0 ||
-                                                                strcmp(scope->valuestring, "zigbee") == 0));
-        zigbee_only      = known && scope && strcmp(scope->valuestring, "zigbee") == 0;
-        cJSON_Delete(json);
-        /* A scope this build does not know is not read as "everything". */
-        if (!known) {
-            return send_error(req, "400 Bad Request", "scope must be all or zigbee");
-        }
+    bool      zigbee_only;
+    esp_err_t answered;
+    if (!reset_scope_from_body(req, &zigbee_only, &answered)) {
+        return answered;
     }
     /* Leaving the network needs the stack, which the setup hotspot never starts
      * (and the fallback AP stops): refused before anything is erased, rather than
@@ -5020,24 +3951,6 @@ static esp_err_t zigbee_ota_dispatch(httpd_req_t *req)
     return send_error(req, "404 Not Found", "no such route");
 }
 
-/* /api/updater/image (POST, multipart elixcon_light_hub_updater.bin) and /api/updater/run
- * (POST) - see ota.h. */
-static esp_err_t updater_dispatch(httpd_req_t *req)
-{
-    ESP_LOGI(TAG, "<- %s", req->uri);
-    char what[8];
-    if (!uri_segment(req->uri, 2, what, sizeof(what))) {
-        return send_error(req, "404 Not Found", "no such route");
-    }
-    if (strcmp(what, "image") == 0) {
-        return ota_handle_updater_image(req);
-    }
-    if (strcmp(what, "run") == 0) {
-        return ota_handle_updater_run(req);
-    }
-    return send_error(req, "404 Not Found", "no such route");
-}
-
 static esp_err_t matter_reset_post(httpd_req_t *req)
 {
     ESP_LOGW(TAG, "Matter reset requested over HTTP");
@@ -5082,103 +3995,6 @@ static esp_err_t matter_post_dispatch(httpd_req_t *req)
 }
 
 /* ------------------------------------------------------------- /api/auth */
-
-/* GET /api/auth - not guarded: it is how a locked page learns that a button has
- * been pressed five times, and it says nothing a locked caller should not know. */
-static esp_err_t auth_state_get(httpd_req_t *req)
-{
-    return send_json(req, auth_json(req), "200 OK");
-}
-
-static esp_err_t send_session(httpd_req_t *req, const zbc_auth_key_t *k, const char *shown)
-{
-    cJSON *root = cJSON_CreateObject();
-    cJSON_AddNumberToObject(root, "id", k->id);
-    cJSON_AddStringToObject(root, "name", k->name);
-    cJSON_AddBoolToObject(root, "issued", shown != NULL);
-    if (shown) {
-        cJSON_AddStringToObject(root, "key", shown);
-    }
-    return send_json(req, root, shown ? "201 Created" : "200 OK");
-}
-
-/* POST /api/auth/session  {"name": "Safari on macOS"} or {"key": "K7M2Q-..."}
- *
- * Not guarded, because it does its own check and has to answer a locked caller
- * who types a key in. Three ways through:
- *
- *  - with "key": a key somebody wrote down. The cookie becomes that same key,
- *    so signing in on a phone and a laptop does not use up two of the slots;
- *  - already carrying a valid key: that key, and nothing is created;
- *  - otherwise, while access is open: a new browser key, shown once in the
- *    response so it can be written down. That closes the failsafe window, which
- *    has done its job the moment somebody is in. */
-static esp_err_t auth_session_post(httpd_req_t *req)
-{
-    char name[ZBC_AUTH_NAME_LEN] = "";
-    char typed[64]               = "";
-    bool has_typed               = false;
-    if (req->content_len > 0) {
-        cJSON *json = read_json_body(req);
-        if (!json) {
-            return ESP_FAIL;
-        }
-        cJSON *n = cJSON_GetObjectItem(json, "name");
-        cJSON *t = cJSON_GetObjectItem(json, "key");
-        if (cJSON_IsString(n)) {
-            strlcpy(name, n->valuestring, sizeof(name));
-        }
-        if (cJSON_IsString(t)) {
-            strlcpy(typed, t->valuestring, sizeof(typed));
-            has_typed = true;
-        }
-        cJSON_Delete(json);
-    }
-
-    char           cookie[96];
-    char           canon[ZBC_AUTH_KEY_CANON_LEN];
-    zbc_auth_key_t k;
-
-    if (has_typed) {
-        const uint16_t id = auth_check(typed);
-        if (!id || !auth_get(id, &k)) {
-            ESP_LOGW(TAG, "Sign-in with a key that is not known here");
-            return send_error(req, "401 Unauthorized", "That key is not known here");
-        }
-        auth_touch(id);
-        auth_normalize(typed, canon);
-        auth_http_set_cookie(req, cookie, sizeof(cookie), canon);
-        ESP_LOGI(TAG, "A browser signed in with key %u (\"%s\")", k.id, k.name);
-        return send_session(req, &k, NULL);
-    }
-
-    bool     from_cookie = false;
-    uint16_t id          = auth_http_presented_key(req, &from_cookie, canon);
-    if (id && auth_get(id, &k)) {
-        auth_touch(id);
-        if (!from_cookie) {
-            auth_http_set_cookie(req, cookie, sizeof(cookie), canon);
-        }
-        return send_session(req, &k, NULL);
-    }
-    if (access_mode() == ACCESS_LOCKED) {
-        return send_error(req, "401 Unauthorized", "locked");
-    }
-
-    char shown[ZBC_AUTH_KEY_SHOWN_LEN];
-    esp_err_t err = auth_create(ZBC_KEY_BROWSER, name, shown, &id);
-    if (err == ESP_ERR_NO_MEM) {
-        return send_error(req, "409 Conflict",
-                          "every key slot is in use - revoke one under Settings, Access");
-    }
-    if (err != ESP_OK || !auth_get(id, &k)) {
-        return send_error(req, "500 Internal Server Error", "could not store the key");
-    }
-    auth_failsafe_close();
-    auth_canonical(shown, canon);
-    auth_http_set_cookie(req, cookie, sizeof(cookie), canon);
-    return send_session(req, &k, shown);
-}
 
 /* GET /api/auth/keys */
 static esp_err_t auth_keys_get(httpd_req_t *req)
@@ -5289,22 +4105,6 @@ static esp_err_t auth_dispatch(httpd_req_t *req)
         return auth_key_delete(req, (uint16_t)id);
     }
     return send_error(req, "404 Not Found", "no such auth route");
-}
-
-/* Sends captive-portal probes to the setup page instead of a bare 404. */
-static esp_err_t not_found(httpd_req_t *req, httpd_err_code_t err)
-{
-    (void)err;
-    wifi_mgr_status_t wifi;
-    wifi_manager_get_status(&wifi);
-    if (wifi.mode == WIFI_MGR_MODE_AP && req->method == HTTP_GET) {
-        httpd_resp_set_status(req, "302 Found");
-        httpd_resp_set_hdr(req, "Location", "http://192.168.4.1/");
-        return httpd_resp_sendstr(req, "");
-    }
-    httpd_resp_set_status(req, "404 Not Found");
-    httpd_resp_set_type(req, "application/json");
-    return httpd_resp_sendstr(req, "{\"error\":\"not found\"}");
 }
 
 /* ------------------------------------------------------------- lifecycle */

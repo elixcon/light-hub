@@ -18,6 +18,7 @@
 #include "al_db.h"
 #include "device_db.h"
 #include "group_db.h"
+#include "light_math.h"
 #include "sun.h"
 #include "zb_coordinator.h"
 
@@ -27,8 +28,6 @@ extern "C" {
 
 /* ZCL level 1-254 <-> percent 1-100. Level 0 is "off" territory, so the scale
  * starts at 1 and a request for 1 % still produces a level the lamp can show. */
-int      zbc_level_to_pct(int level);
-uint8_t  zbc_pct_to_level(int pct);
 
 const zbc_endpoint_t *lighting_find_endpoint(const zbc_device_t *dev, uint8_t ep);
 
@@ -62,6 +61,9 @@ esp_err_t lighting_set_onoff(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, zb_on
  * made-up address is given out again, and the next light to get it must not
  * start from this one's. */
 void      lighting_forget_device(const uint8_t ieee[ZBC_IEEE_LEN]);
+/* A Light Node no longer has this light: its rooms and curves let go of it, and what
+ * it was last told goes, for the light that gets its endpoint next. */
+void      lighting_forget_endpoint(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep);
 
 /* True if any member of the group is currently known to be on: by its own word,
  * or by ours while that is too recent for its word to have caught up - a room

@@ -772,6 +772,7 @@ static local_lights_fade_stats_t s_fade_stats;   /* fade_task's, under s_lock */
 /* The overheat interlock - see local_lights_hold. Written under s_lock once the
  * lock exists; before that, only thermal_start() touches it. */
 static volatile bool     s_held;
+static bool              s_resume_once;   /* local_lights_resume_once: this boot only */
 
 /* An MCPWM unit (light_math.h), under s_lock like LEDC. Its operator and
  * comparators are made at the first light planned on MCPWM and never deleted:
@@ -1088,7 +1089,8 @@ static void boot_state(const zbc_light_t *c, live_light_t *l, int64_t now)
     zbc_light_state_t st;
     const bool        stored = light_db_load_state(c->id, &st);
     /* Too hot: off whatever the power-on setting says. */
-    l->on         = !s_held && zbc_light_boot_on(c->boot, stored ? st.on : -1);
+    l->on         = !s_held && zbc_light_boot_on(s_resume_once ? ZBC_LIGHT_BOOT_LAST : c->boot,
+                                                 stored ? st.on : -1);
     l->remembered = stored && st.level ? st.level : 254;
     const uint32_t m = stored && st.mireds >= l->cold_m && st.mireds <= l->warm_m
                            ? st.mireds : (l->cold_m + l->warm_m) / 2;
@@ -1614,6 +1616,36 @@ void local_lights_reload(void)
     wake();
 }
 
+void local_lights_resume_once(void)
+{
+    s_resume_once = true;
+}
+
+void local_lights_save_all(void)
+{
+    if (!s_lock) {
+        return;
+    }
+    uint16_t          ids[CONFIG_ZBC_MAX_LIGHTS];
+    zbc_light_state_t states[CONFIG_ZBC_MAX_LIGHTS];
+    int               n = 0;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    for (int i = 0; i < CONFIG_ZBC_MAX_LIGHTS; i++) {
+        const live_light_t *l = &s_live[i];
+        if (l->used) {
+            ids[n]    = l->id;
+            states[n] = (zbc_light_state_t){
+                .on = l->on && !l->off_at_end, .level = l->remembered, .mireds = (uint16_t)l->mireds.to,
+            };
+            n++;
+        }
+    }
+    xSemaphoreGive(s_lock);
+    for (int i = 0; i < n; i++) {
+        light_db_save_state(ids[i], &states[i]);
+    }
+}
+
 esp_err_t local_lights_start(void)
 {
     if (s_lock) {
@@ -1636,6 +1668,7 @@ esp_err_t local_lights_start(void)
         return ESP_ERR_NO_MEM;
     }
     local_lights_reload();
+    s_resume_once = false;
     return ESP_OK;
 }
 
@@ -1766,13 +1799,9 @@ esp_err_t local_light_set(uint16_t id, zb_onoff_cmd_t cmd)
     return ESP_OK;
 }
 
-esp_err_t local_light_set_level(uint16_t id, uint8_t level, uint16_t transition_ds)
+/* With the lock held, which this gives back. */
+static esp_err_t set_level_locked(live_light_t *l, uint8_t level, uint16_t transition_ds)
 {
-    live_light_t   *l;
-    const esp_err_t err = lock_light(id, NEED_LEVEL, &l);
-    if (err != ESP_OK) {
-        return err;
-    }
     if (level > 0 && s_held) {
         xSemaphoreGive(s_lock);
         return ESP_ERR_NOT_ALLOWED;
@@ -1796,6 +1825,44 @@ esp_err_t local_light_set_level(uint16_t id, uint8_t level, uint16_t transition_
     }
     unlock_changed(l, now);
     return ESP_OK;
+}
+
+esp_err_t local_light_set_level(uint16_t id, uint8_t level, uint16_t transition_ds)
+{
+    live_light_t   *l;
+    const esp_err_t err = lock_light(id, NEED_LEVEL, &l);
+    if (err != ESP_OK) {
+        return err;
+    }
+    return set_level_locked(l, level, transition_ds);
+}
+
+esp_err_t local_light_on(uint16_t id, uint16_t transition_ds)
+{
+    live_light_t   *l;
+    const esp_err_t err = lock_light(id, NEED_SWITCH, &l);
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (is_pwm(l->kind) && transition_ds) {
+        /* Not fade_in, which starts from black: an On that finds a fade still running
+         * carries on from where the light is. */
+        return set_level_locked(l, l->remembered, transition_ds);
+    }
+    xSemaphoreGive(s_lock);
+    return local_light_set(id, ZB_ONOFF_ON);
+}
+
+esp_err_t local_light_off(uint16_t id, uint16_t transition_ds)
+{
+    live_light_t   *l;
+    const esp_err_t err = lock_light(id, NEED_SWITCH, &l);
+    if (err != ESP_OK) {
+        return err;
+    }
+    const bool dims = is_pwm(l->kind);
+    xSemaphoreGive(s_lock);
+    return dims ? local_light_fade_off(id, transition_ds) : local_light_set(id, ZB_ONOFF_OFF);
 }
 
 esp_err_t local_light_fade_in(uint16_t id, uint8_t level, uint16_t transition_ds)
@@ -1949,9 +2016,13 @@ bool local_light_get(uint16_t id, zbc_local_state_t *out)
             int64_t lvl = l->on ? (ramp_now(&l->level, now) + 500) / 1000 : l->remembered;
             out->level  = (int16_t)(lvl < 1 ? 1 : lvl);
             out->mireds = zbc_light_tunable(l->kind) ? (int32_t)ramp_now(&l->mireds, now) : -1;
+            out->comes_back_to = l->remembered;
+            out->fading_out    = l->off_at_end;
         } else {
             out->level  = -1;
             out->mireds = -1;
+            out->comes_back_to = -1;
+            out->fading_out    = false;
         }
     }
     xSemaphoreGive(s_lock);
