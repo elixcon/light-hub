@@ -77,8 +77,9 @@ were, and the hub shows a link to its page. The modes are:
 | Unpaired | stored network or hotspot | looking for a network |
 | A wired button pressed ten times, 0.5-2.5 s apart | setup hotspot | off |
 
-Wi-Fi closes after 15 minutes without a request, or at once with **Close Wi-Fi now** on the page. Ten presses is
-the way back in when the hub is gone. Five open the node's page to everyone for two minutes, as on a hub. Neither
+Wi-Fi closes after 15 minutes without a request, or at once with **Close Wi-Fi now** on the page. The exception is
+ten presses on a node with a network stored: that hotspot closes after 10 minutes, used or not, and waits a minute at
+a time while a device is on it, up to 30 minutes. Ten presses is the way back in when the hub is gone. Five open the node's page to everyone for two minutes, as on a hub. Neither
 does anything to the hub's own lock, which a node's buttons cannot open.
 
 ## Giving it away
@@ -135,6 +136,10 @@ Open:
 - **Asking a node to open Wi-Fi just after the hub restarts** was lost once, about 20 s after a restart: the hub answered
   `202`, the node stayed on Zigbee, and its Wi-Fi state stayed off. Asking again two minutes later worked. The cause has
   not been looked into.
+- **A node in its hotspot can show as online on the hub.** With Zigbee off, the hub showed the node offline at first,
+  then online from about 4 minutes in until the node came back at 10 minutes. The link quality it listed changed at the
+  same moment, which fits a neighbour scan listing the node, but that was not confirmed. `node_wifi` said `hotspot`
+  throughout, so read that rather than `online`.
 - **Current draw** has not been measured.
 - **A plain restart can lose a brightness.** A light set to start off saves no level, as on a hub, so a restart that is
   not a change of mode, such as storing a Wi-Fi network, takes it back to the last one saved. The hub reads what it finds
