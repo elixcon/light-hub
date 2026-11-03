@@ -155,6 +155,9 @@ bool      device_db_ieee_by_short(uint16_t short_addr, uint8_t out_ieee[ZBC_IEEE
  * report and read response, from the Zigbee task, and device_db_get copies the
  * whole device row - endpoints, names and all - onto the caller's stack. */
 uint16_t  device_db_features_by_short(uint16_t short_addr, uint8_t ep);
+/* Whether this is a Light Node. Its clusters said so when it was interrogated: an
+ * endpoint's number proves nothing. */
+bool      device_db_is_node(const uint8_t ieee[ZBC_IEEE_LEN]);
 
 /* The Basic cluster's ModelIdentifier, by short address, into `out` (at least
  * ZBC_STRING_LEN). False, with `out` empty, when there is no such device. Cheap

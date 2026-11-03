@@ -128,6 +128,8 @@ from `main/` by path, so keep those files free of rules, rooms and Matter: `loca
   the attributes follow `local_light_get`, per "State is never assumed".
 - Modes are chosen at boot (`node_mode.c`) and changed by restarting. Only `NODE_MODE_ZIGBEE` is normal,
   and it starts no Wi-Fi or HTTP. A paired node's hotspot keeps Zigbee off.
+- A hub's warm off treats a node's light as wired (`off_endpoint`): no dim first, because the level it
+  comes back to lives on the node, and a dim would overwrite it.
 - A button's gesture goes to the hub as a key of the control endpoint, and the rules are the hub's. A
   local fallback light runs only once the stack has given up on a press; see `node_fallback.h` for how
   a double toggle is avoided.

@@ -10,6 +10,7 @@
 #include "nvs_flash.h"
 
 #include "device_db.h"
+#include "node_proto.h"
 #include "state_rev.h"
 
 static const char *TAG = "device_db";
@@ -520,6 +521,18 @@ esp_err_t device_db_set_attr_by_short(uint16_t short_addr, uint8_t ep, zbc_attr_
     esp_err_t err = persist ? db_save_locked() : ESP_OK;
     DB_UNLOCK();
     return err;
+}
+
+bool device_db_is_node(const uint8_t ieee[ZBC_IEEE_LEN])
+{
+    bool node = false;
+    DB_LOCK();
+    const zbc_device_t *dev = find_by_ieee(ieee);
+    for (int i = 0; dev && i < dev->ep_count && !node; i++) {
+        node = dev->eps[i].ep == NODE_CONTROL_EP && (dev->eps[i].features & ZBC_FEAT_NODE);
+    }
+    DB_UNLOCK();
+    return node;
 }
 
 uint16_t device_db_features_by_short(uint16_t short_addr, uint8_t ep)

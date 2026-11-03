@@ -134,16 +134,13 @@ Open:
   not at the same time, so that does not prove the parent is the cause. Interference on the Zigbee channel would fit,
   and was not shown.
 - **Asking a node to open Wi-Fi just after the hub restarts** was lost once, about 20 s after a restart: the hub answered
-  `202`, the node stayed on Zigbee, and its Wi-Fi state stayed off. Asking again two minutes later worked. The cause has
-  not been looked into.
+  `202`, the node stayed on Zigbee, and its Wi-Fi state stayed off. Asking again two minutes later worked. Another time,
+  about a minute after a restart, the hub answered `502` and the node opened Wi-Fi anyway. The cause has not been looked
+  into.
 - **A node in its hotspot can show as online on the hub.** With Zigbee off, the hub showed the node offline at first,
   then online from about 4 minutes in until the node came back at 10 minutes. The link quality it listed changed at the
   same moment, which fits a neighbour scan listing the node, but that was not confirmed. `node_wifi` said `hotspot`
   throughout, so read that rather than `online`.
-- **A hub's warm off leaves a node's light parked at about 1 %.** The hub parks any lamp at a low level before an off that
-  has to change its colour, and remembers the real level for its own next On. A node stores that low level as what it
-  comes back to, so its own page's On came back at 1 %. The local fallback toggles to the same stored level, which was
-  read from the code, not measured.
 - **Current draw** has not been measured.
 - **A plain restart can lose a brightness.** A light set to start off saves no level, as on a hub, so a restart that is
   not a change of mode, such as storing a Wi-Fi network, takes it back to the last one saved. The hub reads what it finds

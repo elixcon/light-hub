@@ -1310,9 +1310,12 @@ static esp_err_t off_endpoint(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep,
      * its restore level lives in local_lights.c, where a dim would overwrite the
      * level it comes back at, the same trap set_brightness_ex is avoided for.
      * The off goes first: a colour that finds the light fading out travels with
-     * that fade, warming as the light dims, rather than on a clock of its own. */
+     * that fade, warming as the light dims, rather than on a clock of its own.
+     * A Light Node's lights are wired too, and all of this holds at its end of the
+     * frames: dimmed here, a node would come back at 1 % by itself, as on its own
+     * page or its local fallback, with no hub to remember the level for it. */
     esp_err_t err;
-    if (zbc_light_id_from_ieee(ieee) != 0) {
+    if (zbc_light_id_from_ieee(ieee) != 0 || device_db_is_node(ieee)) {
         err = glide  ? glide_off(ieee, ep, e, transition_ds)
             : fade   ? out_fade_off(ieee, ep, transition_ds)
                      : switch_endpoint(ieee, ep, ZB_ONOFF_OFF);

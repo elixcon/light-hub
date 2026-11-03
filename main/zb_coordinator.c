@@ -675,17 +675,6 @@ void zb_set_endpoint_gone_handler(zb_endpoint_gone_cb_t cb)
 /* A Light Node's lights are edited on the node, so one can go, which no other lamp does.
  * An endpoint it no longer lists goes here too, with what names it, or it would sit in
  * its rooms as a lamp that never answers. */
-/* Its clusters said so when it was interrogated: an endpoint's number proves nothing. */
-static bool device_is_node(const zbc_device_t *dev)
-{
-    for (int i = 0; i < dev->ep_count; i++) {
-        if (dev->eps[i].ep == NODE_CONTROL_EP && (dev->eps[i].features & ZBC_FEAT_NODE)) {
-            return true;
-        }
-    }
-    return false;
-}
-
 static void node_prune_endpoints(uint16_t saddr, const uint8_t *list, int n)
 {
     uint8_t      ieee[ZBC_IEEE_LEN];
@@ -693,7 +682,7 @@ static void node_prune_endpoints(uint16_t saddr, const uint8_t *list, int n)
     if (!ieee_of(saddr, ieee) || !device_db_get(ieee, &dev)) {
         return;
     }
-    if (!device_is_node(&dev)) {
+    if (!device_db_is_node(ieee)) {
         return;
     }
     for (int e = 0; e < dev.ep_count; e++) {
@@ -2676,7 +2665,7 @@ esp_err_t zb_node_enter_wifi(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t minutes)
     if (!device_db_get(ieee, &dev)) {
         return ESP_ERR_NOT_FOUND;
     }
-    if (!device_is_node(&dev)) {
+    if (!device_db_is_node(ieee)) {
         return ESP_ERR_NOT_SUPPORTED;
     }
     if (!zbc_short_known(dev.short_addr)) {
