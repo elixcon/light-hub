@@ -14,6 +14,7 @@
 	import { api, post } from "$lib/api.ts";
 	import { app } from "$lib/state.svelte.ts";
 	import { toast } from "$lib/toast.svelte.ts";
+	import { namedNetworks } from "$lib/wifi.ts";
 
 	type Check = { state: string; ssid: string; reason: number; ip: string | null };
 	type Outcome = { text: string; bad: boolean; anyway: boolean };
@@ -29,7 +30,7 @@
 
 	$effect(() => {
 		api<{ networks: typeof networks }>("/api/wifi/scan")
-			.then((r) => { networks = r.networks.sort((a, b) => b.rssi - a.rssi); })
+			.then((r) => { networks = namedNetworks(r.networks); })
 			.catch(() => {})
 			.finally(() => { scanning = false; });
 	});
