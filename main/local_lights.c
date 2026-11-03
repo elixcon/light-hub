@@ -1837,6 +1837,28 @@ esp_err_t local_light_set_level(uint16_t id, uint8_t level, uint16_t transition_
     return set_level_locked(l, level, transition_ds);
 }
 
+/* From dark, the colour comes up with the fade from the light's warmest, so a light
+ * set cold last time does not start cold. Towards the colour it was left heading for: a
+ * colour sent with the switch-on then takes over from wherever this has got to, and with
+ * none sent it still ends where it should. Lit, it carries on from where it is. */
+static void warm_up_with_fade_locked(live_light_t *l, uint8_t level, uint16_t transition_ds)
+{
+    if (!l->on && level > 0 && transition_ds && zbc_light_tunable(l->kind)) {
+        ramp_start(&l->mireds, l->warm_m, l->mireds.to, transition_ds, esp_timer_get_time(), RAMP_EASED);
+    }
+}
+
+esp_err_t local_light_on_at(uint16_t id, uint8_t level, uint16_t transition_ds)
+{
+    live_light_t   *l;
+    const esp_err_t err = lock_light(id, NEED_LEVEL, &l);
+    if (err != ESP_OK) {
+        return err;
+    }
+    warm_up_with_fade_locked(l, level, transition_ds);
+    return set_level_locked(l, level, transition_ds);
+}
+
 esp_err_t local_light_on(uint16_t id, uint16_t transition_ds)
 {
     live_light_t   *l;
@@ -1847,6 +1869,7 @@ esp_err_t local_light_on(uint16_t id, uint16_t transition_ds)
     if (is_pwm(l->kind) && transition_ds) {
         /* Not fade_in, which starts from black: an On that finds a fade still running
          * carries on from where the light is. */
+        warm_up_with_fade_locked(l, l->remembered, transition_ds);
         return set_level_locked(l, l->remembered, transition_ds);
     }
     xSemaphoreGive(s_lock);

@@ -256,7 +256,7 @@ static esp_err_t device_dispatch(httpd_req_t *req)
     } else if (strcmp(tail, "level") == 0) {
         const cJSON *pct = cJSON_GetObjectItem(json, "pct");
         if (cJSON_IsNumber(pct) && pct->valueint >= 1 && pct->valueint <= 100) {
-            err = local_light_set_level(id, zbc_pct_to_level(pct->valueint), ds);
+            err = local_light_on_at(id, zbc_pct_to_level(pct->valueint), ds);
         }
     } else if (strcmp(tail, "color_temp") == 0) {
         const cJSON *k = cJSON_GetObjectItem(json, "kelvin");

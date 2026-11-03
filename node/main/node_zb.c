@@ -224,7 +224,7 @@ static esp_err_t run_command(const node_ev_t *ev)
         return local_light_set_level(id, ev->cmd.level, ds);
     }
     case NODE_ZCL_LEVEL_ONOFF:
-        return local_light_set_level(id, ev->cmd.level, ds);
+        return local_light_on_at(id, ev->cmd.level, ds);
     case NODE_ZCL_STOP:
         return local_light_stop(id);
     case NODE_ZCL_CT:

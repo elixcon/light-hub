@@ -15,6 +15,9 @@ of its own, because the hub has them.
 | Wi-Fi | Off in normal running. It comes on only to configure the node |
 | Radio | An end device whose receiver stays on, so a command reaches it at once |
 
+A tunable white light fades up from dark as a filament does: warm at first, reaching its colour as it reaches its
+brightness. So one set cold last time does not start cold when it next comes on warm.
+
 The limit of 3 lights is the hub's: it stores four endpoints per device, and the buttons take one.
 
 Only the node's firmware is its own. It uses the same partition table and the same updater as a hub.
