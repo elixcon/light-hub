@@ -6,7 +6,7 @@ Home, Home Assistant or Alexa, over Matter. The board runs its own Zigbee networ
 with the same chip, and serves the web page you set it up with. Everything runs on the board.
 
 <p align="center">
-  <img src="docs/images/overview.svg" width="100%" alt="What controls the hub (the web page, a WLED stream as an alpha feature, home apps over Matter, Zigbee remotes, wired switches) and what it drives (Zigbee lamps, plugs and relays; Matter lamps; relays and LED strips wired to the board). Each room is one light.">
+  <img src="docs/images/overview.svg" width="100%" alt="What controls the hub (the web page, a WLED stream as an experimental feature, home apps over Matter, Zigbee remotes, wired switches) and what it drives (Zigbee lamps, plugs and relays, and Light Nodes; Matter lamps; relays and LED strips wired to the board). Each room is one light.">
 </p>
 
 In these documents the board running the firmware is called the coordinator, the Zigbee name for the
