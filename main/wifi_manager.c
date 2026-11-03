@@ -109,6 +109,7 @@ static struct {
     wifi_test_status_t st;
     char               pass[65];
     bool               associated;   /* past the handshake: the password is right */
+    bool               starting;     /* ending a fallback's attempt, before the check's own */
     uint8_t            tries;
 } s_test;
 static portMUX_TYPE s_test_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -169,6 +170,12 @@ static bool test_note_disconnect(uint8_t reason)
     if (s_test.st.state != WIFI_TEST_RUNNING) {
         portEXIT_CRITICAL(&s_test_mux);
         return false;
+    }
+    /* Not a try of the check's. Retried, it would start on the old network before the
+     * new one is set, and esp_wifi_set_config refuses a station that is connecting. */
+    if (s_test.starting) {
+        portEXIT_CRITICAL(&s_test_mux);
+        return true;
     }
     s_test.st.reason = reason;
     const wifi_test_state_t v     = s_test.associated ? WIFI_TEST_NO_ADDRESS : test_verdict(reason);
@@ -693,6 +700,7 @@ esp_err_t wifi_manager_test(const char *ssid, const char *password)
     if (!busy) {
         memset(&s_test, 0, sizeof(s_test));
         s_test.st.state = WIFI_TEST_RUNNING;
+        s_test.starting = s_fallback;
         strlcpy(s_test.st.ssid, ssid, sizeof(s_test.st.ssid));
         strlcpy(s_test.pass, password, sizeof(s_test.pass));
     }
@@ -702,14 +710,21 @@ esp_err_t wifi_manager_test(const char *ssid, const char *password)
     }
 
     if (s_fallback) {
-        /* Its retries stop for the check, and one in flight is ended - which
-         * reads as one more try of the check's own, not as a verdict. */
+        /* Its retries stop for the check, and one in flight is ended. */
         esp_timer_stop(s_fallback_timer);
         esp_wifi_disconnect();
     }
     wifi_config_t cfg;
     sta_config(&cfg, ssid, password);
+    /* The disconnect above returns before the station has let go. */
     esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &cfg);
+    for (int i = 0; i < 20 && err == ESP_ERR_WIFI_STATE; i++) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+        err = esp_wifi_set_config(WIFI_IF_STA, &cfg);
+    }
+    portENTER_CRITICAL(&s_test_mux);
+    s_test.starting = false;
+    portEXIT_CRITICAL(&s_test_mux);
     if (err == ESP_OK) {
         err = esp_wifi_connect();
     }
