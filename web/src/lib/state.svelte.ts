@@ -56,6 +56,19 @@ export const setAuthHooks = (poll: (a: AuthState) => void, locked: () => boolean
 export const getOffEpoch = () => offEpoch;
 export function setPaused(b: boolean) { paused = b; if (b) clearTimeout(timer); }
 
+let stopsWhenHidden = false;
+
+/* For a page where a poll counts as somebody using it. A node closes its Wi-Fi after so
+ * long without a request, and a forgotten tab would otherwise hold it open for ever.
+ * Back in view, the page looks again at once. */
+export function stopPollingWhileHidden() {
+  stopsWhenHidden = true;
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) clearTimeout(timer);
+    else if (!paused && !isLocked()) refresh();
+  });
+}
+
 export const key = (ieee: string, ep: number, what: string) => `${ieee}/${ep}/${what}`;
 export const gkey = (id: number, what: string) => `group/${id}/${what}`;
 const pendingOr = <T>(k: string, fallback: T): T => { const p = pending.get(k); return p ? (p.v as T) : fallback; };
@@ -283,6 +296,6 @@ export function schedule(ms: number) {
   /* esp_http_server serves one request at a time, so a poll issued during a
    * firmware upload just queues behind it and times out - the UI would paint
    * "Coordinator unreachable" in the middle of a working update. */
-  if (!paused) timer = setTimeout(refresh, ms);
+  if (!paused && !(stopsWhenHidden && document.hidden)) timer = setTimeout(refresh, ms);
 }
 

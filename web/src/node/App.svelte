@@ -12,10 +12,10 @@
 	import NodeButton from "./NodeButton.svelte";
 	import NodeSettings from "./NodeSettings.svelte";
 	import { route } from "$lib/router.svelte.ts";
-	import { app, refresh } from "$lib/state.svelte.ts";
+	import { app, refresh, stopPollingWhileHidden } from "$lib/state.svelte.ts";
 	import { auth } from "$lib/auth.svelte.ts";
 
-	onMount(() => { refresh(); });
+	onMount(() => { stopPollingWhileHidden(); refresh(); });
 
 	const node = $derived(app.status?.node);
 	const minutes = $derived(node && node.window_left_s >= 0 ? Math.ceil(node.window_left_s / 60) : null);

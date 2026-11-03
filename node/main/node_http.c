@@ -568,7 +568,8 @@ static esp_err_t restart_post(httpd_req_t *req)
     return ok_then_restart(req, NODE_ASK_WIFI);
 }
 
-/* Every route counts as somebody using the page, which keeps Wi-Fi open. */
+/* Every route counts as somebody using the page, which keeps Wi-Fi open. So the page
+ * stops polling while its tab is hidden (stopPollingWhileHidden). */
 static esp_err_t touched(httpd_req_t *req)
 {
     node_touch();

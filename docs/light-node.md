@@ -77,7 +77,8 @@ were, and the hub shows a link to its page. The modes are:
 | Unpaired | stored network or hotspot | looking for a network |
 | A wired button pressed ten times, 0.5-2.5 s apart | setup hotspot | off |
 
-Wi-Fi closes after 15 minutes without a request, or at once with **Close Wi-Fi now** on the page. The exception is
+Wi-Fi closes after 15 minutes without a request, or at once with **Close Wi-Fi now** on the page. The page keeps it open
+only while it is in view: a tab left in the background stops asking, though one left showing on a screen does not. The exception is
 ten presses on a node with a network stored: that hotspot closes after 10 minutes, used or not. While somebody is
 using its page it waits a minute at a time, up to 30 minutes. Ten presses is the way back in when the hub is gone. Five open the node's page to everyone for two minutes, as on a hub. Neither
 does anything to the hub's own lock, which a node's buttons cannot open.
