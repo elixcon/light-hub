@@ -246,6 +246,94 @@ static void test_an_on_alone_is_carried_out_once_its_wait_is_over(void)
     ok(!mb_on_hold_due(&h, t0 + 300 * 1000 + MB_ON_HOLD_US, &due), "and is carried out once");
 }
 
+/* Siri's "set to 30 %" is the other way round from Alexa's: MoveToLevelWithOnOff
+ * and then On, about 250 ms later. Carried out as two, the On was the room's
+ * turn-on: 30 %, and then Adaptive Lighting or full. */
+static void test_an_on_after_a_brightness_is_part_of_it(void)
+{
+    mb_on_hold_t h = {0};
+    mb_intent_t  out[2];
+    mb_intent_t  due;
+    const int64_t t0 = 5000000;
+
+    mb_intent_t with_onoff = intent(MB_LEVEL, false);
+    with_onoff.switch_on   = true;
+    with_onoff.at_us       = t0;
+    ok(mb_on_hold_take(&h, &with_onoff, t0, out) == 1 && out[0].kind == MB_LEVEL,
+       "the brightness is carried out at once");
+
+    mb_intent_t on = {.kind = MB_ON, .group_id = 1, .at_us = t0 + 248 * 1000};
+    ok(mb_on_hold_take(&h, &on, on.at_us, out) == 0, "the On after it adds nothing");
+    ok(!h.held, "and does not wait to be carried out");
+    ok(!mb_on_hold_due(&h, t0 + 10 * 1000 * 1000, &due), "not then, and not later");
+
+    on.at_us = t0 + 500 * 1000;
+    ok(mb_on_hold_take(&h, &on, on.at_us, out) == 0 && !h.held, "a second On is the same request");
+
+    /* The room's turn-on is what must not run, however long the brightness kept
+     * the On waiting in the queue: a room of lamps takes a while to send to. */
+    h = (mb_on_hold_t){0};
+    mb_on_hold_take(&h, &with_onoff, t0, out);
+    on.at_us = t0 + 248 * 1000;
+    ok(mb_on_hold_take(&h, &on, t0 + 5 * 1000 * 1000, out) == 0 && !h.held,
+       "the gap is between their arrivals, not when each got its turn");
+
+    /* A plain MoveToLevel lights nothing, and a dark group ignored it. With the
+     * On after it the two ask for what WithOnOff does. */
+    h = (mb_on_hold_t){0};
+    mb_intent_t plain   = intent(MB_LEVEL, true);
+    plain.at_us         = t0;
+    plain.transition_ds = 7;
+    mb_on_hold_take(&h, &plain, t0, out);
+    on.at_us = t0 + 248 * 1000;
+    ok(mb_on_hold_take(&h, &on, on.at_us, out) == 1, "after a plain one the On lights the group");
+    ok(out[0].kind == MB_LEVEL && out[0].level == 76 && out[0].transition_ds == 7, "at that brightness");
+    ok(!out[0].if_on, "dark or not");
+    ok(out[0].switch_on, "and what can only switch as well");
+    ok(!h.held, "with nothing left to carry out");
+    on.at_us = t0 + 300 * 1000;
+    ok(mb_on_hold_take(&h, &on, on.at_us, out) == 0, "and only the once");
+
+    /* Alexa's pair, with its habit of sending On twice. */
+    h = (mb_on_hold_t){0};
+    on.at_us = t0;
+    mb_on_hold_take(&h, &on, t0, out);
+    plain.at_us = t0 + 270 * 1000;
+    ok(mb_on_hold_take(&h, &plain, plain.at_us, out) == 1 && out[0].switch_on, "an On then a brightness");
+    on.at_us = t0 + 300 * 1000;
+    ok(mb_on_hold_take(&h, &on, on.at_us, out) == 0 && !h.held, "and an On after those");
+}
+
+/* "Turn on" said after a brightness is a request of its own. */
+static void test_an_on_later_than_a_brightness_is_a_turn_on(void)
+{
+    mb_on_hold_t h = {0};
+    mb_intent_t  out[2];
+    mb_intent_t  due;
+    const int64_t t0 = 5000000;
+
+    mb_intent_t level = intent(MB_LEVEL, false);
+    level.switch_on   = true;
+    level.at_us       = t0;
+    mb_on_hold_take(&h, &level, t0, out);
+    mb_intent_t on = {.kind = MB_ON, .group_id = 1, .at_us = t0 + MB_ON_AFTER_LEVEL_US};
+    ok(mb_on_hold_take(&h, &on, on.at_us, out) == 0 && h.held, "once the window is over the On is held");
+    ok(mb_on_hold_due(&h, on.at_us + MB_ON_HOLD_US, &due) && due.kind == MB_ON, "and carried out");
+
+    const uint8_t kinds[] = {MB_OFF, MB_TOGGLE, MB_STEP, MB_MOVE, MB_STOP, MB_AL_START, MB_AL_STOP, MB_AL_TOGGLE};
+    for (size_t i = 0; i < sizeof(kinds); i++) {
+        h = (mb_on_hold_t){0};
+        mb_on_hold_take(&h, &level, t0, out);
+        mb_intent_t next = intent(kinds[i], false);
+        next.at_us       = t0 + 100 * 1000;
+        mb_on_hold_take(&h, &next, next.at_us, out);
+        on.at_us = t0 + 200 * 1000;
+        ok(mb_on_hold_take(&h, &on, on.at_us, out) == 0 && h.held,
+           "an On after another command belongs to no brightness");
+        ok(mb_on_hold_due(&h, on.at_us + MB_ON_HOLD_US, &due) && due.kind == MB_ON, "and is carried out");
+    }
+}
+
 /* A toggle, a step, a sweep start from what the On leaves; the On goes first. */
 static void test_anything_else_follows_the_on(void)
 {
@@ -307,6 +395,8 @@ int main(void)
     test_a_dark_group_stays_dark();
     test_an_on_followed_by_a_brightness_is_one_request();
     test_an_on_alone_is_carried_out_once_its_wait_is_over();
+    test_an_on_after_a_brightness_is_part_of_it();
+    test_an_on_later_than_a_brightness_is_a_turn_on();
     test_anything_else_follows_the_on();
     test_adaptive_lighting_from_matter();
     test_a_level_from_matter_is_never_written_back();

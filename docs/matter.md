@@ -33,8 +33,9 @@ themselves.
 
 Each room also decides what a controller's "turn on" does: go back to the last brightness, start
 [Adaptive Lighting](lighting.md#adaptive-lighting), or go to full. The last two apply to a room that
-is already on as well, so "turn on" brings a room dimmed to 10 % to full or into the mode. How the
-controllers see Adaptive Lighting is set on the room's page too.
+is already on as well, so "turn on" brings a room dimmed to 10 % to full or into the mode. "Set to
+30 %" is not a turn on, and goes to 30 % in every case, though controllers send an On along with it.
+How the controllers see Adaptive Lighting is set on the room's page too.
 
 *Reset Matter* forgets every controller and leaves Zigbee lamps, wired lights, rooms and buttons
 alone. Matter lamps are asked to forget the coordinator first and then have to be paired again. They

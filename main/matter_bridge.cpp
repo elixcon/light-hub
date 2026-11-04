@@ -131,7 +131,8 @@ typedef struct {
     uint16_t transition_ds;
     bool     timed;          /* the controller named the transition, as decoded */
     bool     matter_on;      /* if_on: the light's Matter OnOff when the command arrived */
-    bool     switch_on;      /* MB_LEVEL: it replaced a held On, so it switches the group on too */
+    bool     switch_on;      /* MB_LEVEL: it switches the group on too - WithOnOff, or an On went with it */
+    int64_t  at_us;          /* when it arrived */
 } mb_intent_t;
 
 /* The transition a controller's level command is carried out with. Alexa sends 0
@@ -164,8 +165,8 @@ static bool mb_stays_dark(bool if_on, bool matter_on, bool lamps_on)
  *
  * Lit or dark: "turn on the basement" said to a basement dimmed to 10 % asks for
  * the room's turn-on as much as it does from dark. An On that only comes with a
- * brightness - Alexa's "set to 30 %" - does not get here, because the brightness
- * replaces it while it is held (mb_on_hold_take). Adaptive Lighting only where
+ * brightness - "set to 30 %", from Alexa or from Siri - does not get here: it is
+ * taken as part of the brightness (mb_on_hold_take). Adaptive Lighting only where
  * the group offers it; elsewhere the On is the plain one. */
 typedef enum {
     MB_ON_AS_WAS = 0,     /* the group's last brightness, as an On always was */
@@ -192,10 +193,19 @@ static mb_on_t mb_turn_on(uint8_t choice, bool al_offered)
  * wait only ever shows as the room changing that much later. */
 #define MB_ON_HOLD_US (500 * 1000)
 
+/* How long after a brightness an On still belongs to it. Siri's "set to 30 %" is
+ * the other way round from Alexa's: MoveToLevelWithOnOff and then On, 248 ms later
+ * (measured), on a lit room as well. Carried out on its own, that On is the room's
+ * turn-on, which takes the room from 30 % to Adaptive Lighting or full. Longer
+ * than the gap by plenty: one lost frame, resent, must not bring that back, and
+ * "turn on" said on purpose within a second of a brightness is not a thing. */
+#define MB_ON_AFTER_LEVEL_US (1000 * 1000)
+
 typedef struct {
     bool        held;
     mb_intent_t on;
     int64_t     due_us;
+    mb_intent_t last;        /* the last command other than an On, which an On may belong to */
 } mb_on_hold_t;
 
 /* What to carry out now that `in` has arrived, in order, into `out`; returns how
@@ -203,10 +213,26 @@ typedef struct {
  * up, and the On would only have lit it on the way there. The brightness then
  * lights the group whatever variant it was - the On said to. Anything else starts
  * from what the On leaves (a toggle, a step, a sweep), so the On goes first. A
- * second On while one waits is the same request, and the first keeps its time. */
+ * second On while one waits is the same request, and the first keeps its time.
+ *
+ * An On that comes just after a brightness is the same pair in the other order.
+ * The brightness has gone out by then, so what is left is what the On adds to it:
+ * nothing if it switched the group on, and otherwise that switch-on. The gap is
+ * between their arrivals, not `now_us`, which is when this one got its turn: a
+ * room of lamps can keep the On in the queue for as long as it takes to send them
+ * the brightness. */
 static int mb_on_hold_take(mb_on_hold_t *h, const mb_intent_t *in, int64_t now_us, mb_intent_t out[2])
 {
     if (in->kind == MB_ON) {
+        if (h->last.kind == MB_LEVEL && in->at_us - h->last.at_us < MB_ON_AFTER_LEVEL_US) {
+            if (h->last.switch_on) {
+                return 0;
+            }
+            h->last.if_on     = false;
+            h->last.switch_on = true;
+            out[0]            = h->last;
+            return 1;
+        }
         if (!h->held) {
             h->held   = true;
             h->on     = *in;
@@ -227,6 +253,7 @@ static int mb_on_hold_take(mb_on_hold_t *h, const mb_intent_t *in, int64_t now_u
          * switch included: they have no brightness to follow. */
         out[n].switch_on = in->kind == MB_LEVEL;
     }
+    h->last = out[n];
     return n + 1;
 }
 
@@ -609,6 +636,7 @@ static esp_err_t on_command(const ConcreteCommandPath &path, TLVReader &tlv, voi
     mb_intent_t    in      = {};
     in.group_id            = slot->group_id;
     in.transition_ds       = fade_ds;
+    in.at_us               = esp_timer_get_time();
 
     bool ok = true;
     if (al_switch) {
@@ -655,6 +683,9 @@ static esp_err_t on_command(const ConcreteCommandPath &path, TLVReader &tlv, voi
             ok = decode_level<LC::MoveToLevel::DecodableType>(tlv, in);
             break;
         case LC::MoveToLevelWithOnOff::Id:
+            /* It switches the group on by its name, members that can only switch
+             * included, which leaves nothing for an On that comes after it. */
+            in.switch_on = true;
             ok = decode_level<LC::MoveToLevelWithOnOff::DecodableType>(tlv, in);
             break;
         case LC::Step::Id:
@@ -887,6 +918,9 @@ static void run_intent(const mb_intent_t &in)
     if (was_held && n == 1) {
         ESP_LOGI(TAG, "Group %u: the On was replaced by the %s after it", in.group_id,
                  in.kind == MB_LEVEL ? "brightness" : "Off");
+    }
+    if (in.kind == MB_ON && !slot->on_hold.held) {
+        ESP_LOGI(TAG, "Group %u: the On went with the brightness before it", in.group_id);
     }
     for (int i = 0; i < n; i++) {
         carry_out(out[i]);
