@@ -101,9 +101,9 @@ The updater compiles shared modules (`wifi_manager.c`, `settings.c`, `auth.c`, `
   slots). It also runs rules' delayed actions from its own task. The occupancy machine
   (`motion_step`) and the delay table are host-tested (`test_motion`, `test_delayed`).
 - Matter is C++. `matter_bridge.cpp` exposes one dimmable light per group and, where `mexp_db` asks,
-  a device endpoint on its own: a lamp through the `lighting_target_*` calls a room uses, each
-  button of a remote as a Generic Switch (`buttons.c` posts every gesture to it), a motion sensor as
-  an Occupancy Sensor that follows `buttons_sensor_state`.
+  a device endpoint on its own: a lamp through the `lighting_target_*` calls a room uses, a remote
+  as a bridged node with a child Generic Switch endpoint per button (`buttons.c` posts every gesture
+  to it), a motion sensor as an Occupancy Sensor that follows `buttons_sensor_state`.
   `matter_fabric.cpp`/`matter_commission.cpp`/`matter_ctl.cpp` are the controller for Wi-Fi Matter
   lamps (`matter_priv.h` is internal and runs on the CHIP thread; `matter_ctl.h` is the C API). No
   Thread: the radio runs Zigbee.

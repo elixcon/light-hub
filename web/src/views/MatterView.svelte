@@ -47,6 +47,8 @@
 		try { await post("/api/matter/reset"); toast("Matter reset — the coordinator is restarting"); }
 		catch (err: any) { toast(err.message); }
 	}
+	/* Accessories, as a controller counts them: a remote's buttons are inside it. */
+	const shared = $derived(m?.device_list?.filter((d) => d.kind !== "switch").length ?? 0);
 </script>
 
 <ViewHeader title="Matter" back="/settings" />
@@ -61,7 +63,7 @@
 		{:else if !m.running}
 			<div class="text-muted-foreground">Matter is not running.</div>
 		{:else}
-			<div>{controllers.length ? `Added to ${plural(controllers.length, "controller")}` : "Not added to a controller yet"} · {plural(m.groups, "room")} shared as lights{m.devices ? ` · ${plural(m.devices, "device")} on ${m.devices === 1 ? "its" : "their"} own` : ""}</div>
+			<div>{controllers.length ? `Added to ${plural(controllers.length, "controller")}` : "Not added to a controller yet"} · {plural(m.groups, "room")} shared as lights{shared ? ` · ${plural(shared, "device")} on ${shared === 1 ? "its" : "their"} own` : ""}</div>
 			{#if m.devices_skipped}
 				<div class="text-destructive">{m.devices_skipped} asked for {m.devices_skipped === 1 ? "is" : "are"} not shown{m.devices_low_memory
 					? ": the coordinator is short of memory for another. Stop sharing a light, a colour light most of all, to make room."

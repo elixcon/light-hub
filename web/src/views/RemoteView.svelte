@@ -148,8 +148,8 @@
 			{#if c.device}
 				<MatterExposeRow ieee={c.ieee} eps={buttonEps} on={inMatter}
 					help={c.buttons.length
-						? "Each of its buttons becomes a switch your controllers can run automations on: a single, a double and a long press. A single press then waits 300 ms to tell it from a double, for this remote's own buttons here too."
-						: "Each button set up here becomes a switch your controllers can run automations on. This remote has none set up yet."} />
+						? "Your controllers get it as one remote, with each button set up here inside it, to run automations on a single, a double and a long press. A single press then waits 300 ms to tell it from a double, for this remote's own buttons here too."
+						: "Your controllers get it as one remote with each button set up here inside it. This remote has none set up yet."} />
 			{/if}
 			{#if stray}
 				<p class="text-destructive text-sm">

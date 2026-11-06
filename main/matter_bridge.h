@@ -2,8 +2,8 @@
  * group asks for it - its Adaptive Lighting mode as a Mode Select on that light or
  * as a second on/off endpoint (see al_db.h). A Zigbee device endpoint can be shown
  * on its own as well, off by default (mexp_db.h): a lamp as the light its clusters
- * make it, each button of a remote as a Generic Switch, a motion sensor as an
- * Occupancy Sensor.
+ * make it, a remote as one accessory with a Generic Switch for each button, a
+ * motion sensor as an Occupancy Sensor.
  *
  * The coordinator is a Matter bridge - an Aggregator endpoint with one bridged
  * Dimmable Light per group, named after it. A Matter command becomes a call to
@@ -55,16 +55,18 @@ typedef struct {
 #define MATTER_DEV_LAMP      1
 #define MATTER_DEV_SWITCH    2
 #define MATTER_DEV_OCCUPANCY 3
+#define MATTER_DEV_REMOTE    4   /* a remote: its switches are the buttons below it */
 
 /* The same diagnosis for a device endpoint shown on its own. -1 is "unknown". */
 typedef struct {
     uint8_t  ieee[8];
     uint8_t  ep;
     uint8_t  key;             /* a switch: which button of the endpoint; 0 otherwise */
+    uint16_t parent_id;       /* a switch: its remote's endpoint; 0 otherwise */
     uint8_t  kind;            /* MATTER_DEV_* */
     uint16_t endpoint_id;
     uint16_t button_id;       /* a switch or sensor: the button record that speaks for it */
-    int8_t   reachable;       /* BridgedDeviceBasicInformation Reachable as Matter has it */
+    int8_t   reachable;       /* BridgedDeviceBasicInformation Reachable as Matter has it; a switch: its remote's */
     int8_t   matter_on;       /* a lamp's OnOff, a sensor's Occupancy */
     int16_t  matter_level;    /* a lamp's CurrentLevel, 1-254 */
     bool     held;            /* sync holding off: a Matter command or sweep is settling */

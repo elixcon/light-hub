@@ -414,8 +414,11 @@ export interface MatterController {
 export interface MatterDevice {
   ieee: string;
   ep: number;
-  kind: "light" | "switch" | "occupancy";
+  /* A remote is one accessory; each of its buttons is a "switch" below it,
+   * whose `remote` is the remote's endpoint. */
+  kind: "light" | "switch" | "occupancy" | "remote";
   key?: number;
+  remote?: number;
   button?: number;
   endpoint: number;
   reachable: number;

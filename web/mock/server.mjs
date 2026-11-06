@@ -34,11 +34,15 @@ function matterDevices() {
     if (!e.matter) continue;
     if (e.features.includes("motion")) list.push({ ieee: d.ieee, ep: e.ep, kind: "occupancy", endpoint: 0, reachable: 1, writes: 0, last_err: "" });
     else if (e.features.includes("switch") || !e.features.includes("onoff")) {
-      for (const b of buttons.filter((x) => x.source === "zigbee" && x.ieee === d.ieee && x.ep === e.ep))
-        list.push({ ieee: d.ieee, ep: e.ep, kind: "switch", key: b.key, button: b.id, endpoint: 0, reachable: 1, writes: 0, last_err: "" });
+      const keys = buttons.filter((x) => x.source === "zigbee" && x.ieee === d.ieee && x.ep === e.ep);
+      if (!keys.length) continue;
+      const remote = { ieee: d.ieee, ep: e.ep, kind: "remote", endpoint: 0, reachable: 1, writes: 0, last_err: "" };
+      list.push(remote);
+      for (const b of keys) list.push({ ieee: d.ieee, ep: e.ep, kind: "switch", key: b.key, button: b.id, remote, endpoint: 0, reachable: 1, writes: 0, last_err: "" });
     } else list.push({ ieee: d.ieee, ep: e.ep, kind: "light", endpoint: 0, reachable: d.online ? 1 : 0, writes: 0, last_err: "" });
   }
   list.forEach((x, i) => { x.endpoint = 20 + i; });
+  for (const x of list) if (x.remote) x.remote = x.remote.endpoint;
   return { devices: list.length, devices_skipped: 0, devices_low_memory: false, device_list: list };
 }
 

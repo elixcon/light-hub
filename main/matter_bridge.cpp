@@ -117,10 +117,9 @@ using namespace chip::app::Clusters;
  * three seconds, close to a held button's sweep. */
 #define MB_DEFAULT_RATE 80
 
-/* A device is offline to Matter as it is to the web page: marked gone, or - for a
- * lamp, which reports - not heard from in this long (OFFLINE_AFTER_US in
- * http_server.c). A remote or sensor sleeps and says nothing until it is used, so
- * for those only marked gone counts. */
+/* A lamp is offline to Matter as it is to the web page: marked gone, or not heard
+ * from in this long (OFFLINE_AFTER_US in http_server.c). A remote or sensor sleeps
+ * and says nothing until it is used, so for those only marked gone counts. */
 #define MB_OFFLINE_AFTER_US (10 * 60 * 1000000LL)
 
 /* The least free heap a new device endpoint is made with. Each one is heap for as
@@ -412,12 +411,15 @@ static bool mb_al_toggle_starts(bool running)
 }
 
 /* What a Matter endpoint stands for: a room, or one device endpoint shown on its
- * own (mexp_db.h). Stored in the device map, so the values are fixed. */
+ * own (mexp_db.h). A remote is one accessory: a bridged node of its own, with a
+ * switch endpoint below it for each button. Stored in the device map, so the
+ * values are fixed. */
 typedef enum {
     MB_SLOT_ROOM = 0,
     MB_SLOT_LAMP,
-    MB_SLOT_SWITCH,
+    MB_SLOT_SWITCH,      /* one button, a child of its remote's MB_SLOT_REMOTE */
     MB_SLOT_OCCUPANCY,
+    MB_SLOT_REMOTE,      /* the remote itself: its name, and whether it is there */
 } mb_slot_kind_t;
 
 /* Which Matter light a Zigbee lamp is shown as: the most it can do, from its
@@ -547,7 +549,7 @@ static_assert(ZBC_GROUP_NAME_LEN <= MB_LABEL_LEN && ZBC_NAME_LEN <= MB_LABEL_LEN
                   ZBC_BUTTON_NAME_LEN <= MB_LABEL_LEN,
               "a slot's name holds a group's, a device's or a button's");
 static_assert((int)MB_SLOT_LAMP == (int)MATTER_DEV_LAMP && (int)MB_SLOT_SWITCH == (int)MATTER_DEV_SWITCH &&
-                  (int)MB_SLOT_OCCUPANCY == (int)MATTER_DEV_OCCUPANCY,
+                  (int)MB_SLOT_OCCUPANCY == (int)MATTER_DEV_OCCUPANCY && (int)MB_SLOT_REMOTE == (int)MATTER_DEV_REMOTE,
               "matter_device_t.kind is the slot's");
 
 /* The capability bits a lamp's endpoint is built from. */
@@ -566,8 +568,17 @@ typedef struct {
     bool     rebuild;         /* LAMP: the lamp's clusters say another shape now */
     uint16_t ct_min, ct_max;  /* LAMP: the physical range it was built with, mireds */
     uint16_t endpoint_id;
+    /* A bridged endpoint: a room, a lamp, a sensor, a remote. A remote's button is
+     * not one - esp_matter_bridge only hangs devices off the aggregator - but a
+     * plain endpoint below its remote, `ep_handle`. */
     esp_matter_bridge::device_t *dev;
+    endpoint_t *ep_handle;   /* SWITCH */
     char     name[MB_LABEL_LEN];   /* ROOM: the group's name; the others: the label */
+    /* SWITCH: the name a controller is given for the button, as a Descriptor tag.
+     * The Descriptor reads its tags once, so this stays as the endpoint was made
+     * with, and a renamed button shows its new name after a restart. */
+    char     tag_label[MB_LABEL_LEN];
+    uint8_t  position;        /* SWITCH: which button of the remote, from 1 */
     /* Written by the CHIP task, read by the bridge task: 32 bits so a read can
      * never be torn, compared with a signed difference so it survives the wrap. */
     volatile uint32_t quiet_until_ms;
@@ -629,6 +640,7 @@ typedef struct {
     uint8_t  ieee[ZBC_IEEE_LEN];
     uint8_t  ep;
     uint8_t  key;
+    uint8_t  position;       /* SWITCH: which button of the remote, from 1 */
     uint16_t button_id;
     uint16_t features;       /* LAMP */
     uint16_t ct_min, ct_max; /* LAMP, mireds, 0 unknown */
@@ -1029,9 +1041,9 @@ static esp_err_t on_command(const ConcreteCommandPath &path, TLVReader &tlv, voi
     (void)opaque;
     mb_slot_t *slot      = slot_by_endpoint(path.mEndpointId);
     const bool al_switch = !slot && (slot = slot_by_al_endpoint(path.mEndpointId)) != nullptr;
-    /* A switch or a sensor takes no commands of ours: only Identify, which CHIP's
-     * own handler answers. */
-    if (!slot || slot->kind == MB_SLOT_SWITCH || slot->kind == MB_SLOT_OCCUPANCY) {
+    /* A remote, its switches and a sensor take no commands of ours: only
+     * Identify, which CHIP's own handler answers. */
+    if (!slot || (slot->kind != MB_SLOT_ROOM && slot->kind != MB_SLOT_LAMP)) {
         return ESP_OK;
     }
 
@@ -1524,8 +1536,13 @@ static void see_device(const mb_slot_t &s, mb_seen_t &g, uint32_t t, int64_t now
     if (!device_db_get(s.ieee, &s_dev)) {
         return;
     }
-    const bool fresh = s_dev.last_seen_us > 0 && now_us - s_dev.last_seen_us < MB_OFFLINE_AFTER_US;
-    g.reachable      = (int8_t)(s_dev.online && (s.kind != MB_SLOT_LAMP || fresh));
+    /* `online` is not kept across a restart: until the device is heard from, it
+     * is false. A lamp is read at every boot and answers within seconds; a remote
+     * or a sensor says nothing until it is used, and one not heard from since the
+     * restart is not known to be gone - only one heard and then marked gone is. */
+    const bool heard = s_dev.last_seen_us > 0;
+    const bool fresh = heard && now_us - s_dev.last_seen_us < MB_OFFLINE_AFTER_US;
+    g.reachable      = (int8_t)(s.kind == MB_SLOT_LAMP ? s_dev.online && fresh : s_dev.online || !heard);
     if (s.kind == MB_SLOT_OCCUPANCY) {
         bool occupied = false;
         g.occupied = buttons_sensor_state(s.button_id, &occupied, nullptr) ? (int8_t)occupied : -1;
@@ -1717,7 +1734,9 @@ static void sync_attributes(void)
         if (s.kind == MB_SLOT_ROOM || s.kind == MB_SLOT_LAMP) {
             see_room_or_lamp(s, g[i], t);
         }
-        if (s.kind != MB_SLOT_ROOM) {
+        /* A button has no Bridged Device Basic Information of its own: whether
+         * it is there is its remote's. */
+        if (s.kind != MB_SLOT_ROOM && s.kind != MB_SLOT_SWITCH) {
             see_device(s, g[i], t, now);
         }
     }
@@ -1745,7 +1764,7 @@ static void sync_attributes(void)
         default:
             break;
         }
-        if (s.kind != MB_SLOT_ROOM) {
+        if (s.kind != MB_SLOT_ROOM && s.kind != MB_SLOT_SWITCH) {
             sync_reachable(s, g[i]);
         }
     }
@@ -1761,6 +1780,7 @@ typedef enum {
     MB_EP_LAMP,
     MB_EP_SWITCH,
     MB_EP_OCCUPANCY,
+    MB_EP_REMOTE,        /* a bridged node and nothing else: its buttons are below it */
 } mb_ep_kind_t;
 
 typedef struct {
@@ -1836,16 +1856,21 @@ static esp_err_t add_lamp(endpoint_t *ep, const mb_ep_spec_t &spec)
 
 /* A remote's button: a momentary switch that reports releases, long presses and
  * up to MB_SW_MULTI_PRESS_MAX presses in a row. */
-static esp_err_t add_switch(endpoint_t *ep)
+static void switch_config(endpoint::generic_switch::config_t &config)
 {
     namespace SF = cluster::switch_cluster::feature;
-    endpoint::generic_switch::config_t config;
     config.switch_cluster.number_of_positions = 2;
     config.switch_cluster.current_position    = 0;
     config.switch_cluster.features.momentary_switch_multi_press.multi_press_max = MB_SW_MULTI_PRESS_MAX;
     config.switch_cluster.feature_flags = SF::momentary_switch::get_id() | SF::momentary_switch_release::get_id() |
                                           SF::momentary_switch_long_press::get_id() |
                                           SF::momentary_switch_multi_press::get_id();
+}
+
+static esp_err_t add_switch(endpoint_t *ep)
+{
+    endpoint::generic_switch::config_t config;
+    switch_config(config);
     return endpoint::generic_switch::add(ep, &config);
 }
 
@@ -1914,7 +1939,11 @@ static esp_err_t device_type_cb(endpoint_t *ep, uint32_t device_type_id, void *p
              : device_type_id == ESP_MATTER_ON_OFF_PLUG_IN_UNIT_DEVICE_TYPE_ID ? MB_EP_ADAPTIVE
              : device_type_id == ESP_MATTER_GENERIC_SWITCH_DEVICE_TYPE_ID     ? MB_EP_SWITCH
              : device_type_id == ESP_MATTER_OCCUPANCY_SENSOR_DEVICE_TYPE_ID   ? MB_EP_OCCUPANCY
+             : device_type_id == ESP_MATTER_BRIDGED_NODE_DEVICE_TYPE_ID       ? MB_EP_REMOTE
                                                                               : MB_EP_LIGHT;
+    if (kind == MB_EP_REMOTE) {
+        return ESP_OK;   /* esp_matter_bridge made it a bridged node already */
+    }
     if (kind == MB_EP_SWITCH) {
         return add_switch(ep);
     }
@@ -2138,25 +2167,39 @@ static size_t want_devices(uint8_t *skipped)
             /* A remote, as the web page has it: an endpoint that sends presses is
              * one even where it lists On/Off as well (the older Aqara switch
              * does), and so is any endpoint buttons have been set up on. One
-             * switch per button, in key order, so the endpoints come in the order
-             * of the remote's own buttons. */
+             * switch per button, in the order the buttons were set up: the page
+             * sets a known remote up top to bottom (remotes.ts), which its key
+             * numbers are not - a Hue dimmer's run On, Down, Up, Off. Apple Home
+             * numbers a remote's buttons and shows no names, so this order is
+             * what tells them apart there. */
             const size_t nr = buttons_zigbee_list(w.ieee, w.ep, refs, CONFIG_ZBC_MAX_BUTTONS);
             for (size_t a = 1; a < nr; a++) {
-                for (size_t b = a; b > 0 && refs[b - 1].key > refs[b].key; b--) {
+                for (size_t b = a; b > 0 && refs[b - 1].id > refs[b].id; b--) {
                     const buttons_zb_ref_t x = refs[b];
                     refs[b]                  = refs[b - 1];
                     refs[b - 1]              = x;
                 }
             }
+            /* The remote first, as the accessory its buttons go under: a want
+             * list is made in order, and a button is made only below a remote
+             * that has its endpoint. A remote with no button set up is nothing. */
+            uint8_t position = 0;
             for (size_t k = 0; k < nr; k++) {
                 if (refs[k].src != ZBC_BTN_SRC_ZIGBEE) {
                     continue;
                 }
+                if (position == 0) {
+                    mb_want_t r = w;
+                    r.kind      = MB_SLOT_REMOTE;
+                    strlcpy(r.label, device_title(s_dev), sizeof(r.label));
+                    want_push(r, &n, &missed);
+                }
                 w.kind      = MB_SLOT_SWITCH;
                 w.key       = refs[k].key;
                 w.button_id = refs[k].id;
+                w.position  = ++position;
                 if (!button_db_name(refs[k].id, w.label) || !w.label[0]) {
-                    snprintf(w.label, sizeof(w.label), "%.24s %u", device_title(s_dev), (unsigned)w.key);
+                    snprintf(w.label, sizeof(w.label), "Button %u", (unsigned)w.position);
                 }
                 want_push(w, &n, &missed);
             }
@@ -2191,7 +2234,10 @@ static const mb_want_t *want_find(size_t n, uint8_t kind, const uint8_t ieee[ZBC
 static mb_ep_spec_t want_spec(const mb_want_t &w)
 {
     mb_ep_spec_t spec = {};
-    spec.kind     = w.kind == MB_SLOT_LAMP ? MB_EP_LAMP : (w.kind == MB_SLOT_SWITCH ? MB_EP_SWITCH : MB_EP_OCCUPANCY);
+    spec.kind     = w.kind == MB_SLOT_LAMP     ? MB_EP_LAMP
+                  : w.kind == MB_SLOT_REMOTE   ? MB_EP_REMOTE
+                  : w.kind == MB_SLOT_SWITCH   ? MB_EP_SWITCH
+                                               : MB_EP_OCCUPANCY;
     spec.features = w.features;
     spec.ct_min   = w.ct_min;
     spec.ct_max   = w.ct_max;
@@ -2202,8 +2248,8 @@ static mb_ep_spec_t want_spec(const mb_want_t &w)
  * endpoint is built as is the spec's (device_type_cb). */
 static uint32_t want_device_type(const mb_want_t &w)
 {
-    if (w.kind == MB_SLOT_SWITCH) {
-        return ESP_MATTER_GENERIC_SWITCH_DEVICE_TYPE_ID;
+    if (w.kind == MB_SLOT_REMOTE) {
+        return ESP_MATTER_BRIDGED_NODE_DEVICE_TYPE_ID;
     }
     if (w.kind == MB_SLOT_OCCUPANCY) {
         return ESP_MATTER_OCCUPANCY_SENSOR_DEVICE_TYPE_ID;
@@ -2244,7 +2290,7 @@ static void add_device_identity(endpoint_t *ep, const mb_want_t &w)
     strlcpy(buf, w.label, sizeof(buf));
     BA::create_node_label(c, buf, strlen(buf));
     char uid[33];
-    mb_device_uid(uid, sizeof(uid), w.ieee, w.ep, w.kind == MB_SLOT_SWITCH ? w.key : -1);
+    mb_device_uid(uid, sizeof(uid), w.ieee, w.ep, -1);
     set_unique_id(c, uid);
     if (w.vendor[0]) {
         strlcpy(buf, w.vendor, sizeof(buf));
@@ -2258,20 +2304,15 @@ static void add_device_identity(endpoint_t *ep, const mb_want_t &w)
 
 static const char *slot_kind_name(uint8_t kind)
 {
-    return kind == MB_SLOT_LAMP ? "light" : (kind == MB_SLOT_SWITCH ? "switch" : "occupancy sensor");
+    return kind == MB_SLOT_LAMP     ? "light"
+         : kind == MB_SLOT_SWITCH   ? "switch"
+         : kind == MB_SLOT_REMOTE   ? "remote"
+                                    : "occupancy sensor";
 }
 
-static bool adopt_device(mb_slot_t *slot, esp_matter_bridge::device_t *dev, const mb_want_t &w)
+/* A slot as a want describes it, on endpoint `ep`. */
+static void fill_slot(mb_slot_t *slot, const mb_want_t &w, endpoint_t *ep)
 {
-    add_device_identity(dev->endpoint, w);
-    if (w.kind == MB_SLOT_LAMP) {
-        hook_commands(dev->endpoint);
-    }
-    if (endpoint::enable(dev->endpoint) != ESP_OK) {
-        ESP_LOGE(TAG, "Could not enable the endpoint for \"%s\"", w.label);
-        esp_matter_bridge::remove_device(dev);
-        return false;
-    }
     memset(slot, 0, sizeof(*slot));
     slot->used        = true;
     slot->kind        = w.kind;
@@ -2282,8 +2323,8 @@ static bool adopt_device(mb_slot_t *slot, esp_matter_bridge::device_t *dev, cons
     slot->built_shape = w.kind == MB_SLOT_LAMP ? want_shape(w) : 0;
     const mb_ep_spec_t spec = want_spec(w);
     ct_range(spec, &slot->ct_min, &slot->ct_max);
-    slot->endpoint_id = endpoint::get_id(dev->endpoint);
-    slot->dev         = dev;
+    slot->position    = w.position;
+    slot->endpoint_id = endpoint::get_id(ep);
     strlcpy(slot->name, w.label, sizeof(slot->name));
     slot->reachable         = -1;
     slot->diag.endpoint_id  = slot->endpoint_id;
@@ -2298,16 +2339,96 @@ static bool adopt_device(mb_slot_t *slot, esp_matter_bridge::device_t *dev, cons
     zbc_ieee_to_str(w.ieee, ieee);
     ESP_LOGI(TAG, "\"%s\" (%s ep %u%s) is Matter endpoint %u, a %s", w.label, ieee, w.ep,
              w.kind == MB_SLOT_SWITCH ? ", a button" : "", slot->endpoint_id, slot_kind_name(w.kind));
+}
+
+/* A lamp, a sensor or a remote: a bridged device of its own. */
+static bool adopt_device(mb_slot_t *slot, esp_matter_bridge::device_t *dev, const mb_want_t &w)
+{
+    add_device_identity(dev->endpoint, w);
+    if (w.kind == MB_SLOT_LAMP) {
+        hook_commands(dev->endpoint);
+    }
+    if (endpoint::enable(dev->endpoint) != ESP_OK) {
+        ESP_LOGE(TAG, "Could not enable the endpoint for \"%s\"", w.label);
+        esp_matter_bridge::remove_device(dev);
+        return false;
+    }
+    fill_slot(slot, w, dev->endpoint);
+    slot->dev = dev;
+    return true;
+}
+
+/* A remote's button: a Generic Switch endpoint below the remote's, made anew
+ * (`resume_id` 0) or brought back on the id it had. Brought back, it is a bare
+ * endpoint, and gets the Descriptor that a new one is made with. */
+static endpoint_t *make_switch(uint16_t resume_id)
+{
+    endpoint::generic_switch::config_t config;
+    switch_config(config);
+    if (!resume_id) {
+        return endpoint::generic_switch::create(s_node, &config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
+    }
+    endpoint_t *ep = endpoint::resume(s_node, ENDPOINT_FLAG_DESTROYABLE, resume_id, nullptr);
+    if (!ep) {
+        return nullptr;
+    }
+    cluster::descriptor::config_t descriptor;
+    if (!cluster::descriptor::create(ep, &descriptor, CLUSTER_FLAG_SERVER) ||
+        endpoint::generic_switch::add(ep, &config) != ESP_OK) {
+        endpoint::destroy(s_node, ep);
+        return nullptr;
+    }
+    return ep;
+}
+
+/* The button under its remote, which is what makes a controller show the remote as
+ * one accessory with its buttons in it. Each is told apart by a Descriptor tag:
+ * its place on the remote, in Matter's Common Number namespace, labelled with the
+ * button's name. */
+#define MB_NS_COMMON_NUMBER 0x07
+
+static bool adopt_switch(mb_slot_t *slot, endpoint_t *ep, const mb_want_t &w, const mb_slot_t &remote)
+{
+    endpoint_t *parent = endpoint::get(s_node, remote.endpoint_id);
+    if (!parent || endpoint::set_parent_endpoint(ep, parent) != ESP_OK) {
+        endpoint::destroy(s_node, ep);
+        return false;
+    }
+    fill_slot(slot, w, ep);
+    slot->ep_handle = ep;
+    strlcpy(slot->tag_label, w.label, sizeof(slot->tag_label));
+    chip::app::DataModel::Provider::SemanticTag tag;
+    tag.namespaceID = MB_NS_COMMON_NUMBER;
+    tag.tag         = w.position;
+    tag.label.SetValue(chip::app::DataModel::MakeNullable(chip::CharSpan::fromCharString(slot->tag_label)));
+    endpoint::set_semantic_tags(ep, &tag, 1);
+    if (endpoint::enable(ep) != ESP_OK) {
+        ESP_LOGE(TAG, "Could not enable the endpoint for \"%s\"", w.label);
+        endpoint::destroy(s_node, ep);
+        slot->used = false;
+        return false;
+    }
     return true;
 }
 
 static void remove_slot(mb_slot_t &s)
 {
+    if (s.kind == MB_SLOT_SWITCH) {
+        endpoint::destroy(s_node, s.ep_handle);
+        s.used = false;
+        return;
+    }
     if (s.al_dev) {
         esp_matter_bridge::remove_device(s.al_dev);
     }
     esp_matter_bridge::remove_device(s.dev);
     s.used = false;
+}
+
+/* The remote a button goes under, when it has its endpoint. */
+static const mb_slot_t *remote_of(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep)
+{
+    return slot_by_device(MB_SLOT_REMOTE, ieee, ep, 0);
 }
 
 /* The device endpoints: every slot that mexp_db no longer asks for goes, every one
@@ -2317,13 +2438,16 @@ static void remove_slot(mb_slot_t &s)
 static bool reconcile_devices(size_t wanted)
 {
     bool changed = false;
+    /* A remote's buttons first: an endpoint goes before the one it hangs off. */
+    for (int pass = 0; pass < 2; pass++) {
     for (int i = CONFIG_ZBC_MAX_GROUPS; i < MB_SLOTS; i++) {
         mb_slot_t &s = s_slots[i];
-        if (!s.used) {
+        if (!s.used || (pass == 0) != (s.kind == MB_SLOT_SWITCH)) {
             continue;
         }
         const mb_want_t *w = want_find(wanted, s.kind, s.ieee, s.ep, s.key);
-        if (!w) {
+        /* A button goes with its remote, whatever the list says. */
+        if (!w || (s.kind == MB_SLOT_SWITCH && !remote_of(s.ieee, s.ep))) {
             ESP_LOGI(TAG, "\"%s\" is no longer shown in Matter, removing endpoint %u", s.name, s.endpoint_id);
             remove_slot(s);
             changed = true;
@@ -2332,7 +2456,10 @@ static bool reconcile_devices(size_t wanted)
         s.button_id = w->button_id;
         if (strcmp(s.name, w->label) != 0) {
             strlcpy(s.name, w->label, sizeof(s.name));
-            set_label(s.endpoint_id, s.name);
+            /* A button's name is its tag, which stays until a restart. */
+            if (s.kind != MB_SLOT_SWITCH) {
+                set_label(s.endpoint_id, s.name);
+            }
         }
         if (s.kind == MB_SLOT_LAMP) {
             const bool rebuild = want_shape(*w) != s.built_shape;
@@ -2342,6 +2469,7 @@ static bool reconcile_devices(size_t wanted)
             }
             s.rebuild = rebuild;
         }
+    }
     }
     bool heap_short = false;
     for (size_t k = 0; k < wanted; k++) {
@@ -2362,6 +2490,19 @@ static bool reconcile_devices(size_t wanted)
             }
             heap_short = true;
             s_skipped++;
+            continue;
+        }
+        if (w.kind == MB_SLOT_SWITCH) {
+            const mb_slot_t *remote = remote_of(w.ieee, w.ep);
+            endpoint_t      *ep     = remote ? make_switch(0) : nullptr;
+            if (!ep) {
+                if (remote) {
+                    ESP_LOGE(TAG, "Could not create a Matter endpoint for \"%s\"", w.label);
+                }
+                s_skipped++;
+                continue;
+            }
+            changed |= adopt_switch(slot, ep, w, *remote);
             continue;
         }
         mb_ep_spec_t spec = want_spec(w);
@@ -2460,8 +2601,11 @@ static void resume_bridged(void)
                 continue;
             }
             /* A lamp comes back built from what it can do now, which is how one
-             * that gained colour gets it - on the id controllers know. */
-            const mb_want_t *w    = want_find(wanted, de->kind, de->ieee, de->ep, de->key);
+             * that gained colour gets it - on the id controllers know. A button
+             * is never a bridged device; one that is was made by a build that
+             * had no remotes, and goes. */
+            const mb_want_t *w    = de->kind == MB_SLOT_SWITCH ? nullptr
+                                                               : want_find(wanted, de->kind, de->ieee, de->ep, de->key);
             mb_slot_t       *slot = slot_free(true);
             if (!w || !slot || slot_by_device(w->kind, w->ieee, w->ep, w->key)) {
                 ESP_LOGI(TAG, "Endpoint %u no longer stands for a device, removing it", id);
@@ -2474,6 +2618,27 @@ static void resume_bridged(void)
                 adopt_device(slot, dev, *w);
             }
         }
+    }
+    /* Then the remotes' buttons, below the remotes that came back. They are not in
+     * esp_matter_bridge's list, only in the device map; one not wanted any more
+     * is simply not brought back, and its id is never given out again. */
+    for (int i = 0; i < devices.count; i++) {
+        const mb_dev_entry_t &de = devices.e[i];
+        if (de.kind != MB_SLOT_SWITCH) {
+            continue;
+        }
+        const mb_want_t *w      = want_find(wanted, MB_SLOT_SWITCH, de.ieee, de.ep, de.key);
+        const mb_slot_t *remote = remote_of(de.ieee, de.ep);
+        mb_slot_t       *slot   = slot_free(true);
+        if (!w || !remote || !slot || slot_by_device(MB_SLOT_SWITCH, de.ieee, de.ep, de.key)) {
+            continue;
+        }
+        endpoint_t *ep = make_switch(de.endpoint_id);
+        if (!ep) {
+            ESP_LOGE(TAG, "Could not bring back endpoint %u for \"%s\"", de.endpoint_id, w->label);
+            continue;
+        }
+        adopt_switch(slot, ep, *w, *remote);
     }
     save_maps();
 }
@@ -2711,6 +2876,11 @@ static void refresh_status(void)
             d.endpoint_id  = s.endpoint_id;
             d.button_id    = s.button_id;
             d.reachable    = s.reachable;
+            if (s.kind == MB_SLOT_SWITCH) {
+                const mb_slot_t *remote = remote_of(s.ieee, s.ep);
+                d.parent_id = remote ? remote->endpoint_id : 0;
+                d.reachable = remote ? remote->reachable : -1;
+            }
             d.matter_on    = s.diag.matter_on;
             d.matter_level = s.diag.matter_level;
             d.held         = s.diag.held;

@@ -3791,7 +3791,7 @@ static esp_err_t matter_get(httpd_req_t *req)
     cJSON_AddNumberToObject(root, "devices", st.devices);
     cJSON_AddNumberToObject(root, "devices_skipped", st.devices_skipped);
     cJSON_AddBoolToObject(root, "devices_low_memory", st.devices_heap_short);
-    static const char *const DEV_KINDS[] = { "", "light", "switch", "occupancy" };
+    static const char *const DEV_KINDS[] = { "", "light", "switch", "occupancy", "remote" };
     cJSON *dl = cJSON_AddArrayToObject(root, "device_list");
     for (int i = 0; i < st.devices; i++) {
         const matter_device_t *d = &st.device_list[i];
@@ -3800,16 +3800,17 @@ static esp_err_t matter_get(httpd_req_t *req)
         zbc_ieee_to_str(d->ieee, ieee);
         cJSON_AddStringToObject(o, "ieee", ieee);
         cJSON_AddNumberToObject(o, "ep", d->ep);
-        cJSON_AddStringToObject(o, "kind", d->kind < 4 ? DEV_KINDS[d->kind] : "");
+        cJSON_AddStringToObject(o, "kind", d->kind < 5 ? DEV_KINDS[d->kind] : "");
         if (d->kind == MATTER_DEV_SWITCH) {
             cJSON_AddNumberToObject(o, "key", d->key);
+            cJSON_AddNumberToObject(o, "remote", d->parent_id);
         }
-        if (d->kind != MATTER_DEV_LAMP) {
+        if (d->kind == MATTER_DEV_SWITCH || d->kind == MATTER_DEV_OCCUPANCY) {
             cJSON_AddNumberToObject(o, "button", d->button_id);
         }
         cJSON_AddNumberToObject(o, "endpoint", d->endpoint_id);
         cJSON_AddNumberToObject(o, "reachable", d->reachable);
-        if (d->kind != MATTER_DEV_SWITCH) {
+        if (d->kind == MATTER_DEV_LAMP || d->kind == MATTER_DEV_OCCUPANCY) {
             cJSON_AddNumberToObject(o, d->kind == MATTER_DEV_LAMP ? "matter_on" : "occupied", d->matter_on);
         }
         if (d->kind == MATTER_DEV_LAMP) {

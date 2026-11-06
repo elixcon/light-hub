@@ -56,9 +56,12 @@ in the controllers, or disappears from them, within a few seconds.
   until the next brightness change. On a lamp with a warmth curve, that change sets the colour
   from the curve again. A light in a room is shared both ways: the room still switches all its
   lights, and the light alone switches only itself.
-- **A remote** becomes one switch per button that is set up on its page. Buttons that are not set
-  up are not shared. A controller can run automations on a single, a double and a long press of
-  each. To tell a single press from a double, every single press of a shared remote then waits
+- **A remote** becomes one accessory, with a switch inside it for each button that is set up on
+  its page. Buttons that are not set up are not shared. A controller can run automations on a
+  single, a double and a long press of each. Apple Home numbers the buttons (Button 1, Button 2,
+  and so on) in the order they were set up here, which for a known remote is top to bottom. Home
+  Assistant gets each button's name from here; a renamed button keeps its old name there until
+  the coordinator restarts. To tell a single press from a double, every single press of a shared remote then waits
   300 ms, its own rules on the coordinator included, as a button with a double-press rule already
   does. A triple press is not reported. The remote's own rules keep running.
 - **A motion sensor** becomes an occupancy sensor. It has to be set up on its page first, because
