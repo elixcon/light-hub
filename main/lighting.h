@@ -44,6 +44,9 @@ esp_err_t lighting_set_color_temp(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, 
                                   uint16_t transition_ds);
 esp_err_t lighting_set_color_hs(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, uint8_t hue,
                                 uint8_t saturation, uint16_t transition_ds);
+/* CIE 1931 x and y, 0-65279 as ZCL and Matter count them. */
+esp_err_t lighting_set_color_xy(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, uint16_t x, uint16_t y,
+                                uint16_t transition_ds);
 
 /* input_pct is what the user asked for, 1-100; what the lamp is told depends on
  * its curve. Returns ESP_ERR_NOT_FOUND for an unknown endpoint and
@@ -61,8 +64,9 @@ esp_err_t lighting_set_onoff(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, zb_on
  * made-up address is given out again, and the next light to get it must not
  * start from this one's. */
 void      lighting_forget_device(const uint8_t ieee[ZBC_IEEE_LEN]);
-/* A Light Node no longer has this light: its rooms and curves let go of it, and what
- * it was last told goes, for the light that gets its endpoint next. */
+/* A Light Node no longer has this light: its rooms, its curves and Matter (mexp_db)
+ * let go of it, and what it was last told goes, for the light that gets its
+ * endpoint next. */
 void      lighting_forget_endpoint(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep);
 
 /* True if any member of the group is currently known to be on: by its own word,
@@ -148,6 +152,10 @@ esp_err_t lighting_target_set_onoff(const lighting_target_t *t, zb_onoff_cmd_t c
                                     uint16_t transition_ds);
 esp_err_t lighting_target_set_brightness(const lighting_target_t *t, int input_pct,
                                          uint16_t transition_ds);
+/* lighting_group_switch_on_to for a room; for a light, its brightness, or on for one
+ * that can only switch. */
+esp_err_t lighting_target_switch_on_to(const lighting_target_t *t, int input_pct,
+                                       uint16_t transition_ds);
 esp_err_t lighting_target_nudge(const lighting_target_t *t, int delta_pct, uint16_t transition_ds,
                                 bool coarse, int *landed_pct);
 esp_err_t lighting_target_ramp_to(const lighting_target_t *t, int input_pct, uint16_t transition_ds);

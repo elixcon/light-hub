@@ -21,6 +21,11 @@
  *   its last brightness on the way, and flash a lamp whose curve is dark at the
  *   one asked for. An On waits for a brightness to replace it.
  *
+ * - A device shown on its own. A lamp is the Matter light its clusters make it, a
+ *   remote's button a Generic Switch whose events say what the hub's gesture was -
+ *   a controller's automation runs on them, and a wrong count runs the wrong one -
+ *   and every endpoint has a UniqueID that fits the attribute.
+ *
  * levels.inc and matter.inc are extracted from main/light_math.h and
  * main/matter_bridge.cpp by the Makefile, never copied.
  *
@@ -30,7 +35,9 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
+#include "../main/btn_gesture.h"
 #include "levels.inc"
 #include "matter.inc"
 
@@ -177,7 +184,7 @@ static mb_intent_t intent(uint8_t kind, bool if_on)
     mb_intent_t in = {0};
     in.kind        = kind;
     in.if_on       = if_on;
-    in.group_id    = 1;
+    in.endpoint_id = 1;
     in.level       = 76;
     return in;
 }
@@ -192,7 +199,7 @@ static void test_an_on_followed_by_a_brightness_is_one_request(void)
     mb_intent_t  due;
     const int64_t t0 = 5000000;
 
-    ok(mb_on_hold_take(&h, &(mb_intent_t){.kind = MB_ON, .group_id = 1}, t0, out) == 0,
+    ok(mb_on_hold_take(&h, &(mb_intent_t){.kind = MB_ON, .endpoint_id = 1}, t0, out) == 0,
        "an On is not carried out at once");
     ok(!mb_on_hold_due(&h, t0 + 400 * 1000, &due), "nor 400 ms later, the slowest gap measured");
 
@@ -262,7 +269,7 @@ static void test_an_on_after_a_brightness_is_part_of_it(void)
     ok(mb_on_hold_take(&h, &with_onoff, t0, out) == 1 && out[0].kind == MB_LEVEL,
        "the brightness is carried out at once");
 
-    mb_intent_t on = {.kind = MB_ON, .group_id = 1, .at_us = t0 + 248 * 1000};
+    mb_intent_t on = {.kind = MB_ON, .endpoint_id = 1, .at_us = t0 + 248 * 1000};
     ok(mb_on_hold_take(&h, &on, on.at_us, out) == 0, "the On after it adds nothing");
     ok(!h.held, "and does not wait to be carried out");
     ok(!mb_on_hold_due(&h, t0 + 10 * 1000 * 1000, &due), "not then, and not later");
@@ -316,7 +323,7 @@ static void test_an_on_later_than_a_brightness_is_a_turn_on(void)
     level.switch_on   = true;
     level.at_us       = t0;
     mb_on_hold_take(&h, &level, t0, out);
-    mb_intent_t on = {.kind = MB_ON, .group_id = 1, .at_us = t0 + MB_ON_AFTER_LEVEL_US};
+    mb_intent_t on = {.kind = MB_ON, .endpoint_id = 1, .at_us = t0 + MB_ON_AFTER_LEVEL_US};
     ok(mb_on_hold_take(&h, &on, on.at_us, out) == 0 && h.held, "once the window is over the On is held");
     ok(mb_on_hold_due(&h, on.at_us + MB_ON_HOLD_US, &due) && due.kind == MB_ON, "and carried out");
 
@@ -388,6 +395,101 @@ static void test_turn_on_follows_the_room_setting(void)
     ok(mb_turn_on(7, true) == MB_ON_AS_WAS, "an unknown setting is the old On");
 }
 
+/* A lamp is shown as the most it can do. Colour wins over colour temperature,
+ * which wins over dimming: Matter's lights nest that way. */
+static void test_a_lamp_is_the_light_its_clusters_make_it(void)
+{
+    ok(mb_lamp_type(false, false, false) == MB_LAMP_ONOFF, "a relay is an On/Off Light");
+    ok(mb_lamp_type(true, false, false) == MB_LAMP_DIMMABLE, "a dimmer is a Dimmable Light");
+    ok(mb_lamp_type(true, true, false) == MB_LAMP_CT, "a tunable white is a Color Temperature Light");
+    ok(mb_lamp_type(true, true, true) == MB_LAMP_COLOR, "a colour lamp is an Extended Color Light");
+    ok(mb_lamp_type(true, false, true) == MB_LAMP_COLOR, "colour without colour temperature is still colour");
+    ok(mb_lamp_type(false, true, false) == MB_LAMP_CT, "colour temperature wins over a missing level");
+
+    /* The shape decides a rebuild: hue and saturation count only on a colour
+     * light, where they are a feature of their own. */
+    ok(mb_lamp_shape(true, true, true, true) != mb_lamp_shape(true, true, true, false),
+       "a colour lamp gaining hue and saturation is rebuilt");
+    ok(mb_lamp_shape(true, true, false, true) == mb_lamp_shape(true, true, false, false),
+       "hue and saturation mean nothing to a tunable white");
+    ok((mb_lamp_shape(true, true, true, true) & 0x0F) == MB_LAMP_COLOR, "the type is the low nibble");
+    ok(mb_lamp_shape(false, false, false, false) != mb_lamp_shape(true, false, false, false),
+       "a relay that turns out to dim is rebuilt");
+}
+
+static int count_of(const mb_sw_step_t *s, int n, uint8_t event)
+{
+    int c = 0;
+    for (int i = 0; i < n; i++) {
+        c += s[i].event == event;
+    }
+    return c;
+}
+
+/* Every press starts with InitialPress, and the switch is back at rest once the
+ * gesture is over - or held, after a LongPress, until the LongRelease. */
+static void check_positions(const mb_sw_step_t *s, int n, uint8_t at_end, const char *what)
+{
+    ok(n > 0 && (s[0].event == MB_SW_INITIAL_PRESS || s[0].event == MB_SW_LONG_RELEASE), what);
+    ok(mb_sw_position(s[n - 1].event) == at_end, what);
+}
+
+static void test_a_button_reports_what_the_hub_decided(void)
+{
+    mb_sw_step_t s[MB_SW_MAX_STEPS];
+
+    int n = mb_switch_events(ZBC_EMIT_SHORT, s);
+    ok(n == 3, "a short press is three events");
+    ok(s[0].event == MB_SW_INITIAL_PRESS && s[1].event == MB_SW_SHORT_RELEASE && s[2].event == MB_SW_MULTI_COMPLETE,
+       "pressed, released, then the count");
+    ok(s[2].count == 1, "a single press counts one");
+    check_positions(s, n, 0, "a short press ends at rest");
+
+    n = mb_switch_events(ZBC_EMIT_DOUBLE, s);
+    ok(n == 5, "a double press is five events");
+    ok(count_of(s, n, MB_SW_SHORT_RELEASE) == 2, "both presses are released");
+    ok(count_of(s, n, MB_SW_INITIAL_PRESS) == 1, "only the first press is an InitialPress");
+    ok(s[2].event == MB_SW_MULTI_ONGOING && s[2].count == 2, "the second press says it is the second");
+    ok(s[n - 1].event == MB_SW_MULTI_COMPLETE && s[n - 1].count == 2, "and the sequence ends at two");
+    ok(s[n - 1].count <= MB_SW_MULTI_PRESS_MAX, "never more than the switch says it counts");
+    check_positions(s, n, 0, "a double press ends at rest");
+
+    n = mb_switch_events(ZBC_EMIT_LONG, s);
+    ok(n == 2 && s[0].event == MB_SW_INITIAL_PRESS && s[1].event == MB_SW_LONG_PRESS, "a hold is pressed, then long");
+    ok(count_of(s, n, MB_SW_MULTI_COMPLETE) == 0, "a hold is no multi-press");
+    check_positions(s, n, 1, "a hold leaves the switch pressed");
+
+    n = mb_switch_events(ZBC_EMIT_LONG_RELEASE, s);
+    ok(n == 1 && s[0].event == MB_SW_LONG_RELEASE, "letting go of a hold is a LongRelease");
+    ok(mb_sw_position(s[0].event) == 0, "and the switch is at rest again");
+
+    ok(mb_switch_events(ZBC_EMIT_LONG_REPEAT, s) == 0, "a hold's repeats say nothing");
+    ok(mb_switch_events(ZBC_EMIT_TRIPLE, s) == 0, "a triple is more than the switch counts");
+    ok(mb_switch_events(ZBC_EMIT_MOTION, s) == 0, "a sensor's motion is no press");
+    ok(mb_switch_events(ZBC_EMIT_CLEAR, s) == 0, "nor is its clear");
+    ok(mb_switch_events(ZBC_EMIT_NONE, s) == 0, "nothing is nothing");
+}
+
+/* The UniqueID is at most 32 characters, whatever the address, endpoint and
+ * button; and two buttons of one remote, or a lamp and a button, never share one. */
+static void test_a_unique_id_fits_and_is_unique(void)
+{
+    const uint8_t ff[8] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+    char a[33], b[33];
+    ok(mb_device_uid(a, sizeof(a), ff, 240, 255) <= 32, "the longest a switch can have fits");
+    ok(strlen(a) == 32, "and is not cut short");
+    ok(mb_device_uid(a, sizeof(a), ff, 240, -1) <= 32, "nor a lamp's");
+
+    const uint8_t ieee[8] = { 0x00, 0x17, 0x88, 0x01, 0x02, 0x6e, 0xf2, 0xa8 };
+    mb_device_uid(a, sizeof(a), ieee, 11, -1);
+    ok(strcmp(a, "elixcon-00178801026ef2a8-11") == 0, "a lamp's names its address and endpoint");
+    mb_device_uid(a, sizeof(a), ieee, 1, 0);
+    mb_device_uid(b, sizeof(b), ieee, 1, 1);
+    ok(strcmp(a, b) != 0, "two buttons of one remote differ");
+    mb_device_uid(b, sizeof(b), ieee, 1, -1);
+    ok(strcmp(a, b) != 0, "a button differs from its endpoint's lamp");
+}
+
 int main(void)
 {
     test_turn_on_follows_the_room_setting();
@@ -407,6 +509,9 @@ int main(void)
     test_a_move_ends_at_the_rail_by_itself();
     test_a_stop_reckons_where_the_sweep_was();
     test_a_zero_rate_sends_nothing();
+    test_a_lamp_is_the_light_its_clusters_make_it();
+    test_a_button_reports_what_the_hub_decided();
+    test_a_unique_id_fits_and_is_unique();
     printf("all %d checks passed\n", s_checks);
     return 0;
 }

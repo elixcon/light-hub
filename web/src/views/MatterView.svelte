@@ -50,7 +50,7 @@
 </script>
 
 <ViewHeader title="Matter" back="/settings" />
-<div class="text-muted-foreground mt-1 text-sm">Each room is a dimmable light to Apple Home, Home Assistant or Alexa.</div>
+<div class="text-muted-foreground mt-1 text-sm">Each room is a dimmable light to Apple Home, Home Assistant or Alexa. A Zigbee light, remote or motion sensor can be shared on its own as well, from its own page.</div>
 
 <Card.Root class="mt-4">
 	<Card.Content class="flex flex-col gap-4 text-sm">
@@ -61,7 +61,12 @@
 		{:else if !m.running}
 			<div class="text-muted-foreground">Matter is not running.</div>
 		{:else}
-			<div>{controllers.length ? `Added to ${plural(controllers.length, "controller")}` : "Not added to a controller yet"} · {plural(m.groups, "room")} shared as lights</div>
+			<div>{controllers.length ? `Added to ${plural(controllers.length, "controller")}` : "Not added to a controller yet"} · {plural(m.groups, "room")} shared as lights{m.devices ? ` · ${plural(m.devices, "device")} on ${m.devices === 1 ? "its" : "their"} own` : ""}</div>
+			{#if m.devices_skipped}
+				<div class="text-destructive">{m.devices_skipped} asked for {m.devices_skipped === 1 ? "is" : "are"} not shown{m.devices_low_memory
+					? ": the coordinator is short of memory for another. Stop sharing a light, a colour light most of all, to make room."
+					: ": a motion sensor needs setting up first, or there is no room left in Matter."}</div>
+			{/if}
 			{#if controllers.length}
 				<div class="text-muted-foreground">{controllers.map((f) => f.label || `vendor ${f.vendor_id}`).join(" · ")}</div>
 			{/if}

@@ -16,6 +16,7 @@
 	import MixCurves from "$lib/components/MixCurves.svelte";
 	import FirmwareRow from "$lib/components/FirmwareRow.svelte";
 	import NodeWifiCard from "$lib/components/NodeWifiCard.svelte";
+	import MatterExposeRow from "$lib/components/MatterExposeRow.svelte";
 	import { isNode } from "$lib/utils.ts";
 	import { data, pending, key, value, epPct, isRemoteEp, findEp, findGroup, refresh, schedule, seenIeee,
 		setOnOff, setLevel, sendCommand, getOffEpoch } from "$lib/state.svelte.ts";
@@ -530,6 +531,10 @@
 			</dl>
 			{#if matter && d.bridged}
 				<div class="text-muted-foreground text-xs">A lamp added to the hub later appears here after <b>Rescan device</b>.</div>
+			{/if}
+			{#if !node && (d.source ?? "zigbee") === "zigbee" && !remote && f.includes("onoff")}
+				<MatterExposeRow {ieee} eps={[e.ep]} on={!!e.matter}
+					help={`Apple Home, Home Assistant and Alexa get this light by itself as well as in its rooms${canColor ? ", with its colour" : canCt ? ", with its colour temperature" : ""}. Its curves and the fade time still apply.`} />
 			{/if}
 			{#if !wired && !matter && !isNode(d)}<FirmwareRow device={d} />{/if}
 			<div class="flex flex-wrap gap-2">

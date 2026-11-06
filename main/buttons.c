@@ -13,6 +13,8 @@
 #include "auth.h"
 #include "buttons.h"
 #include "lighting.h"
+#include "matter_bridge.h"
+#include "mexp_db.h"
 #include "node_proto.h"
 #include "settings.h"
 #include "state_rev.h"
@@ -632,7 +634,11 @@ void buttons_reload(void)
         x->inverted    = b->inverted;
         x->pull        = b->pull;
         x->is_switch   = b->src == ZBC_BTN_SRC_GPIO && b->input == ZBC_INPUT_SWITCH;
-        x->want_double = !x->is_switch && b->rule_count[ZBC_EV_DOUBLE] > 0;
+        /* A key shown in Matter waits for a double press whatever its rules
+         * say: a controller may have an automation on one. */
+        x->want_double = !x->is_switch &&
+                         (b->rule_count[ZBC_EV_DOUBLE] > 0 ||
+                          (b->src == ZBC_BTN_SRC_ZIGBEE && mexp_db_has(b->ieee, b->zb_ep)));
         memcpy(x->ieee, b->ieee, ZBC_BTN_IEEE_LEN);
         x->zb_ep       = b->zb_ep;
         x->zb_key      = b->zb_key;
@@ -1445,6 +1451,14 @@ static int slot_of(uint16_t id)
 
 static void dispatch(const btn_msg_t *msg)
 {
+    /* Every gesture, rules or none, a release included: a remote or sensor shown
+     * in Matter on its own (mexp_db.h) is a trigger for a controller's own
+     * automations. A post and nothing more - the bridge finds out whether this
+     * button is one of its. A hold's repeats say nothing a controller can use. */
+    if (msg->emit != ZBC_EMIT_NONE && msg->emit != ZBC_EMIT_LONG_REPEAT) {
+        matter_bridge_button_event(msg->id, (uint8_t)msg->emit);
+    }
+
     /* A release stops whatever is ramping and asks nothing else. Going back to
      * the rules for it would be wrong twice over: the conditions may have moved
      * on during the sweep, and there may no longer be a rule at all - and the
@@ -1781,6 +1795,24 @@ bool buttons_sensor_state(uint16_t id, bool *occupied, int64_t *clear_in_ms)
         *clear_in_ms = at == 0 ? -1 : (left > 0 ? left / 1000 : 0);
     }
     return true;
+}
+
+size_t buttons_zigbee_list(const uint8_t ieee[ZBC_BTN_IEEE_LEN], uint8_t ep, buttons_zb_ref_t *out, size_t max)
+{
+    size_t n = 0;
+    portENTER_CRITICAL(&s_live_mux);
+    for (int i = 0; i < CONFIG_ZBC_MAX_BUTTONS && n < max; i++) {
+        const btn_live_t *l = &s_live[i];
+        if (l->used && (l->src == ZBC_BTN_SRC_ZIGBEE || l->src == ZBC_BTN_SRC_SENSOR) && l->zb_ep == ep &&
+            memcmp(l->ieee, ieee, ZBC_BTN_IEEE_LEN) == 0) {
+            out[n].id  = l->id;
+            out[n].src = l->src;
+            out[n].key = l->zb_key;
+            n++;
+        }
+    }
+    portEXIT_CRITICAL(&s_live_mux);
+    return n;
 }
 
 bool buttons_delayed(uint16_t id, int *count, int64_t *next_ms)

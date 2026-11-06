@@ -13,6 +13,7 @@
 	import ButtonRow from "$lib/components/ButtonRow.svelte";
 	import FirmwareRow from "$lib/components/FirmwareRow.svelte";
 	import NodeWifiCard from "$lib/components/NodeWifiCard.svelte";
+	import MatterExposeRow from "$lib/components/MatterExposeRow.svelte";
 	import { isNode } from "$lib/utils.ts";
 	import { data, refresh } from "$lib/state.svelte.ts";
 	import { navigate } from "$lib/router.svelte.ts";
@@ -32,6 +33,10 @@
 	const heard = $derived(c ? remoteHeard(c) : null);
 	const link = $derived(c ? remoteLink(c, data.devices) : null);
 	const stray = $derived(c ? strayParent(c, data.devices) : null);
+	/* Its buttons' endpoints - usually one - and whether Matter shows all of them. */
+	const buttonEps = $derived(c ? [...new Set([c.ep, ...c.buttons.map((b) => b.ep).filter((x): x is number => x !== null)])] : []);
+	const inMatter = $derived(!!c?.device && buttonEps.length > 0 &&
+		buttonEps.every((ep) => c?.device?.endpoints.find((x) => x.ep === ep)?.matter));
 
 	/* A remote is a device, so its name is the device's name - the same one the
 	 * log and the API use. Seeded once; the poll must not wipe a half-typed name. */
@@ -140,6 +145,12 @@
 				{#if link}<div>{link}</div>{/if}
 				<div>{heard !== null ? `Last press heard ${ago(heard)}` : "No press heard since the coordinator started"}</div>
 			</div>
+			{#if c.device}
+				<MatterExposeRow ieee={c.ieee} eps={buttonEps} on={inMatter}
+					help={c.buttons.length
+						? "Each of its buttons becomes a switch your controllers can run automations on: a single, a double and a long press. A single press then waits 300 ms to tell it from a double, for this remote's own buttons here too."
+						: "Each button set up here becomes a switch your controllers can run automations on. This remote has none set up yet."} />
+			{/if}
 			{#if stray}
 				<p class="text-destructive text-sm">
 					This remote sends to a group and hangs off {stray}, not the coordinator, so each press reaches the

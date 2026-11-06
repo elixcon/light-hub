@@ -85,9 +85,13 @@ CONFIG_MAX_GROUP_KEYS_PER_FABRIC=4
 # beside the ones Apple Home's traffic to the bridge holds.
 CONFIG_MAX_EXCHANGE_CONTEXTS=16
 # Root + aggregator + two per group (CONFIG_ZBC_MAX_GROUPS, 8: the light and its
-# "<name> Adaptive" switch, when the group exposes Adaptive Lighting that way) + two
-# spare. matter_bridge.cpp refuses to build if this falls behind the group count.
-CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_COUNT=20
+# "<name> Adaptive" switch, when the group exposes Adaptive Lighting that way) + one
+# per device endpoint shown on its own (CONFIG_ZBC_MAX_MATTER_EXPOSED, 12) + two
+# spare. matter_bridge.cpp refuses to build if this falls behind those counts.
+# Never lower it: esp_matter_bridge stores its endpoint list at this size, a shorter
+# buffer cannot read it back, and every room would come back on a new id - a new
+# light to every controller. Raising it is safe (see resume_bridged).
+CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_COUNT=32
 # One Mode Select per group's light, for groups exposing Adaptive Lighting as one.
 CONFIG_ESP_MATTER_MODE_SELECT_CLUSTER_ENDPOINT_COUNT=8
 # Everything Matter keeps goes in its own partition (see partitions.csv), so it
@@ -101,7 +105,8 @@ CONFIG_CHIP_KVS_NAMESPACE_PARTITION_LABEL="nvs_matter"
 # Clusters no light bridge uses, compiled out for flash. This is Espressif's own
 # list from examples/light (esp-matter 1.6.1), less Bridged Device Basic
 # Information - which carries each group's name and is the one cluster a bridge
-# cannot do without.
+# cannot do without - and less Occupancy Sensing and Switch, which a motion sensor
+# and a remote's buttons shown on their own are (main/mexp_db.h).
 CONFIG_SUPPORT_ACCOUNT_LOGIN_CLUSTER=n
 CONFIG_SUPPORT_ACTIONS_CLUSTER=n
 CONFIG_SUPPORT_ACTIVATED_CARBON_FILTER_MONITORING_CLUSTER=n
@@ -168,7 +173,6 @@ CONFIG_SUPPORT_MICROWAVE_OVEN_MODE_CLUSTER=n
 CONFIG_SUPPORT_MODE_SELECT_CLUSTER=y
 CONFIG_SUPPORT_NETWORK_IDENTITY_MANAGEMENT_CLUSTER=n
 CONFIG_SUPPORT_NITROGEN_DIOXIDE_CONCENTRATION_MEASUREMENT_CLUSTER=n
-CONFIG_SUPPORT_OCCUPANCY_SENSING_CLUSTER=n
 CONFIG_SUPPORT_OPERATIONAL_STATE_CLUSTER=n
 CONFIG_SUPPORT_OPERATIONAL_STATE_OVEN_CLUSTER=n
 CONFIG_SUPPORT_OPERATIONAL_STATE_RVC_CLUSTER=n
@@ -195,7 +199,6 @@ CONFIG_SUPPORT_SERVICE_AREA_CLUSTER=n
 CONFIG_SUPPORT_SMOKE_CO_ALARM_CLUSTER=n
 CONFIG_SUPPORT_SOFTWARE_DIAGNOSTICS_CLUSTER=n
 CONFIG_SUPPORT_SOIL_MEASUREMENT_CLUSTER=n
-CONFIG_SUPPORT_SWITCH_CLUSTER=n
 CONFIG_SUPPORT_TARGET_NAVIGATOR_CLUSTER=n
 CONFIG_SUPPORT_TEMPERATURE_CONTROL_CLUSTER=n
 CONFIG_SUPPORT_TEMPERATURE_MEASUREMENT_CLUSTER=n

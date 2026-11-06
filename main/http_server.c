@@ -36,6 +36,7 @@
 #include "local_lights.h"
 #include "matter_bridge.h"
 #include "matter_ctl.h"
+#include "mexp_db.h"
 #include "mlight_db.h"
 #include "ota.h"
 #include "settings.h"
@@ -537,6 +538,10 @@ static cJSON *device_to_json(const zbc_device_t *dev, int64_t now)
             cJSON_AddItemToArray(feat, cJSON_CreateString("motion"));
             cJSON_AddBoolToObject(ep, "reports_clear", (src->features & ZBC_FEAT_MOTION_CLEARS) != 0);
         }
+        /* Shown in Matter on its own (mexp_db.h). Absent is off, the default. */
+        if (mexp_db_has(dev->ieee, src->ep)) {
+            cJSON_AddBoolToObject(ep, "matter", true);
+        }
 
         if (src->on_off == ZBC_UNKNOWN) {
             cJSON_AddNullToObject(ep, "on");
@@ -858,6 +863,57 @@ static esp_err_t device_color_post(httpd_req_t *req, const uint8_t ieee[ZBC_IEEE
     return send_command_result(req, ieee, lighting_set_color_hs(ieee, ep, zcl_hue, zcl_sat, dsec));
 }
 
+/* POST /api/devices/{ieee}/ep/{ep}/matter  {"expose": true|false}
+ *
+ * Whether the bridge shows this endpoint on its own, besides the rooms: a lamp, a
+ * remote's endpoint (one switch per button set up on it) or a motion sensor. A
+ * Zigbee device's only - a wired light or a Matter lamp is reached through its
+ * rooms. Taken at once: the bridge adds or removes the endpoint within a second. */
+static esp_err_t device_matter_post(httpd_req_t *req, const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep)
+{
+    cJSON *json = read_json_body(req);
+    if (!json) {
+        return ESP_FAIL;
+    }
+    cJSON     *expose = cJSON_GetObjectItem(json, "expose");
+    const bool valid  = cJSON_IsBool(expose);
+    const bool want   = cJSON_IsTrue(expose);
+    cJSON_Delete(json);
+    if (!valid) {
+        return send_error(req, "400 Bad Request", "expose must be true or false");
+    }
+    if (zbc_light_id_from_ieee(ieee) || zbc_mlight_id_from_ieee(ieee)) {
+        return send_error(req, "409 Conflict", "only a Zigbee device can be shown in Matter on its own");
+    }
+    zbc_device_t dev;
+    if (!device_db_get(ieee, &dev)) {
+        return send_error(req, "404 Not Found", "unknown device");
+    }
+    const zbc_endpoint_t *e = lighting_find_endpoint(&dev, ep);
+    if (!e) {
+        return send_error(req, "404 Not Found", "unknown endpoint");
+    }
+    /* A remote's buttons may sit on an endpoint whose clusters say nothing of
+     * presses; buttons set up on it make it one. */
+    buttons_zb_ref_t ref;
+    if (want && !(e->features & (ZBC_FEAT_ONOFF | ZBC_FEAT_SWITCH | ZBC_FEAT_MOTION)) &&
+        buttons_zigbee_list(ieee, ep, &ref, 1) == 0) {
+        return send_error(req, "409 Conflict", "this endpoint is not a light, a remote or a motion sensor");
+    }
+    const esp_err_t err = mexp_db_set(ieee, ep, want);
+    if (err == ESP_ERR_NO_MEM) {
+        return send_error(req, "507 Insufficient Storage", "no room in Matter for another device");
+    }
+    if (err != ESP_OK) {
+        return send_error(req, "500 Internal Server Error", "could not store the setting");
+    }
+    /* A remote shown in Matter waits for a double press on each of its buttons. */
+    buttons_reload();
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "expose", want);
+    return send_json(req, root, "200 OK");
+}
+
 static esp_err_t device_patch(httpd_req_t *req, const uint8_t ieee[ZBC_IEEE_LEN])
 {
     cJSON *json = read_json_body(req);
@@ -921,6 +977,7 @@ static esp_err_t device_delete(httpd_req_t *req, const uint8_t ieee[ZBC_IEEE_LEN
      * nor leave a curve behind for whatever joins next. */
     group_db_forget_device(ieee);
     curve_db_forget_device(ieee);
+    mexp_db_forget_device(ieee);
     lighting_forget_device(ieee);
     /* A button whose source is a remote names the device, and one left pointing
      * at a device that is gone would fire at nothing - it keeps its name and
@@ -1180,6 +1237,9 @@ static esp_err_t device_dispatch(httpd_req_t *req)
         }
         if (strcmp(tail, "curves") == 0) {
             return device_curves_post(req, ieee, (uint8_t)ep);
+        }
+        if (strcmp(tail, "matter") == 0) {
+            return device_matter_post(req, ieee, (uint8_t)ep);
         }
     }
     if (req->method == HTTP_GET && has_tail && strcmp(tail, "curves") == 0) {
@@ -3431,6 +3491,7 @@ static esp_err_t factory_reset_post(httpd_req_t *req)
     }
     group_db_erase();
     al_db_erase();
+    mexp_db_erase();      /* the devices it names leave with the network */
     curve_db_erase();
     button_db_erase();
     buttons_reload();
@@ -3724,6 +3785,41 @@ static esp_err_t matter_get(httpd_req_t *req)
         cJSON_AddNumberToObject(g, "al_matter_on", d->al_matter_on);
         cJSON_AddNumberToObject(g, "matter_mode", d->matter_mode);
         cJSON_AddItemToArray(gl, g);
+    }
+    /* The device endpoints shown on their own (mexp_db.h), as the bridge has them,
+     * and how many asked for have none: a sensor not set up yet, or no room. */
+    cJSON_AddNumberToObject(root, "devices", st.devices);
+    cJSON_AddNumberToObject(root, "devices_skipped", st.devices_skipped);
+    cJSON_AddBoolToObject(root, "devices_low_memory", st.devices_heap_short);
+    static const char *const DEV_KINDS[] = { "", "light", "switch", "occupancy" };
+    cJSON *dl = cJSON_AddArrayToObject(root, "device_list");
+    for (int i = 0; i < st.devices; i++) {
+        const matter_device_t *d = &st.device_list[i];
+        cJSON *o = cJSON_CreateObject();
+        char   ieee[19];
+        zbc_ieee_to_str(d->ieee, ieee);
+        cJSON_AddStringToObject(o, "ieee", ieee);
+        cJSON_AddNumberToObject(o, "ep", d->ep);
+        cJSON_AddStringToObject(o, "kind", d->kind < 4 ? DEV_KINDS[d->kind] : "");
+        if (d->kind == MATTER_DEV_SWITCH) {
+            cJSON_AddNumberToObject(o, "key", d->key);
+        }
+        if (d->kind != MATTER_DEV_LAMP) {
+            cJSON_AddNumberToObject(o, "button", d->button_id);
+        }
+        cJSON_AddNumberToObject(o, "endpoint", d->endpoint_id);
+        cJSON_AddNumberToObject(o, "reachable", d->reachable);
+        if (d->kind != MATTER_DEV_SWITCH) {
+            cJSON_AddNumberToObject(o, d->kind == MATTER_DEV_LAMP ? "matter_on" : "occupied", d->matter_on);
+        }
+        if (d->kind == MATTER_DEV_LAMP) {
+            cJSON_AddNumberToObject(o, "matter_level", d->matter_level);
+            cJSON_AddBoolToObject(o, "held", d->held);
+            cJSON_AddBoolToObject(o, "rebuild_pending", d->rebuild);
+        }
+        cJSON_AddNumberToObject(o, "writes", d->writes);
+        cJSON_AddStringToObject(o, "last_err", d->last_err ? esp_err_to_name(d->last_err) : "");
+        cJSON_AddItemToArray(dl, o);
     }
     cJSON_AddStringToObject(root, "manual_code", st.manual_code);
     cJSON_AddStringToObject(root, "qr_code", st.qr_code);

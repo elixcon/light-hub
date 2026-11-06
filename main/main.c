@@ -23,6 +23,7 @@
 #include "thermal.h"
 #include "matter_bridge.h"
 #include "matter_ctl.h"
+#include "mexp_db.h"
 #include "mlight_db.h"
 #include "ota.h"
 #include "settings.h"
@@ -79,6 +80,9 @@ void app_main(void)
     /* Before the AP-mode return, like the other tables: a Matter lamp is still a
      * known device, offline, while the setup portal runs. */
     ESP_ERROR_CHECK(mlight_db_init());
+    /* Before buttons_start, which reads it: a remote shown in Matter waits for
+     * a double press on every button. */
+    ESP_ERROR_CHECK(mexp_db_init());
     /* The Zigbee device image, before the stack that serves it and the web
      * server that reports it. Never fatal: a flash on the older layout has no
      * partition for it, and runs on without device updates. */

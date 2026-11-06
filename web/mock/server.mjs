@@ -26,6 +26,22 @@ const devices = [
 /* A pairing walks through the firmware's steps, a second or so each. */
 const PAIR_STEPS = ["find", "pase", "arm", "csr", "root", "noc", "case", "complete", "read"];
 let pairing = { state: "idle", step: "idle", error: "", node_id: "", lamps: 0, s_ago: 0, started: 0 };
+/* The device endpoints shown in Matter on their own: a lamp or sensor is one, a
+ * remote one per button set up on it - as the bridge counts them. */
+function matterDevices() {
+  const list = [];
+  for (const d of devices) for (const e of d.endpoints) {
+    if (!e.matter) continue;
+    if (e.features.includes("motion")) list.push({ ieee: d.ieee, ep: e.ep, kind: "occupancy", endpoint: 0, reachable: 1, writes: 0, last_err: "" });
+    else if (e.features.includes("switch") || !e.features.includes("onoff")) {
+      for (const b of buttons.filter((x) => x.source === "zigbee" && x.ieee === d.ieee && x.ep === e.ep))
+        list.push({ ieee: d.ieee, ep: e.ep, kind: "switch", key: b.key, button: b.id, endpoint: 0, reachable: 1, writes: 0, last_err: "" });
+    } else list.push({ ieee: d.ieee, ep: e.ep, kind: "light", endpoint: 0, reachable: d.online ? 1 : 0, writes: 0, last_err: "" });
+  }
+  list.forEach((x, i) => { x.endpoint = 20 + i; });
+  return { devices: list.length, devices_skipped: 0, devices_low_memory: false, device_list: list };
+}
+
 function pairingNow() {
   if (pairing.state !== "running") return pairing;
   const i = Math.floor((Date.now() - pairing.started) / 700);
@@ -235,7 +251,7 @@ http.createServer(async (req, res) => {
       ...(b.name !== undefined ? { name: b.name, hostname: (b.name || "living-room-hub").toLowerCase().replace(/[^a-z0-9]+/g, "-") } : {}) }); }
   if (u.pathname === "/api/matter") return json(res, 200, { running: true, fabrics: 3,
     fabric_list: [{ index: 1, vendor_id: "0x1349", label: "Home", ours: false }, { index: 2, vendor_id: "0x1384", label: "", ours: false }, { index: 3, vendor_id: "0xFFF1", label: "Elixcon Light Hub lamps", ours: true }],
-    window_open: true, groups: 2, group_list: [], manual_code: "34970112332", qr_code: "MT:Y.K9042C00KA0648G00",
+    window_open: true, groups: 2, group_list: [], ...matterDevices(), manual_code: "34970112332", qr_code: "MT:Y.K9042C00KA0648G00",
     controller: { running: true, fabric_index: 3, fabric_error: "", node_id: "E0B853D7E2D7B9E5",
       nodes: [{ node_id: "80106DE83124FF1E", lamps: 1, online: true, subscribed: true, drops: 0, reports: 12, last_seen_s_ago: 20, down_s: 0, last_error: "" }],
       pairing: pairingNow() } });
@@ -282,6 +298,13 @@ http.createServer(async (req, res) => {
       if (m === "GET") return json(res, 200, { level: curves[k]?.level ?? null, chroma: curves[k]?.chroma ?? null, input_pct: e?.input_pct ?? null });
       const b = await body(req); curves[k] = b; if (e) e.curves = { level: !!b.level, chroma: !!b.chroma }; return json(res, 200, { ok: true });
     }
+    if (p[3] === "ep" && p[5] === "matter" && m === "POST") {
+      if (!e) return json(res, 404, { error: "unknown endpoint" });
+      const b = await body(req);
+      if (typeof b.expose !== "boolean") return json(res, 400, { error: "expose must be true or false" });
+      if (b.expose) e.matter = true; else delete e.matter;
+      return json(res, 200, { expose: b.expose });
+    }
     if (p[3] === "ep" && e) {
       const b = await body(req);
       if (p[5] === "onoff") e.on = b.state === "toggle" ? !e.on : b.state === "on";
@@ -290,7 +313,7 @@ http.createServer(async (req, res) => {
       if (p[5] === "color") { e.hue = b.hue; e.sat = b.sat; e.color_mode = "color"; }
       return json(res, 202, { ok: true });
     }
-    if (m === "PATCH") { const d = devices.find((x) => x.ieee === ieee); if (d) d.name = (await body(req)).name; return json(res, 200, { ok: true }); }
+    if (m === "PATCH") { const d = devices.find((x) => x.ieee === ieee); const b = await body(req); if (d && b.name !== undefined) d.name = b.name; return json(res, 200, { ok: true }); }
     if (m === "DELETE") { const i = devices.findIndex((x) => x.ieee === ieee); if (i >= 0) devices.splice(i, 1); return json(res, 200, { ok: true }); }
   }
   if (p[0] === "api" && p[1] === "groups") {

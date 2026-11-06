@@ -19,6 +19,7 @@
 #include "device_db.h"
 #include "group_db.h"
 #include "light_db.h"
+#include "mexp_db.h"
 #include "mlight_db.h"
 #include "settings.h"
 #include "zb_coordinator.h"
@@ -94,6 +95,7 @@ static const cb_entry_t CB_ENTRIES[] = {
     { "mlights",     CB_BLOB, CB_SECT_TABLES },
     { "adaptive",    CB_BLOB, CB_SECT_TABLES },
     { "al_days",     CB_BLOB, CB_SECT_TABLES },
+    { "matter_dev",  CB_BLOB, CB_SECT_TABLES },
 };
 #define CB_ENTRY_COUNT (sizeof(CB_ENTRIES) / sizeof(CB_ENTRIES[0]))
 
@@ -206,6 +208,9 @@ static bool blob_ok(const char *key, const void *blob, size_t len)
     if (strcmp(key, "al_days") == 0) {
         return al_db_days_blob_ok(blob, len);
     }
+    if (strcmp(key, "matter_dev") == 0) {
+        return mexp_db_blob_ok(blob, len);
+    }
     if (strcmp(key, "auth") == 0) {
         return auth_blob_ok(blob, len);
     }
@@ -219,7 +224,7 @@ static const char *blob_what(const char *key)
         { "devices", "devices" },   { "groups", "rooms" },          { "curves", "curves" },
         { "buttons", "buttons" },   { "lights", "wired lights" },   { "mlights", "Matter lamps" },
         { "adaptive", "Adaptive Lighting settings" }, { "al_days", "rooms' Adaptive Lighting days" },
-        { "auth", "access keys" },
+        { "matter_dev", "devices shown in Matter" }, { "auth", "access keys" },
     };
     for (size_t i = 0; i < sizeof(NAMES) / sizeof(NAMES[0]); i++) {
         if (strcmp(NAMES[i].key, key) == 0) {

@@ -25,6 +25,7 @@ idf_component_register(
         "button_db.c"
         "light_db.c"
         "mlight_db.c"
+        "mexp_db.c"
         "local_lights.c"
         "lighting.c"
         "btn_gesture.c"

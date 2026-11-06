@@ -26,8 +26,17 @@
  * with the bridged endpoints, so http_server.c and group_db know nothing of this
  * file. A faster pass copies each group's state into its Matter attributes, which
  * is how a change from the web UI, a button or a remote reaches the controller.
+ *
+ * A Zigbee device endpoint somebody asked to see on its own (mexp_db.h) is
+ * reconciled the same way, beside the rooms: a lamp becomes the Matter light its
+ * clusters make it, driven through lighting.c's one-light calls exactly as a room
+ * is through the group calls; each button of a remote a Generic Switch; a motion
+ * sensor an Occupancy Sensor. The buttons report through buttons.c, which posts
+ * every gesture here (matter_bridge_button_event), and the sensor's state is read
+ * from its rules' own, so its no-motion time applies to the controllers too.
  */
 #include <inttypes.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
@@ -35,6 +44,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
@@ -51,13 +61,19 @@
 #include <app/server/Server.h>
 #include <platform/CHIPDeviceLayer.h>
 #include <app/clusters/mode-select-server/supported-modes-manager.h>
+#include <app/clusters/switch-server/CodegenIntegration.h>
+#include <clusters/occupancy_sensing/integration.h>
 #include <setup_payload/OnboardingCodesUtil.h>
 
+#include "btn_gesture.h"
+#include "button_db.h"
+#include "buttons.h"
 #include "group_db.h"
 #include "heap_watch.h"
 #include "lighting.h"
 #include "matter_bridge.h"
 #include "matter_ctl.h"
+#include "mexp_db.h"
 #include "settings.h"
 #include "wifi_manager.h"
 
@@ -76,6 +92,10 @@ using namespace chip::app::Clusters;
  * layout and version, so no light loses the id controllers know it by. */
 #define MB_NVS_KEY_AL  "al_groups"
 #define MB_MAP_VERSION 1
+/* The device endpoints shown on their own, in a third: which device, endpoint and
+ * button each Matter endpoint stands for. */
+#define MB_NVS_KEY_DEV     "devices"
+#define MB_DEV_MAP_VERSION 1
 
 /* Endpoint 0 - the root node, which node::create() makes for us. It carries the
  * Basic Information cluster, so it is where the coordinator's own name goes. */
@@ -97,15 +117,30 @@ using namespace chip::app::Clusters;
  * three seconds, close to a held button's sweep. */
 #define MB_DEFAULT_RATE 80
 
-static_assert(MAX_BRIDGED_DEVICE_COUNT >= 2 * CONFIG_ZBC_MAX_GROUPS,
+/* A device is offline to Matter as it is to the web page: marked gone, or - for a
+ * lamp, which reports - not heard from in this long (OFFLINE_AFTER_US in
+ * http_server.c). A remote or sensor sleeps and says nothing until it is used, so
+ * for those only marked gone counts. */
+#define MB_OFFLINE_AFTER_US (10 * 60 * 1000000LL)
+
+/* The least free heap a new device endpoint is made with. Each one is heap for as
+ * long as it exists - measured on hardware, a switch under 1 KB, a light 4-10 KB,
+ * a colour light the most - and a controller's traffic takes about 32 KB on top of
+ * where the heap rests (a hub with four fabrics, over two days, 2026-11). One that
+ * would be made below this waits, counted in devices_skipped, until there is the
+ * room; one that already has its endpoint keeps it, at a restart too. */
+#define MB_DEV_HEAP_MIN (48 * 1024)
+
+static_assert(MAX_BRIDGED_DEVICE_COUNT >= 2 * CONFIG_ZBC_MAX_GROUPS + CONFIG_ZBC_MAX_MATTER_EXPOSED,
               "CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_COUNT is too small: every group needs an endpoint for "
-              "its light and one for its Adaptive Lighting switch, plus one for the root and one for the "
-              "aggregator");
+              "its light and one for its Adaptive Lighting switch, every device shown on its own one "
+              "(CONFIG_ZBC_MAX_MATTER_EXPOSED), plus one for the root and one for the aggregator");
 
 /* >>> host-test region: matter <<< */
 
-/* What a Matter command asks of a group. Decoded in the CHIP task, carried out in
- * the bridge task - plain data, so that posting one is all the CHIP task does. */
+/* What a Matter command asks of a room or a lamp, or what a button did. Decoded in
+ * the CHIP task (a button: in the buttons task), carried out in the bridge task -
+ * plain data, so that posting one is all either task does. */
 typedef enum {
     MB_NONE = 0,
     MB_ON,
@@ -118,6 +153,10 @@ typedef enum {
     MB_AL_START,   /* start or re-enter the group's Adaptive Lighting mode */
     MB_AL_STOP,    /* end it; the lights stay where they are */
     MB_AL_TOGGLE,  /* whichever of the two the mode is not */
+    MB_CT,         /* a lamp: colour temperature `a` mireds over `transition_ds` */
+    MB_HS,         /* a lamp: hue `a`, saturation `b`, both 0-254 */
+    MB_XY,         /* a lamp: CIE x `a`, y `b`, 0-65279 */
+    MB_SWITCH,     /* button `button_id` made gesture `emit` (zbc_btn_emit_t) */
 } mb_kind_t;
 
 typedef struct {
@@ -127,7 +166,13 @@ typedef struct {
     uint8_t  level;          /* MB_LEVEL: target. MB_MOVE: start, 0 when unknown */
     uint8_t  step;
     uint8_t  rate;
-    uint16_t group_id;
+    uint8_t  emit;           /* MB_SWITCH */
+    /* The slot it is for, by its Matter endpoint - the light's, for its Adaptive
+     * switch too. esp_matter never gives an id out twice, so a slot removed and
+     * another made while this waited in the queue cannot be mistaken for it. */
+    uint16_t endpoint_id;
+    uint16_t button_id;      /* MB_SWITCH */
+    uint16_t a, b;           /* MB_CT, MB_HS, MB_XY */
     uint16_t transition_ds;
     bool     timed;          /* the controller named the transition, as decoded */
     bool     matter_on;      /* if_on: the light's Matter OnOff when the command arrived */
@@ -366,24 +411,171 @@ static bool mb_al_toggle_starts(bool running)
     return !running;
 }
 
+/* What a Matter endpoint stands for: a room, or one device endpoint shown on its
+ * own (mexp_db.h). Stored in the device map, so the values are fixed. */
+typedef enum {
+    MB_SLOT_ROOM = 0,
+    MB_SLOT_LAMP,
+    MB_SLOT_SWITCH,
+    MB_SLOT_OCCUPANCY,
+} mb_slot_kind_t;
+
+/* Which Matter light a Zigbee lamp is shown as: the most it can do, from its
+ * clusters. A colour lamp is an Extended Color Light, which has colour temperature
+ * whether the lamp does or not - Matter has no colour light without it - and
+ * lighting_set_color_temp keeps a lamp to the range it says it has. */
+typedef enum {
+    MB_LAMP_ONOFF = 0,
+    MB_LAMP_DIMMABLE,
+    MB_LAMP_CT,
+    MB_LAMP_COLOR,
+} mb_lamp_t;
+
+static mb_lamp_t mb_lamp_type(bool level, bool ct, bool color)
+{
+    return color ? MB_LAMP_COLOR : (ct ? MB_LAMP_CT : (level ? MB_LAMP_DIMMABLE : MB_LAMP_ONOFF));
+}
+
+/* What a lamp's endpoint is built with: its light type and, for a colour light,
+ * whether it takes hue and saturation as well as x and y. An endpoint is built once
+ * - a cluster cannot be added to an enabled endpoint - so a lamp whose clusters say
+ * something else now is rebuilt at the next restart, on the same id. */
+static uint8_t mb_lamp_shape(bool level, bool ct, bool color, bool hs)
+{
+    const mb_lamp_t t = mb_lamp_type(level, ct, color);
+    return (uint8_t)((uint8_t)t | (t == MB_LAMP_COLOR && hs ? 0x10 : 0));
+}
+
+/* A Generic Switch's events, as the Switch cluster names them. */
+typedef enum {
+    MB_SW_INITIAL_PRESS = 0,
+    MB_SW_SHORT_RELEASE,
+    MB_SW_LONG_PRESS,
+    MB_SW_LONG_RELEASE,
+    MB_SW_MULTI_ONGOING,
+    MB_SW_MULTI_COMPLETE,
+} mb_sw_event_t;
+
+typedef struct {
+    uint8_t event;   /* mb_sw_event_t */
+    uint8_t count;   /* the multi-press ones: presses so far, or in all */
+} mb_sw_step_t;
+
+#define MB_SW_MAX_STEPS       5
+/* Single and double press, as the hub's own gestures tell them apart; a triple
+ * only ever comes from a remote that counted it itself, and is not reported. */
+#define MB_SW_MULTI_PRESS_MAX 2
+
+static void mb_sw_put(mb_sw_step_t *out, int *n, uint8_t event, uint8_t count)
+{
+    out[*n].event = event;
+    out[*n].count = count;
+    (*n)++;
+}
+
+/* The events one of the hub's gestures is reported as, in order, into `out`;
+ * returns how many. The switch has the momentary, release, long-press and
+ * multi-press features, so a press is a sequence: pressed, released, and once the
+ * hub knows no second press is coming, how many there were. The hub only knows a
+ * press by then - a gesture is decided at its end - so a controller is told the
+ * whole sequence at once, which is what it acts on anyway: Apple Home and Home
+ * Assistant trigger on MultiPressComplete and LongPress. */
+static int mb_switch_events(uint8_t emit, mb_sw_step_t out[MB_SW_MAX_STEPS])
+{
+    int n = 0;
+    switch (emit) {
+    case ZBC_EMIT_SHORT:
+        mb_sw_put(out, &n, MB_SW_INITIAL_PRESS, 0);
+        mb_sw_put(out, &n, MB_SW_SHORT_RELEASE, 0);
+        mb_sw_put(out, &n, MB_SW_MULTI_COMPLETE, 1);
+        break;
+    case ZBC_EMIT_DOUBLE:
+        mb_sw_put(out, &n, MB_SW_INITIAL_PRESS, 0);
+        mb_sw_put(out, &n, MB_SW_SHORT_RELEASE, 0);
+        mb_sw_put(out, &n, MB_SW_MULTI_ONGOING, 2);
+        mb_sw_put(out, &n, MB_SW_SHORT_RELEASE, 0);
+        mb_sw_put(out, &n, MB_SW_MULTI_COMPLETE, 2);
+        break;
+    case ZBC_EMIT_LONG:
+        mb_sw_put(out, &n, MB_SW_INITIAL_PRESS, 0);
+        mb_sw_put(out, &n, MB_SW_LONG_PRESS, 0);
+        break;
+    case ZBC_EMIT_LONG_RELEASE:
+        mb_sw_put(out, &n, MB_SW_LONG_RELEASE, 0);
+        break;
+    default:
+        break;
+    }
+    return n;
+}
+
+/* CurrentPosition once a step has happened: 1 pressed, 0 at rest. */
+static uint8_t mb_sw_position(uint8_t event)
+{
+    return event == MB_SW_INITIAL_PRESS || event == MB_SW_LONG_PRESS || event == MB_SW_MULTI_ONGOING ? 1 : 0;
+}
+
+/* The UniqueID a device endpoint is known by: the device's address and endpoint
+ * and, for a switch, which button (`key`, -1 for none). That is what tells a
+ * controller this is the light it saw before, however the device is renamed. At
+ * most 32 characters, the attribute's limit: "elixcon-" and the 16 hex digits
+ * leave room for two numbers of three digits. */
+static int mb_device_uid(char *out, size_t cap, const uint8_t ieee[8], uint8_t ep, int key)
+{
+    char hex[17];
+    for (int i = 0; i < 8; i++) {
+        snprintf(hex + 2 * i, 3, "%02x", ieee[i]);
+    }
+    return key >= 0 ? snprintf(out, cap, "elixcon-%s-%u-%u", hex, (unsigned)ep, (unsigned)key)
+                    : snprintf(out, cap, "elixcon-%s-%u", hex, (unsigned)ep);
+}
+
 /* >>> end host-test region: matter <<< */
 
 static_assert((int)MB_ON_AS_WAS == (int)ZBC_TURN_ON_LAST && (int)MB_ON_ADAPTIVE == (int)ZBC_TURN_ON_ADAPTIVE &&
                   (int)MB_ON_FULL == (int)ZBC_TURN_ON_FULL,
               "mb_turn_on reads the stored zbc_turn_on_t values");
 
+/* Rooms take the first CONFIG_ZBC_MAX_GROUPS slots and devices the rest, so a
+ * remote with many buttons can never cost a room its light. */
+#define MB_DEV_SLOTS CONFIG_ZBC_MAX_MATTER_EXPOSED
+#define MB_SLOTS     (CONFIG_ZBC_MAX_GROUPS + MB_DEV_SLOTS)
+/* NodeLabel's 32 characters and a terminator. */
+#define MB_LABEL_LEN 33
+
+static_assert(ZBC_GROUP_NAME_LEN <= MB_LABEL_LEN && ZBC_NAME_LEN <= MB_LABEL_LEN &&
+                  ZBC_BUTTON_NAME_LEN <= MB_LABEL_LEN,
+              "a slot's name holds a group's, a device's or a button's");
+static_assert((int)MB_SLOT_LAMP == (int)MATTER_DEV_LAMP && (int)MB_SLOT_SWITCH == (int)MATTER_DEV_SWITCH &&
+                  (int)MB_SLOT_OCCUPANCY == (int)MATTER_DEV_OCCUPANCY,
+              "matter_device_t.kind is the slot's");
+
+/* The capability bits a lamp's endpoint is built from. */
+#define MB_LAMP_BITS (ZBC_FEAT_LEVEL | ZBC_FEAT_COLOR_TEMP | ZBC_FEAT_ANY_COLOR)
+
 typedef struct {
     bool     used;
-    uint16_t group_id;
+    uint8_t  kind;            /* mb_slot_kind_t */
+    uint16_t group_id;        /* ROOM */
+    /* The others: which device endpoint, and for a switch which of its buttons. */
+    uint8_t  ieee[ZBC_IEEE_LEN];
+    uint8_t  ep;
+    uint8_t  key;
+    uint16_t button_id;       /* SWITCH, OCCUPANCY: the button record that speaks for it */
+    uint8_t  built_shape;     /* LAMP: mb_lamp_shape() it was built with */
+    bool     rebuild;         /* LAMP: the lamp's clusters say another shape now */
+    uint16_t ct_min, ct_max;  /* LAMP: the physical range it was built with, mireds */
     uint16_t endpoint_id;
     esp_matter_bridge::device_t *dev;
-    char     name[ZBC_GROUP_NAME_LEN];
+    char     name[MB_LABEL_LEN];   /* ROOM: the group's name; the others: the label */
     /* Written by the CHIP task, read by the bridge task: 32 bits so a read can
      * never be torn, compared with a signed difference so it survives the wrap. */
     volatile uint32_t quiet_until_ms;
+    volatile uint32_t color_quiet_until_ms;   /* LAMP: the colour has a window of its own */
     mb_move_t move;          /* bridge task only */
     mb_on_hold_t on_hold;    /* bridge task only */
     matter_group_t diag;     /* bridge task only; copied out by refresh_status */
+    int8_t   reachable;      /* devices: Reachable as Matter has it, -1 unknown */
     /* Adaptive Lighting. Whether the light was built with the Mode Select cluster
      * is decided when it is created or resumed and never changes while it runs:
      * a cluster cannot be added to an enabled endpoint, and rebuilding the endpoint
@@ -411,15 +603,56 @@ typedef struct {
     mb_map_entry_t e[CONFIG_ZBC_MAX_GROUPS];
 } mb_map_t;
 
+/* The same for the device endpoints. Its size follows CONFIG_ZBC_MAX_MATTER_EXPOSED,
+ * so a build with another one starts the devices on new ids, and leaves the rooms
+ * alone. */
+typedef struct {
+    uint8_t  ieee[ZBC_IEEE_LEN];
+    uint8_t  ep;
+    uint8_t  key;
+    uint8_t  kind;           /* mb_slot_kind_t */
+    uint8_t  reserved;
+    uint16_t endpoint_id;
+} mb_dev_entry_t;
+
+typedef struct {
+    uint8_t        version;
+    uint8_t        count;
+    mb_dev_entry_t e[MB_DEV_SLOTS];
+} mb_dev_map_t;
+
+/* One device endpoint as mexp_db and the device's own state say it should be
+ * shown: what reconcile() makes the slots match, and what a resumed endpoint is
+ * built from. */
+typedef struct {
+    uint8_t  kind;           /* mb_slot_kind_t, never ROOM */
+    uint8_t  ieee[ZBC_IEEE_LEN];
+    uint8_t  ep;
+    uint8_t  key;
+    uint16_t button_id;
+    uint16_t features;       /* LAMP */
+    uint16_t ct_min, ct_max; /* LAMP, mireds, 0 unknown */
+    char     label[MB_LABEL_LEN];
+    char     vendor[ZBC_STRING_LEN];
+    char     product[ZBC_STRING_LEN];
+} mb_want_t;
+
 static node_t           *s_node;
 static uint16_t          s_aggregator_ep;
-static mb_slot_t         s_slots[CONFIG_ZBC_MAX_GROUPS];
+static mb_slot_t         s_slots[MB_SLOTS];
 static QueueHandle_t     s_queue;
 static SemaphoreHandle_t s_status_mtx;
 static matter_status_t   s_status;
 static uint32_t          s_delegate_ip;
-/* Too big for the bridge task's stack; only that task touches it. */
+/* Too big for the bridge task's stack; only that task touches them, and the
+ * start before it. */
 static zbc_group_t       s_groups[CONFIG_ZBC_MAX_GROUPS];
+static mb_want_t         s_want[MB_DEV_SLOTS];
+static zbc_device_t      s_dev;
+/* Device endpoints asked for that have no Matter endpoint, as of the last pass,
+ * and whether that was for want of heap (MB_DEV_HEAP_MIN). */
+static uint8_t           s_skipped;
+static bool              s_heap_short;
 
 /* The subscriptions CHIP keeps to resume, summed per fabric. Bridge task only. */
 typedef struct {
@@ -459,21 +692,57 @@ static mb_slot_t *slot_by_al_endpoint(uint16_t endpoint_id)
 static mb_slot_t *slot_by_group(uint16_t group_id)
 {
     for (auto &s : s_slots) {
-        if (s.used && s.group_id == group_id) {
+        if (s.used && s.kind == MB_SLOT_ROOM && s.group_id == group_id) {
             return &s;
         }
     }
     return nullptr;
 }
 
-static mb_slot_t *slot_free(void)
+static mb_slot_t *slot_by_button(uint16_t button_id)
 {
     for (auto &s : s_slots) {
-        if (!s.used) {
+        if (s.used && (s.kind == MB_SLOT_SWITCH || s.kind == MB_SLOT_OCCUPANCY) && s.button_id == button_id) {
             return &s;
         }
     }
     return nullptr;
+}
+
+static mb_slot_t *slot_by_device(uint8_t kind, const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, uint8_t key)
+{
+    for (auto &s : s_slots) {
+        if (s.used && s.kind == kind && s.ep == ep && s.key == key && memcmp(s.ieee, ieee, ZBC_IEEE_LEN) == 0) {
+            return &s;
+        }
+    }
+    return nullptr;
+}
+
+/* A free slot in the rooms' range, or in the devices'. */
+static mb_slot_t *slot_free(bool device)
+{
+    const int from = device ? CONFIG_ZBC_MAX_GROUPS : 0;
+    const int to   = device ? MB_SLOTS : CONFIG_ZBC_MAX_GROUPS;
+    for (int i = from; i < to; i++) {
+        if (!s_slots[i].used) {
+            return &s_slots[i];
+        }
+    }
+    return nullptr;
+}
+
+/* What lighting.c is asked to change for the slot: the room, or the one light. */
+static lighting_target_t slot_target(const mb_slot_t &s)
+{
+    lighting_target_t t = {};
+    if (s.kind == MB_SLOT_ROOM) {
+        t.group_id = s.group_id;
+    } else {
+        memcpy(t.ieee, s.ieee, ZBC_IEEE_LEN);
+        t.ep = s.ep;
+    }
+    return t;
 }
 
 static const zbc_group_t *group_in(const zbc_group_t *groups, size_t n, uint16_t id)
@@ -520,7 +789,7 @@ static void save_map(const char *key, bool adaptive)
     mb_map_t map = {};
     map.version = MB_MAP_VERSION;
     for (const auto &s : s_slots) {
-        if (s.used && (!adaptive || s.al_endpoint_id)) {
+        if (s.used && s.kind == MB_SLOT_ROOM && (!adaptive || s.al_endpoint_id)) {
             map.e[map.count].group_id    = s.group_id;
             map.e[map.count].endpoint_id = adaptive ? s.al_endpoint_id : s.endpoint_id;
             map.count++;
@@ -537,10 +806,63 @@ static void save_map(const char *key, bool adaptive)
     nvs_close(h);
 }
 
+static void load_dev_map(mb_dev_map_t *map)
+{
+    memset(map, 0, sizeof(*map));
+    nvs_handle_t h;
+    if (nvs_open_from_partition(MB_NVS_PART, MB_NVS_NS, NVS_READONLY, &h) != ESP_OK) {
+        return;
+    }
+    size_t len = sizeof(*map);
+    if (nvs_get_blob(h, MB_NVS_KEY_DEV, map, &len) != ESP_OK || len != sizeof(*map) ||
+        map->version != MB_DEV_MAP_VERSION || map->count > MB_DEV_SLOTS) {
+        memset(map, 0, sizeof(*map));
+    }
+    nvs_close(h);
+}
+
+/* The device endpoint a stored endpoint stands for, nullptr when the map does not
+ * have it. */
+static const mb_dev_entry_t *map_device(const mb_dev_map_t *map, uint16_t endpoint_id)
+{
+    for (int i = 0; i < map->count; i++) {
+        if (map->e[i].endpoint_id == endpoint_id) {
+            return &map->e[i];
+        }
+    }
+    return nullptr;
+}
+
+static void save_dev_map(void)
+{
+    mb_dev_map_t map = {};
+    map.version = MB_DEV_MAP_VERSION;
+    for (const auto &s : s_slots) {
+        if (s.used && s.kind != MB_SLOT_ROOM && map.count < MB_DEV_SLOTS) {
+            mb_dev_entry_t &e = map.e[map.count++];
+            memcpy(e.ieee, s.ieee, ZBC_IEEE_LEN);
+            e.ep          = s.ep;
+            e.key         = s.key;
+            e.kind        = s.kind;
+            e.endpoint_id = s.endpoint_id;
+        }
+    }
+    nvs_handle_t h;
+    if (nvs_open_from_partition(MB_NVS_PART, MB_NVS_NS, NVS_READWRITE, &h) != ESP_OK) {
+        ESP_LOGW(TAG, "Could not open %s to save the device map", MB_NVS_PART);
+        return;
+    }
+    if (nvs_set_blob(h, MB_NVS_KEY_DEV, &map, sizeof(map)) != ESP_OK || nvs_commit(h) != ESP_OK) {
+        ESP_LOGW(TAG, "Could not save the device map");
+    }
+    nvs_close(h);
+}
+
 static void save_maps(void)
 {
     save_map(MB_NVS_KEY, false);
     save_map(MB_NVS_KEY_AL, true);
+    save_dev_map();
 }
 
 /* ------------------------------------------------------ Matter -> lights */
@@ -596,6 +918,85 @@ static bool decode_move(TLVReader &tlv, mb_intent_t &in)
     return true;
 }
 
+/* A colour command for a lamp shown on its own. Hue and saturation count 0-254 in
+ * Matter as in ZCL, and x and y 0-65279 in both, so nothing is converted. A move to
+ * one of hue or saturation keeps the other where the controller sees it, read before
+ * CHIP's handler moves anything. The moves, steps and colour loops are not carried
+ * out: CHIP's handler moves the attributes, and the sync pass puts them back. */
+static uint8_t read_u8(uint16_t endpoint_id, uint32_t cluster, uint32_t attr)
+{
+    esp_matter_attr_val_t v = esp_matter_invalid(nullptr);
+    return attribute::get_val(endpoint_id, cluster, attr, &v) == ESP_OK ? v.val.u8 : 0;
+}
+
+static bool decode_color(const ConcreteCommandPath &path, TLVReader &tlv, mb_intent_t &in)
+{
+    namespace CC = ColorControl::Commands;
+    namespace CA = ColorControl::Attributes;
+    switch (path.mCommandId) {
+    case CC::MoveToColorTemperature::Id: {
+        CC::MoveToColorTemperature::DecodableType cmd;
+        if (chip::app::DataModel::Decode(tlv, cmd) != CHIP_NO_ERROR || cmd.colorTemperatureMireds == 0) {
+            return false;
+        }
+        in.kind          = MB_CT;
+        in.a             = cmd.colorTemperatureMireds;
+        in.transition_ds = cmd.transitionTime;
+        in.timed         = true;
+        return true;
+    }
+    case CC::MoveToHueAndSaturation::Id: {
+        CC::MoveToHueAndSaturation::DecodableType cmd;
+        if (chip::app::DataModel::Decode(tlv, cmd) != CHIP_NO_ERROR) {
+            return false;
+        }
+        in.a             = cmd.hue;
+        in.b             = cmd.saturation;
+        in.transition_ds = cmd.transitionTime;
+        break;
+    }
+    case CC::MoveToHue::Id: {
+        CC::MoveToHue::DecodableType cmd;
+        if (chip::app::DataModel::Decode(tlv, cmd) != CHIP_NO_ERROR) {
+            return false;
+        }
+        in.a             = cmd.hue;
+        in.b             = read_u8(path.mEndpointId, ColorControl::Id, CA::CurrentSaturation::Id);
+        in.transition_ds = cmd.transitionTime;
+        break;
+    }
+    case CC::MoveToSaturation::Id: {
+        CC::MoveToSaturation::DecodableType cmd;
+        if (chip::app::DataModel::Decode(tlv, cmd) != CHIP_NO_ERROR) {
+            return false;
+        }
+        in.a             = read_u8(path.mEndpointId, ColorControl::Id, CA::CurrentHue::Id);
+        in.b             = cmd.saturation;
+        in.transition_ds = cmd.transitionTime;
+        break;
+    }
+    case CC::MoveToColor::Id: {
+        CC::MoveToColor::DecodableType cmd;
+        if (chip::app::DataModel::Decode(tlv, cmd) != CHIP_NO_ERROR) {
+            return false;
+        }
+        in.kind          = MB_XY;
+        in.a             = cmd.colorX;
+        in.b             = cmd.colorY;
+        in.transition_ds = cmd.transitionTime;
+        in.timed         = true;
+        return true;
+    }
+    default:
+        return false;
+    }
+    in.kind  = MB_HS;
+    in.a     = in.a > 254 ? 254 : in.a;
+    in.b     = in.b > 254 ? 254 : in.b;
+    in.timed = true;
+    return true;
+}
+
 /* What a controller sent, as it arrived, for /api/matter: the serial port restarts
  * the box, and "the light did something else from this controller" needs the
  * commands to answer it. A level only for a move to a level, a transition only
@@ -628,13 +1029,15 @@ static esp_err_t on_command(const ConcreteCommandPath &path, TLVReader &tlv, voi
     (void)opaque;
     mb_slot_t *slot      = slot_by_endpoint(path.mEndpointId);
     const bool al_switch = !slot && (slot = slot_by_al_endpoint(path.mEndpointId)) != nullptr;
-    if (!slot) {
+    /* A switch or a sensor takes no commands of ours: only Identify, which CHIP's
+     * own handler answers. */
+    if (!slot || slot->kind == MB_SLOT_SWITCH || slot->kind == MB_SLOT_OCCUPANCY) {
         return ESP_OK;
     }
 
     const uint16_t fade_ds = settings_transition_ds();
     mb_intent_t    in      = {};
-    in.group_id            = slot->group_id;
+    in.endpoint_id         = slot->endpoint_id;
     in.transition_ds       = fade_ds;
     in.at_us               = esp_timer_get_time();
 
@@ -730,6 +1133,8 @@ static esp_err_t on_command(const ConcreteCommandPath &path, TLVReader &tlv, voi
         const int want = chip::app::DataModel::Decode(tlv, cmd) == CHIP_NO_ERROR ? mb_al_intent_for_mode(cmd.newMode) : -1;
         ok      = want >= 0;
         in.kind = want == 1 ? MB_AL_START : MB_AL_STOP;
+    } else if (path.mClusterId == ColorControl::Id && slot->kind == MB_SLOT_LAMP) {
+        ok = decode_color(path, tlv, in);
     } else {
         ok = false;
     }
@@ -749,6 +1154,10 @@ static esp_err_t on_command(const ConcreteCommandPath &path, TLVReader &tlv, voi
      * to do with it, and the other way round. */
     if (in.kind == MB_AL_START || in.kind == MB_AL_STOP || in.kind == MB_AL_TOGGLE) {
         slot->al_quiet_until_ms = now_ms() + MB_QUIET_MS;
+    } else if (in.kind == MB_CT || in.kind == MB_HS || in.kind == MB_XY) {
+        /* The colour's own, for the same reason: a colour change must not freeze
+         * the brightness the controller sees, nor a dimming the colour. */
+        slot->color_quiet_until_ms = now_ms() + in.transition_ds * 100u + MB_QUIET_MS;
     } else {
         /* An On is carried out only once its wait is over. */
         const uint32_t held_ms = in.kind == MB_ON ? MB_ON_HOLD_US / 1000 : 0;
@@ -763,7 +1172,7 @@ static esp_err_t on_command(const ConcreteCommandPath &path, TLVReader &tlv, voi
         const uint32_t  t = now_ms();
         if (t - last_said_ms > 5000 || last_said_ms == 0) {
             last_said_ms = t;
-            ESP_LOGW(TAG, "Command for group %u dropped: the bridge queue is full", in.group_id);
+            ESP_LOGW(TAG, "Command for \"%s\" dropped: the bridge queue is full", slot->name);
         }
     }
     return ESP_OK;
@@ -774,56 +1183,70 @@ static void move_tick(mb_slot_t *slot, int64_t now_us)
     uint16_t ds     = 0;
     int      target = mb_move_tick(&slot->move, now_us, &ds);
     if (target) {
-        lighting_group_ramp_to(slot->group_id, zbc_level_to_pct(target), ds);
+        const lighting_target_t t = slot_target(*slot);
+        lighting_target_ramp_to(&t, zbc_level_to_pct(target), ds);
         slot->quiet_until_ms = now_ms() + ds * 100u + MB_QUIET_MS;
     }
 }
 
 /* A "turn on", as the group's setting asks - see mb_turn_on. Adaptive Lighting
- * that will not start still switches the group on: that is what was asked. */
-static esp_err_t turn_on(const mb_intent_t &in)
+ * that will not start still switches the group on: that is what was asked. A lamp
+ * shown on its own has no such setting, and comes back as it was. */
+static esp_err_t turn_on(const mb_slot_t &slot, const mb_intent_t &in)
 {
-    const uint8_t choice = al_db_turn_on(in.group_id);
-    switch (mb_turn_on(choice, al_db_expose(in.group_id) != ZBC_AL_EXPOSE_OFF)) {
+    const lighting_target_t t = slot_target(slot);
+    if (slot.kind != MB_SLOT_ROOM) {
+        return lighting_target_set_onoff(&t, ZB_ONOFF_ON, in.transition_ds);
+    }
+    const uint16_t group_id = slot.group_id;
+    const uint8_t  choice   = al_db_turn_on(group_id);
+    switch (mb_turn_on(choice, al_db_expose(group_id) != ZBC_AL_EXPOSE_OFF)) {
     case MB_ON_ADAPTIVE: {
-        const esp_err_t err = lighting_group_start_adaptive(in.group_id, in.transition_ds);
+        const esp_err_t err = lighting_group_start_adaptive(group_id, in.transition_ds);
         if (err == ESP_OK) {
             return err;
         }
         ESP_LOGW(TAG, "Group %u: Adaptive Lighting did not start (%s); switching on as it was",
-                 in.group_id, esp_err_to_name(err));
+                 group_id, esp_err_to_name(err));
         break;
     }
     case MB_ON_FULL:
         /* A switch-on: a member that can only switch comes on too. */
-        return lighting_group_switch_on_to(in.group_id, 100, in.transition_ds);
+        return lighting_group_switch_on_to(group_id, 100, in.transition_ds);
     default:
         if (choice == ZBC_TURN_ON_ADAPTIVE) {
             ESP_LOGI(TAG, "Group %u: turn on means Adaptive Lighting, which this room does not offer",
-                     in.group_id);
+                     group_id);
         }
         break;
     }
-    return lighting_group_set_onoff(in.group_id, ZB_ONOFF_ON, in.transition_ds);
+    return lighting_group_set_onoff(group_id, ZB_ONOFF_ON, in.transition_ds);
 }
 
+/* A room and a lamp shown on its own take the same calls - lighting_target_* is
+ * the group call for the one and the light's for the other - so curves, fades, the
+ * gate and the settle reads apply to both. Adaptive Lighting and the turn-on
+ * choice are a room's alone, and colour a lamp's. */
 static void carry_out(const mb_intent_t &in)
 {
     heap_watch_mark("matter_cmd", in.kind);
-    mb_slot_t *slot = slot_by_group(in.group_id);
+    mb_slot_t *slot = slot_by_endpoint(in.endpoint_id);
     if (!slot) {
         return;
     }
-    int64_t now = esp_timer_get_time();
+    const lighting_target_t t   = slot_target(*slot);
+    const bool              room = slot->kind == MB_SLOT_ROOM;
+    int64_t                 now  = esp_timer_get_time();
 
     /* Anything newer than a sweep ends it - but a Stop has to see it first, and
-     * ending the Adaptive Lighting mode does not touch the lights. */
-    if (in.kind != MB_STOP && in.kind != MB_AL_STOP) {
+     * neither ending the Adaptive Lighting mode nor a colour touches the level. */
+    const bool color = in.kind == MB_CT || in.kind == MB_HS || in.kind == MB_XY;
+    if (in.kind != MB_STOP && in.kind != MB_AL_STOP && !color) {
         slot->move.active = false;
     }
     bool lamps_on = false;
     if (in.if_on && !in.matter_on) {
-        lighting_group_state(in.group_id, &lamps_on, nullptr);
+        lighting_target_state(&t, &lamps_on, nullptr);
     }
     if (mb_stays_dark(in.if_on, in.matter_on, lamps_on)) {
         return;
@@ -832,33 +1255,32 @@ static void carry_out(const mb_intent_t &in)
     esp_err_t err = ESP_OK;
     switch (in.kind) {
     case MB_ON:
-        err = turn_on(in);
+        err = turn_on(*slot, in);
         break;
     case MB_OFF:
-        err = lighting_group_set_onoff(in.group_id, ZB_ONOFF_OFF, in.transition_ds);
+        err = lighting_target_set_onoff(&t, ZB_ONOFF_OFF, in.transition_ds);
         break;
     case MB_TOGGLE: {
-        /* Resolved here rather than by lighting_group_set_onoff, by the same
-         * rule (any member lit), so that a toggle switching on is a turn on. */
+        /* Resolved here rather than by the on/off call, by the same rule (any
+         * member lit), so that a toggle switching on is a turn on. */
         bool lit = false;
-        lighting_group_state(in.group_id, &lit, nullptr);
-        err = lit ? lighting_group_set_onoff(in.group_id, ZB_ONOFF_OFF, in.transition_ds) : turn_on(in);
+        lighting_target_state(&t, &lit, nullptr);
+        err = lit ? lighting_target_set_onoff(&t, ZB_ONOFF_OFF, in.transition_ds) : turn_on(*slot, in);
         break;
     }
     case MB_LEVEL:
-        err = in.switch_on
-                  ? lighting_group_switch_on_to(in.group_id, zbc_level_to_pct(in.level), in.transition_ds)
-                  : lighting_group_set_brightness(in.group_id, zbc_level_to_pct(in.level), in.transition_ds);
+        err = in.switch_on ? lighting_target_switch_on_to(&t, zbc_level_to_pct(in.level), in.transition_ds)
+                           : lighting_target_set_brightness(&t, zbc_level_to_pct(in.level), in.transition_ds);
         break;
     case MB_STEP:
-        err = lighting_group_nudge(in.group_id, in.dir * mb_step_pct(in.step), in.transition_ds, false, nullptr);
+        err = lighting_target_nudge(&t, in.dir * mb_step_pct(in.step), in.transition_ds, false, nullptr);
         break;
     case MB_MOVE: {
         int from = in.level;
         if (from < 1 || from > 254) {
             bool on  = false;
             int  pct = ZBC_UNKNOWN;
-            lighting_group_state(in.group_id, &on, &pct);
+            lighting_target_state(&t, &on, &pct);
             from = pct == ZBC_UNKNOWN ? (in.dir > 0 ? 1 : 254) : zbc_pct_to_level(pct);
         }
         slot->move.active   = true;
@@ -873,38 +1295,111 @@ static void carry_out(const mb_intent_t &in)
     case MB_STOP:
         if (slot->move.active) {
             int ended = mb_move_stop(&slot->move, now);
-            err = lighting_group_stop_ramp(in.group_id, zbc_level_to_pct(ended));
+            err = lighting_target_stop_ramp(&t, zbc_level_to_pct(ended));
         }
         break;
     case MB_AL_START:
-        err = lighting_group_start_adaptive(in.group_id, settings_transition_ds());
+        if (room) {
+            err = lighting_group_start_adaptive(slot->group_id, settings_transition_ds());
+        }
         break;
     case MB_AL_STOP:
-        lighting_group_stop_adaptive(in.group_id);
+        if (room) {
+            lighting_group_stop_adaptive(slot->group_id);
+        }
         break;
     case MB_AL_TOGGLE: {
+        if (!room) {
+            break;
+        }
         lighting_al_status_t st;
-        const bool running = lighting_group_al_status(in.group_id, &st) && st.active;
+        const bool running = lighting_group_al_status(slot->group_id, &st) && st.active;
         if (mb_al_toggle_starts(running)) {
-            err = lighting_group_start_adaptive(in.group_id, settings_transition_ds());
+            err = lighting_group_start_adaptive(slot->group_id, settings_transition_ds());
         } else {
-            lighting_group_stop_adaptive(in.group_id);
+            lighting_group_stop_adaptive(slot->group_id);
         }
         break;
     }
+    case MB_CT:
+        if (!room) {
+            err = lighting_set_color_temp(slot->ieee, slot->ep, in.a, in.transition_ds);
+        }
+        break;
+    case MB_HS:
+        if (!room) {
+            err = lighting_set_color_hs(slot->ieee, slot->ep, (uint8_t)in.a, (uint8_t)in.b, in.transition_ds);
+        }
+        break;
+    case MB_XY:
+        if (!room) {
+            err = lighting_set_color_xy(slot->ieee, slot->ep, in.a, in.b, in.transition_ds);
+        }
+        break;
     default:
         break;
     }
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Group %u refused a Matter command: %s", in.group_id, esp_err_to_name(err));
+        ESP_LOGW(TAG, "\"%s\" refused a Matter command: %s", slot->name, esp_err_to_name(err));
     }
+}
+
+static void note_write(mb_slot_t &s, const char *what, esp_err_t err);
+
+/* A button's gesture, as the switch it is shown as reports it: the events, and
+ * CurrentPosition moved before each one, as a switch's would. */
+static void button_event(const mb_intent_t &in)
+{
+    mb_slot_t *slot = slot_by_button(in.button_id);
+    if (!slot || slot->kind != MB_SLOT_SWITCH) {
+        return;
+    }
+    mb_sw_step_t steps[MB_SW_MAX_STEPS];
+    const int    n = mb_switch_events(in.emit, steps);
+    if (n == 0) {
+        return;
+    }
+    lock::ScopedChipStackLock lock(portMAX_DELAY);
+    SwitchCluster *c = Switch::FindClusterOnEndpoint(slot->endpoint_id);
+    if (!c) {
+        if (slot->diag.last_err != ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "\"%s\": Matter endpoint %u has no Switch cluster", slot->name, slot->endpoint_id);
+        }
+        slot->diag.last_err = ESP_ERR_INVALID_STATE;
+        return;
+    }
+    /* An event the cluster drops - a feature it was not built with - comes back
+     * without a number. */
+    bool sent = true;
+    for (int i = 0; i < n; i++) {
+        const uint8_t pos = mb_sw_position(steps[i].event);
+        if (c->GetCurrentPosition() != pos && c->SetCurrentPosition(pos) != CHIP_NO_ERROR) {
+            sent = false;
+        }
+        std::optional<chip::EventNumber> number;
+        switch (steps[i].event) {
+        case MB_SW_INITIAL_PRESS:  number = c->OnInitialPress(1); break;
+        case MB_SW_SHORT_RELEASE:  number = c->OnShortRelease(1); break;
+        case MB_SW_LONG_PRESS:     number = c->OnLongPress(1); break;
+        case MB_SW_LONG_RELEASE:   number = c->OnLongRelease(1); break;
+        case MB_SW_MULTI_ONGOING:  number = c->OnMultiPressOngoing(1, steps[i].count); break;
+        case MB_SW_MULTI_COMPLETE: number = c->OnMultiPressComplete(1, steps[i].count); break;
+        default: break;
+        }
+        sent = sent && number.has_value();
+    }
+    note_write(*slot, "a switch event", sent ? ESP_OK : ESP_FAIL);
 }
 
 /* A command from the queue. An On waits here for what may follow it (see
  * MB_ON_HOLD_US); everything else is carried out, after the On or instead of it. */
 static void run_intent(const mb_intent_t &in)
 {
-    mb_slot_t *slot = slot_by_group(in.group_id);
+    if (in.kind == MB_SWITCH) {
+        button_event(in);
+        return;
+    }
+    mb_slot_t *slot = slot_by_endpoint(in.endpoint_id);
     if (!slot) {
         return;
     }
@@ -916,11 +1411,11 @@ static void run_intent(const mb_intent_t &in)
     mb_intent_t out[2];
     const int   n = mb_on_hold_take(&slot->on_hold, &in, esp_timer_get_time(), out);
     if (was_held && n == 1) {
-        ESP_LOGI(TAG, "Group %u: the On was replaced by the %s after it", in.group_id,
+        ESP_LOGI(TAG, "\"%s\": the On was replaced by the %s after it", slot->name,
                  in.kind == MB_LEVEL ? "brightness" : "Off");
     }
     if (in.kind == MB_ON && !slot->on_hold.held) {
-        ESP_LOGI(TAG, "Group %u: the On went with the brightness before it", in.group_id);
+        ESP_LOGI(TAG, "\"%s\": the On went with the brightness before it", slot->name);
     }
     for (int i = 0; i < n; i++) {
         carry_out(out[i]);
@@ -956,10 +1451,6 @@ static esp_err_t attribute_cb(attribute::callback_type_t type, uint16_t endpoint
     return ESP_OK;
 }
 
-/* Copies what each group is showing into its Matter attributes. Groups a Matter
- * command has just touched, or that are mid-sweep, are left to CHIP until they
- * settle. `on` and `pct` are lighting_group_state()'s: any member lit, and the
- * last commanded percentage. */
 static void note_write(mb_slot_t &s, const char *what, esp_err_t err)
 {
     if (err == ESP_OK) {
@@ -967,128 +1458,407 @@ static void note_write(mb_slot_t &s, const char *what, esp_err_t err)
         return;
     }
     if (s.diag.last_err != err) {
-        ESP_LOGW(TAG, "Group %u: writing %s to Matter failed: %s", s.group_id, what, esp_err_to_name(err));
+        ESP_LOGW(TAG, "\"%s\": writing %s to Matter failed: %s", s.name, what, esp_err_to_name(err));
     }
     s.diag.last_err = err;
 }
 
-static void sync_attributes(void)
+/* Writes an attribute only when Matter does not already have the value. */
+static void put_u8(mb_slot_t &s, uint32_t cluster, uint32_t attr, esp_matter_attr_val_t nv, const char *what)
 {
-    const uint32_t t = now_ms();
-
-    /* The groups' side first, without the CHIP lock: these walk the group and
-     * device registries under their own mutexes. */
-    struct {
-        bool known, on, on_known, held;
-        int  pct;
-        bool al_known, al_active, al_held;
-    } g[CONFIG_ZBC_MAX_GROUPS] = {};
-    for (size_t i = 0; i < CONFIG_ZBC_MAX_GROUPS; i++) {
-        const mb_slot_t &s = s_slots[i];
-        if (!s.used) {
-            continue;
-        }
-        g[i].pct   = ZBC_UNKNOWN;
-        g[i].known = lighting_group_state(s.group_id, &g[i].on, &g[i].pct);
-        /* "Any member on" is false while no member's state is known yet, in the
-         * first seconds after a reboot. Written as Off, it would tell every
-         * controller the lights were off and then flip them on; while nothing is
-         * known, nothing is written. */
-        g[i].on_known = g[i].on || lighting_group_known_off(s.group_id);
-        g[i].held     = s.move.active || (int32_t)(t - s.quiet_until_ms) < 0;
-
-        lighting_al_status_t al;
-        g[i].al_known  = lighting_group_al_status(s.group_id, &al);
-        g[i].al_active = g[i].al_known && al.active;
-        g[i].al_held   = (int32_t)(t - s.al_quiet_until_ms) < 0;
+    esp_matter_attr_val_t v = esp_matter_invalid(nullptr);
+    if (attribute::get_val(s.endpoint_id, cluster, attr, &v) == ESP_OK && v.val.u8 == nv.val.u8) {
+        return;
     }
+    note_write(s, what, attribute::update(s.endpoint_id, cluster, attr, &nv));
+}
 
-    /* Then Matter's side, under the CHIP lock once for the whole pass rather
-     * than once per group - this runs four times a second. */
-    lock::ScopedChipStackLock lock(portMAX_DELAY);
-    for (size_t i = 0; i < CONFIG_ZBC_MAX_GROUPS; i++) {
-        mb_slot_t &s = s_slots[i];
-        if (!s.used) {
-            continue;
-        }
-        /* Read both every pass, held or not, so the diagnostics always show what
-         * Matter has, and a failed read shows as "unknown" rather than silently
-         * skipping the write. */
-        esp_matter_attr_val_t v = esp_matter_invalid(nullptr);
-        s.diag.matter_on = attribute::get_val(s.endpoint_id, OnOff::Id, OnOff::Attributes::OnOff::Id, &v) == ESP_OK
-                               ? (int8_t)v.val.b : -1;
+static void put_u16(mb_slot_t &s, uint32_t cluster, uint32_t attr, uint16_t value, const char *what)
+{
+    esp_matter_attr_val_t v = esp_matter_invalid(nullptr);
+    if (attribute::get_val(s.endpoint_id, cluster, attr, &v) == ESP_OK && v.val.u16 == value) {
+        return;
+    }
+    esp_matter_attr_val_t nv = esp_matter_uint16(value);
+    note_write(s, what, attribute::update(s.endpoint_id, cluster, attr, &nv));
+}
+
+/* What each slot shows, gathered before the CHIP lock is taken: these walk the
+ * group and device registries under their own mutexes. -1 is unknown throughout. */
+typedef struct {
+    bool    known, on, on_known, held;
+    int     pct;
+    bool    al_known, al_active, al_held;
+    int8_t  reachable;
+    bool    color_known, color_held;
+    int32_t ct;
+    int16_t hue, sat;
+    int8_t  mode;
+    int8_t  occupied;
+} mb_seen_t;
+
+static void see_room_or_lamp(const mb_slot_t &s, mb_seen_t &g, uint32_t t)
+{
+    const lighting_target_t target = slot_target(s);
+    g.pct   = ZBC_UNKNOWN;
+    g.known = lighting_target_state(&target, &g.on, &g.pct);
+    /* "Any member on" is false while no member's state is known yet, in the
+     * first seconds after a reboot. Written as Off, it would tell every
+     * controller the lights were off and then flip them on; while nothing is
+     * known, nothing is written. */
+    g.on_known = g.on || lighting_target_known_off(&target);
+    g.held     = s.move.active || (int32_t)(t - s.quiet_until_ms) < 0;
+    if (s.kind != MB_SLOT_ROOM) {
+        return;
+    }
+    lighting_al_status_t al;
+    g.al_known  = lighting_group_al_status(s.group_id, &al);
+    g.al_active = g.al_known && al.active;
+    g.al_held   = (int32_t)(t - s.al_quiet_until_ms) < 0;
+}
+
+/* A device's side: whether it is there, and for a lamp its colour as it last
+ * reported it, for a sensor what its rules make of it. */
+static void see_device(const mb_slot_t &s, mb_seen_t &g, uint32_t t, int64_t now_us)
+{
+    if (!device_db_get(s.ieee, &s_dev)) {
+        return;
+    }
+    const bool fresh = s_dev.last_seen_us > 0 && now_us - s_dev.last_seen_us < MB_OFFLINE_AFTER_US;
+    g.reachable      = (int8_t)(s_dev.online && (s.kind != MB_SLOT_LAMP || fresh));
+    if (s.kind == MB_SLOT_OCCUPANCY) {
+        bool occupied = false;
+        g.occupied = buttons_sensor_state(s.button_id, &occupied, nullptr) ? (int8_t)occupied : -1;
+        return;
+    }
+    if (s.kind != MB_SLOT_LAMP) {
+        return;
+    }
+    const zbc_endpoint_t *e = lighting_find_endpoint(&s_dev, s.ep);
+    if (!e) {
+        return;
+    }
+    g.color_known = true;
+    g.color_held  = (int32_t)(t - s.color_quiet_until_ms) < 0;
+    g.ct          = e->ct_mireds;
+    g.hue         = e->hue;
+    g.sat         = e->saturation;
+    g.mode        = e->color_mode;
+}
+
+/* Whether the slot's endpoint has Level Control: a room's does, and a lamp's
+ * unless it can only switch. */
+static bool slot_dims(const mb_slot_t &s)
+{
+    return s.kind == MB_SLOT_ROOM || (s.kind == MB_SLOT_LAMP && (s.built_shape & 0x0F) != MB_LAMP_ONOFF);
+}
+
+/* OnOff and CurrentLevel, for a room and a lamp alike. */
+static void sync_light(mb_slot_t &s, const mb_seen_t &g)
+{
+    /* Read both every pass, held or not, so the diagnostics always show what
+     * Matter has, and a failed read shows as "unknown" rather than silently
+     * skipping the write. */
+    esp_matter_attr_val_t v = esp_matter_invalid(nullptr);
+    s.diag.matter_on = attribute::get_val(s.endpoint_id, OnOff::Id, OnOff::Attributes::OnOff::Id, &v) == ESP_OK
+                           ? (int8_t)v.val.b : -1;
+    s.diag.matter_level = -1;
+    if (slot_dims(s)) {
         v = esp_matter_invalid(nullptr);
         s.diag.matter_level =
             attribute::get_val(s.endpoint_id, LevelControl::Id, LevelControl::Attributes::CurrentLevel::Id, &v) ==
                     ESP_OK && v.val.u8 >= 1 && v.val.u8 <= 254
                 ? v.val.u8 : -1;
-        s.diag.group_on  = g[i].known && g[i].on_known ? (int8_t)g[i].on : -1;
-        s.diag.group_pct = g[i].known && g[i].pct != ZBC_UNKNOWN ? g[i].pct : -1;
-        s.diag.held      = g[i].held;
+    }
+    s.diag.group_on  = g.known && g.on_known ? (int8_t)g.on : -1;
+    s.diag.group_pct = g.known && g.pct != ZBC_UNKNOWN ? g.pct : -1;
+    s.diag.held      = g.held;
 
-        /* Adaptive Lighting, on whichever exposure the group has. Ahead of the
-         * light's own hold below: the mode does not wait for a dimming to settle,
-         * and a dimming by hand is exactly what ends it. */
-        s.diag.al_active    = g[i].al_known ? (int8_t)g[i].al_active : -1;
-        s.diag.al_matter_on = -1;
-        if (s.al_endpoint_id) {
-            v = esp_matter_invalid(nullptr);
-            s.diag.al_matter_on =
-                attribute::get_val(s.al_endpoint_id, OnOff::Id, OnOff::Attributes::OnOff::Id, &v) == ESP_OK
-                    ? (int8_t)v.val.b : -1;
-        }
-        s.diag.matter_mode = -1;
-        if (s.mode_select_live) {
-            v = esp_matter_invalid(nullptr);
-            s.diag.matter_mode =
-                attribute::get_val(s.endpoint_id, ModeSelect::Id, ModeSelect::Attributes::CurrentMode::Id, &v) == ESP_OK
-                    ? (int8_t)v.val.u8 : -1;
-        }
-        if (g[i].al_known && !g[i].al_held) {
-            if (s.al_endpoint_id && s.diag.al_matter_on != (int8_t)g[i].al_active) {
-                esp_matter_attr_val_t nv = esp_matter_bool(g[i].al_active);
-                note_write(s, "Adaptive OnOff",
-                           attribute::update(s.al_endpoint_id, OnOff::Id, OnOff::Attributes::OnOff::Id, &nv));
-            }
-            const int8_t mode = g[i].al_active ? MB_MODE_ADAPTIVE : MB_MODE_NORMAL;
-            if (s.mode_select_live && s.diag.matter_mode != mode) {
-                esp_matter_attr_val_t nv = esp_matter_uint8((uint8_t)mode);
-                note_write(s, "CurrentMode",
-                           attribute::update(s.endpoint_id, ModeSelect::Id, ModeSelect::Attributes::CurrentMode::Id,
-                                             &nv));
-            }
-        }
+    if (!g.known || g.held) {
+        return;
+    }
+    if (g.on_known && s.diag.matter_on != (int8_t)g.on) {
+        esp_matter_attr_val_t nv = esp_matter_bool(g.on);
+        note_write(s, "OnOff", attribute::update(s.endpoint_id, OnOff::Id, OnOff::Attributes::OnOff::Id, &nv));
+    }
+    if (slot_dims(s) && g.pct != ZBC_UNKNOWN && !mb_level_shows(s.diag.matter_level, g.pct)) {
+        esp_matter_attr_val_t nv = esp_matter_nullable_uint8(zbc_pct_to_level(g.pct));
+        note_write(s, "CurrentLevel",
+                   attribute::update(s.endpoint_id, LevelControl::Id, LevelControl::Attributes::CurrentLevel::Id, &nv));
+    }
+}
 
-        if (!g[i].known || g[i].held) {
+/* Adaptive Lighting, on whichever exposure the group has. Ahead of the light's
+ * own hold: the mode does not wait for a dimming to settle, and a dimming by hand
+ * is exactly what ends it. */
+static void sync_adaptive(mb_slot_t &s, const mb_seen_t &g)
+{
+    esp_matter_attr_val_t v = esp_matter_invalid(nullptr);
+    s.diag.al_active    = g.al_known ? (int8_t)g.al_active : -1;
+    s.diag.al_matter_on = -1;
+    if (s.al_endpoint_id) {
+        s.diag.al_matter_on =
+            attribute::get_val(s.al_endpoint_id, OnOff::Id, OnOff::Attributes::OnOff::Id, &v) == ESP_OK
+                ? (int8_t)v.val.b : -1;
+    }
+    s.diag.matter_mode = -1;
+    if (s.mode_select_live) {
+        v = esp_matter_invalid(nullptr);
+        s.diag.matter_mode =
+            attribute::get_val(s.endpoint_id, ModeSelect::Id, ModeSelect::Attributes::CurrentMode::Id, &v) == ESP_OK
+                ? (int8_t)v.val.u8 : -1;
+    }
+    if (!g.al_known || g.al_held) {
+        return;
+    }
+    if (s.al_endpoint_id && s.diag.al_matter_on != (int8_t)g.al_active) {
+        esp_matter_attr_val_t nv = esp_matter_bool(g.al_active);
+        note_write(s, "Adaptive OnOff", attribute::update(s.al_endpoint_id, OnOff::Id, OnOff::Attributes::OnOff::Id, &nv));
+    }
+    const int8_t mode = g.al_active ? MB_MODE_ADAPTIVE : MB_MODE_NORMAL;
+    if (s.mode_select_live && s.diag.matter_mode != mode) {
+        esp_matter_attr_val_t nv = esp_matter_uint8((uint8_t)mode);
+        note_write(s, "CurrentMode",
+                   attribute::update(s.endpoint_id, ModeSelect::Id, ModeSelect::Attributes::CurrentMode::Id, &nv));
+    }
+}
+
+/* A lamp's colour as it reported it, on the attributes its light type has. Its
+ * ColorMode is ZCL's: 0 hue and saturation, 1 x and y, 2 colour temperature, the
+ * values Matter's ColorMode and EnhancedColorMode give them. CurrentX and CurrentY
+ * are not tracked here, so they stay what the controller last set. */
+static void sync_color(mb_slot_t &s, const mb_seen_t &g)
+{
+    if (!g.color_known || g.color_held) {
+        return;
+    }
+    const uint8_t type = s.built_shape & 0x0F;
+    if (type != MB_LAMP_CT && type != MB_LAMP_COLOR) {
+        return;
+    }
+    namespace CA = ColorControl::Attributes;
+    if (g.ct > 0) {
+        int32_t ct = g.ct;
+        ct = ct < s.ct_min ? s.ct_min : (ct > s.ct_max ? s.ct_max : ct);
+        put_u16(s, ColorControl::Id, CA::ColorTemperatureMireds::Id, (uint16_t)ct, "ColorTemperatureMireds");
+    }
+    if (type != MB_LAMP_COLOR) {
+        return;
+    }
+    if ((s.built_shape & 0x10) && g.hue >= 0 && g.hue <= 254 && g.sat >= 0 && g.sat <= 254) {
+        put_u8(s, ColorControl::Id, CA::CurrentHue::Id, esp_matter_uint8((uint8_t)g.hue), "CurrentHue");
+        put_u8(s, ColorControl::Id, CA::CurrentSaturation::Id, esp_matter_uint8((uint8_t)g.sat), "CurrentSaturation");
+    }
+    /* A lamp without hue and saturation was built without them, so a report of
+     * that mode has nothing to show it with. */
+    if (g.mode >= 0 && g.mode <= 2 && (g.mode != 0 || (s.built_shape & 0x10))) {
+        put_u8(s, ColorControl::Id, CA::ColorMode::Id, esp_matter_enum8((uint8_t)g.mode), "ColorMode");
+        put_u8(s, ColorControl::Id, CA::EnhancedColorMode::Id, esp_matter_enum8((uint8_t)g.mode), "EnhancedColorMode");
+    }
+}
+
+/* Whether a controller should show the device as there at all. Writing Reachable
+ * is what raises the ReachableChanged event. */
+static void sync_reachable(mb_slot_t &s, const mb_seen_t &g)
+{
+    esp_matter_attr_val_t v = esp_matter_invalid(nullptr);
+    const bool have = attribute::get_val(s.endpoint_id, BridgedDeviceBasicInformation::Id,
+                                         BridgedDeviceBasicInformation::Attributes::Reachable::Id, &v) == ESP_OK;
+    s.reachable = have ? (int8_t)v.val.b : -1;
+    if (g.reachable < 0 || (have && v.val.b == (bool)g.reachable)) {
+        return;
+    }
+    esp_matter_attr_val_t nv = esp_matter_bool(g.reachable != 0);
+    note_write(s, "Reachable",
+               attribute::update(s.endpoint_id, BridgedDeviceBasicInformation::Id,
+                                 BridgedDeviceBasicInformation::Attributes::Reachable::Id, &nv));
+    s.reachable = g.reachable;
+}
+
+/* A sensor's occupancy follows what its rules make of its reports - the same
+ * occupied and clear, the clear coming its no-motion time after the last motion.
+ * The cluster keeps the value itself, so this is its own setter, not an attribute
+ * write. */
+static void sync_occupancy(mb_slot_t &s, const mb_seen_t &g)
+{
+    OccupancySensingCluster *c = OccupancySensing::FindClusterOnEndpoint(s.endpoint_id);
+    if (!c) {
+        s.diag.matter_on = -1;
+        return;
+    }
+    if (g.occupied >= 0 && c->IsOccupied() != (g.occupied != 0)) {
+        c->SetOccupancy(g.occupied != 0);
+        s.diag.writes++;
+    }
+    s.diag.matter_on = (int8_t)c->IsOccupied();
+}
+
+/* Copies what each room and device is showing into its Matter attributes. Those a
+ * Matter command has just touched, or that are mid-sweep, are left to CHIP until
+ * they settle. A room's `on` and `pct` are lighting_group_state()'s: any member
+ * lit, and the last commanded percentage; a lamp's the same for the one light. */
+static void sync_attributes(void)
+{
+    const uint32_t t   = now_ms();
+    const int64_t  now = esp_timer_get_time();
+    static mb_seen_t g[MB_SLOTS];       /* bridge task only */
+    for (size_t i = 0; i < MB_SLOTS; i++) {
+        const mb_slot_t &s = s_slots[i];
+        g[i]           = mb_seen_t{};
+        g[i].reachable = -1;
+        g[i].mode      = -1;
+        g[i].occupied  = -1;
+        g[i].ct        = ZBC_UNKNOWN;
+        g[i].hue       = ZBC_UNKNOWN;
+        g[i].sat       = ZBC_UNKNOWN;
+        if (!s.used) {
             continue;
         }
-
-        if (g[i].on_known && s.diag.matter_on != (int8_t)g[i].on) {
-            esp_matter_attr_val_t nv = esp_matter_bool(g[i].on);
-            note_write(s, "OnOff",
-                       attribute::update(s.endpoint_id, OnOff::Id, OnOff::Attributes::OnOff::Id, &nv));
+        if (s.kind == MB_SLOT_ROOM || s.kind == MB_SLOT_LAMP) {
+            see_room_or_lamp(s, g[i], t);
         }
-        if (g[i].pct != ZBC_UNKNOWN && !mb_level_shows(s.diag.matter_level, g[i].pct)) {
-            esp_matter_attr_val_t nv = esp_matter_nullable_uint8(zbc_pct_to_level(g[i].pct));
-            note_write(s, "CurrentLevel",
-                       attribute::update(s.endpoint_id, LevelControl::Id, LevelControl::Attributes::CurrentLevel::Id,
-                                         &nv));
+        if (s.kind != MB_SLOT_ROOM) {
+            see_device(s, g[i], t, now);
+        }
+    }
+
+    /* Then Matter's side, under the CHIP lock once for the whole pass rather
+     * than once per slot - this runs four times a second. */
+    lock::ScopedChipStackLock lock(portMAX_DELAY);
+    for (size_t i = 0; i < MB_SLOTS; i++) {
+        mb_slot_t &s = s_slots[i];
+        if (!s.used) {
+            continue;
+        }
+        switch (s.kind) {
+        case MB_SLOT_ROOM:
+            sync_adaptive(s, g[i]);
+            sync_light(s, g[i]);
+            break;
+        case MB_SLOT_LAMP:
+            sync_light(s, g[i]);
+            sync_color(s, g[i]);
+            break;
+        case MB_SLOT_OCCUPANCY:
+            sync_occupancy(s, g[i]);
+            break;
+        default:
+            break;
+        }
+        if (s.kind != MB_SLOT_ROOM) {
+            sync_reachable(s, g[i]);
         }
     }
 }
 
 /* ------------------------------------------------------ groups -> endpoints */
 
-/* What a group's endpoint is built as: its light, or its "<name> Adaptive" switch. */
+/* What an endpoint is built as: a group's light or its "<name> Adaptive" switch,
+ * or a device endpoint's lamp, switch or sensor. */
 typedef enum {
     MB_EP_LIGHT = 0,
     MB_EP_ADAPTIVE,
+    MB_EP_LAMP,
+    MB_EP_SWITCH,
+    MB_EP_OCCUPANCY,
 } mb_ep_kind_t;
 
 typedef struct {
     mb_ep_kind_t kind;
     bool         mode_select;    /* a light with the Adaptive Lighting Mode Select cluster */
+    uint16_t     features;       /* MB_EP_LAMP: the lamp's ZBC_FEAT_* */
+    uint16_t     ct_min, ct_max; /* MB_EP_LAMP: its range in mireds, 0 unknown */
 } mb_ep_spec_t;
+
+/* What a colour-temperature range the lamp never reported is taken as: 6500 K to
+ * 2000 K, what most tunable whites can do. */
+#define MB_CT_MIN_DEFAULT 153
+#define MB_CT_MAX_DEFAULT 500
+
+static void ct_range(const mb_ep_spec_t &spec, uint16_t *lo, uint16_t *hi)
+{
+    *lo = spec.ct_min ? spec.ct_min : MB_CT_MIN_DEFAULT;
+    *hi = spec.ct_max > *lo ? spec.ct_max : (MB_CT_MAX_DEFAULT > *lo ? MB_CT_MAX_DEFAULT : *lo + 1);
+}
+
+static void ct_config(cluster::color_control::feature::color_temperature::config_t &c, const mb_ep_spec_t &spec)
+{
+    uint16_t lo, hi;
+    ct_range(spec, &lo, &hi);
+    const uint16_t mid = 370 < lo ? lo : (370 > hi ? hi : 370);   /* 2700 K, where a lamp usually is */
+    c.color_temp_physical_min_mireds        = lo;
+    c.color_temp_physical_max_mireds        = hi;
+    c.couple_color_temp_to_level_min_mireds = lo;
+    c.color_temperature_mireds              = mid;
+    c.start_up_color_temperature_mireds     = nullable<uint16_t>(mid);
+}
+
+static mb_lamp_t spec_lamp(const mb_ep_spec_t &spec)
+{
+    return mb_lamp_type(spec.features & ZBC_FEAT_LEVEL, spec.features & ZBC_FEAT_COLOR_TEMP,
+                        spec.features & ZBC_FEAT_ANY_COLOR);
+}
+
+/* A lamp's light, by the most it can do. Hue and saturation are a feature of
+ * their own on top of the Extended Color Light, added only for a lamp that has
+ * them - an xy-only lamp would be told hues it converts badly or not at all. */
+static esp_err_t add_lamp(endpoint_t *ep, const mb_ep_spec_t &spec)
+{
+    switch (spec_lamp(spec)) {
+    case MB_LAMP_ONOFF: {
+        endpoint::on_off_light::config_t config;
+        return endpoint::on_off_light::add(ep, &config);
+    }
+    case MB_LAMP_DIMMABLE: {
+        endpoint::dimmable_light::config_t config;
+        return endpoint::dimmable_light::add(ep, &config);
+    }
+    case MB_LAMP_CT: {
+        endpoint::color_temperature_light::config_t config;
+        config.color_control.color_mode          = 2;   /* colour temperature, all it has */
+        config.color_control.enhanced_color_mode = 2;
+        ct_config(config.color_control_color_temperature, spec);
+        return endpoint::color_temperature_light::add(ep, &config);
+    }
+    default: {
+        endpoint::extended_color_light::config_t config;
+        ct_config(config.color_control_color_temperature, spec);
+        esp_err_t err = endpoint::extended_color_light::add(ep, &config);
+        if (err != ESP_OK || !(spec.features & ZBC_FEAT_COLOR_HS)) {
+            return err;
+        }
+        cluster_t *cc = cluster::get(ep, ColorControl::Id);
+        cluster::color_control::feature::hue_saturation::config_t hs;
+        return cc ? cluster::color_control::feature::hue_saturation::add(cc, &hs) : ESP_FAIL;
+    }
+    }
+}
+
+/* A remote's button: a momentary switch that reports releases, long presses and
+ * up to MB_SW_MULTI_PRESS_MAX presses in a row. */
+static esp_err_t add_switch(endpoint_t *ep)
+{
+    namespace SF = cluster::switch_cluster::feature;
+    endpoint::generic_switch::config_t config;
+    config.switch_cluster.number_of_positions = 2;
+    config.switch_cluster.current_position    = 0;
+    config.switch_cluster.features.momentary_switch_multi_press.multi_press_max = MB_SW_MULTI_PRESS_MAX;
+    config.switch_cluster.feature_flags = SF::momentary_switch::get_id() | SF::momentary_switch_release::get_id() |
+                                          SF::momentary_switch_long_press::get_id() |
+                                          SF::momentary_switch_multi_press::get_id();
+    return endpoint::generic_switch::add(ep, &config);
+}
+
+/* A motion sensor. Without a sensing feature the cluster is left out silently, so
+ * it says passive infrared, which is what nearly every Zigbee one is. */
+static esp_err_t add_occupancy(endpoint_t *ep)
+{
+    endpoint::occupancy_sensor::config_t config;
+    config.occupancy_sensing.occupancy_sensor_type        = 0;      /* PIR */
+    config.occupancy_sensing.occupancy_sensor_type_bitmap = 0x01;   /* PIR */
+    config.occupancy_sensing.feature_flags = cluster::occupancy_sensing::feature::passive_infrared::get_id();
+    return endpoint::occupancy_sensor::add(ep, &config);
+}
 
 /* The Mode Select cluster's two modes, the same for every group. The cluster asks a
  * delegate for them rather than storing them, and esp-matter hands the delegate
@@ -1136,9 +1906,21 @@ static void init_modes(void)
 static esp_err_t device_type_cb(endpoint_t *ep, uint32_t device_type_id, void *priv)
 {
     const mb_ep_spec_t *spec = static_cast<const mb_ep_spec_t *>(priv);
-    const mb_ep_kind_t kind = spec ? spec->kind
-                                   : (device_type_id == ESP_MATTER_ON_OFF_PLUG_IN_UNIT_DEVICE_TYPE_ID ? MB_EP_ADAPTIVE
-                                                                                                        : MB_EP_LIGHT);
+    if (spec && spec->kind == MB_EP_LAMP) {
+        return add_lamp(ep, *spec);
+    }
+    const mb_ep_kind_t kind =
+        spec ? spec->kind
+             : device_type_id == ESP_MATTER_ON_OFF_PLUG_IN_UNIT_DEVICE_TYPE_ID ? MB_EP_ADAPTIVE
+             : device_type_id == ESP_MATTER_GENERIC_SWITCH_DEVICE_TYPE_ID     ? MB_EP_SWITCH
+             : device_type_id == ESP_MATTER_OCCUPANCY_SENSOR_DEVICE_TYPE_ID   ? MB_EP_OCCUPANCY
+                                                                              : MB_EP_LIGHT;
+    if (kind == MB_EP_SWITCH) {
+        return add_switch(ep);
+    }
+    if (kind == MB_EP_OCCUPANCY) {
+        return add_occupancy(ep);
+    }
     if (kind == MB_EP_ADAPTIVE) {
         endpoint::on_off_plug_in_unit::config_t config;
         return endpoint::on_off_plug_in_unit::add(ep, &config);
@@ -1187,9 +1969,17 @@ static void hook_commands(endpoint_t *ep)
     static const uint32_t mode[] = {
         ModeSelect::Commands::ChangeToMode::Id,
     };
+    /* A lamp shown on its own; hue and saturation only where it was built with
+     * them, which hook() sees as commands the cluster does not have. */
+    static const uint32_t color[] = {
+        ColorControl::Commands::MoveToColorTemperature::Id, ColorControl::Commands::MoveToHueAndSaturation::Id,
+        ColorControl::Commands::MoveToHue::Id,              ColorControl::Commands::MoveToSaturation::Id,
+        ColorControl::Commands::MoveToColor::Id,
+    };
     hook(cluster::get(ep, OnOff::Id), onoff, sizeof(onoff) / sizeof(onoff[0]));
     hook(cluster::get(ep, LevelControl::Id), level, sizeof(level) / sizeof(level[0]));
     hook(cluster::get(ep, ModeSelect::Id), mode, sizeof(mode) / sizeof(mode[0]));
+    hook(cluster::get(ep, ColorControl::Id), color, sizeof(color) / sizeof(color[0]));
 }
 
 /* What a controller calls an endpoint: the group's name, or "<name> Adaptive" for
@@ -1197,6 +1987,18 @@ static void hook_commands(endpoint_t *ep)
 static void make_label(char *out, size_t cap, const char *name, bool adaptive)
 {
     snprintf(out, cap, adaptive ? "%s Adaptive" : "%s", name);
+}
+
+/* The cluster's config makes the attribute, empty, so it is usually there to set. */
+static void set_unique_id(cluster_t *c, char *uid)
+{
+    attribute_t *a = attribute::get(c, BridgedDeviceBasicInformation::Attributes::UniqueID::Id);
+    if (a) {
+        esp_matter_attr_val_t v = esp_matter_char_str(uid, strlen(uid));
+        attribute::set_val(a, &v);
+    } else {
+        cluster::bridged_device_basic_information::attribute::create_unique_id(c, uid, strlen(uid));
+    }
 }
 
 /* The group's name is what a controller shows the light as, and the group id is
@@ -1214,13 +2016,7 @@ static void add_identity(endpoint_t *ep, uint16_t group_id, const char *name, bo
 
     char uid[33];
     snprintf(uid, sizeof(uid), adaptive ? "elixcon-light-hub-al-%u" : "elixcon-light-hub-group-%u", group_id);
-    attribute_t *a = attribute::get(c, BridgedDeviceBasicInformation::Attributes::UniqueID::Id);
-    if (a) {
-        esp_matter_attr_val_t v = esp_matter_char_str(uid, strlen(uid));
-        attribute::set_val(a, &v);
-    } else {
-        cluster::bridged_device_basic_information::attribute::create_unique_id(c, uid, strlen(uid));
-    }
+    set_unique_id(c, uid);
 }
 
 static bool adopt(mb_slot_t *slot, esp_matter_bridge::device_t *dev, uint16_t group_id, const char *name,
@@ -1272,56 +2068,410 @@ static bool adopt_al(mb_slot_t *slot, esp_matter_bridge::device_t *dev)
     return true;
 }
 
-/* After a reboot: bring back every bridged endpoint whose group still wants it, on
- * the endpoint id it had, and forget the rest. Lights first, because a switch
- * belongs to the slot its light makes - and esp_matter_bridge lists the ids in no
- * particular order. Called with the CHIP lock held. */
+/* ------------------------------------------------------ devices -> endpoints */
+
+static const char *device_title(const zbc_device_t &d)
+{
+    return d.name[0] ? d.name : (d.model[0] ? d.model : "Zigbee device");
+}
+
+/* How many of a device's endpoints are lamps: one of several gets its endpoint
+ * in its name, or a two-gang relay would be two lights of one name. */
+static int lamp_endpoints(const zbc_device_t &d)
+{
+    int n = 0;
+    for (int i = 0; i < d.ep_count; i++) {
+        n += (d.eps[i].features & ZBC_FEAT_ONOFF) != 0;
+    }
+    return n;
+}
+
+static void want_push(const mb_want_t &w, size_t *n, unsigned *missed)
+{
+    if (*n < MB_DEV_SLOTS) {
+        s_want[(*n)++] = w;
+    } else {
+        (*missed)++;
+    }
+}
+
+/* The device endpoints mexp_db asks for, as they should be shown, into s_want;
+ * returns how many. One a device no longer has is left out, and so is a sensor
+ * nobody has set up: what its occupancy is, and when it clears, are its rules'.
+ * Those and the ones that do not fit are counted in `skipped`. */
+static size_t want_devices(uint8_t *skipped)
+{
+    mexp_entry_t list[MB_DEV_SLOTS];
+    const size_t entries = mexp_db_list(list, MB_DEV_SLOTS);
+    size_t       n       = 0;
+    unsigned     missed  = 0;
+    for (size_t i = 0; i < entries; i++) {
+        if (!device_db_get(list[i].ieee, &s_dev)) {
+            continue;
+        }
+        const zbc_endpoint_t *e = lighting_find_endpoint(&s_dev, list[i].ep);
+        if (!e) {
+            continue;
+        }
+        mb_want_t w = {};
+        memcpy(w.ieee, list[i].ieee, ZBC_IEEE_LEN);
+        w.ep = list[i].ep;
+        strlcpy(w.vendor, s_dev.manufacturer, sizeof(w.vendor));
+        strlcpy(w.product, s_dev.model, sizeof(w.product));
+
+        buttons_zb_ref_t refs[CONFIG_ZBC_MAX_BUTTONS];
+        if (e->features & ZBC_FEAT_MOTION) {
+            const size_t nr = buttons_zigbee_list(w.ieee, w.ep, refs, CONFIG_ZBC_MAX_BUTTONS);
+            for (size_t k = 0; k < nr; k++) {
+                if (refs[k].src == ZBC_BTN_SRC_SENSOR) {
+                    w.button_id = refs[k].id;
+                }
+            }
+            if (!w.button_id) {
+                missed++;
+                continue;
+            }
+            w.kind = MB_SLOT_OCCUPANCY;
+            strlcpy(w.label, device_title(s_dev), sizeof(w.label));
+            want_push(w, &n, &missed);
+        } else if ((e->features & ZBC_FEAT_SWITCH) || !(e->features & ZBC_FEAT_ONOFF)) {
+            /* A remote, as the web page has it: an endpoint that sends presses is
+             * one even where it lists On/Off as well (the older Aqara switch
+             * does), and so is any endpoint buttons have been set up on. One
+             * switch per button, in key order, so the endpoints come in the order
+             * of the remote's own buttons. */
+            const size_t nr = buttons_zigbee_list(w.ieee, w.ep, refs, CONFIG_ZBC_MAX_BUTTONS);
+            for (size_t a = 1; a < nr; a++) {
+                for (size_t b = a; b > 0 && refs[b - 1].key > refs[b].key; b--) {
+                    const buttons_zb_ref_t x = refs[b];
+                    refs[b]                  = refs[b - 1];
+                    refs[b - 1]              = x;
+                }
+            }
+            for (size_t k = 0; k < nr; k++) {
+                if (refs[k].src != ZBC_BTN_SRC_ZIGBEE) {
+                    continue;
+                }
+                w.kind      = MB_SLOT_SWITCH;
+                w.key       = refs[k].key;
+                w.button_id = refs[k].id;
+                if (!button_db_name(refs[k].id, w.label) || !w.label[0]) {
+                    snprintf(w.label, sizeof(w.label), "%.24s %u", device_title(s_dev), (unsigned)w.key);
+                }
+                want_push(w, &n, &missed);
+            }
+        } else {
+            w.kind     = MB_SLOT_LAMP;
+            w.features = e->features & MB_LAMP_BITS;
+            w.ct_min   = e->ct_min_mireds > 0 && e->ct_min_mireds < 0xFFFF ? (uint16_t)e->ct_min_mireds : 0;
+            w.ct_max   = e->ct_max_mireds > 0 && e->ct_max_mireds < 0xFFFF ? (uint16_t)e->ct_max_mireds : 0;
+            if (lamp_endpoints(s_dev) > 1) {
+                snprintf(w.label, sizeof(w.label), "%.28s %u", device_title(s_dev), (unsigned)w.ep);
+            } else {
+                strlcpy(w.label, device_title(s_dev), sizeof(w.label));
+            }
+            want_push(w, &n, &missed);
+        }
+    }
+    *skipped = (uint8_t)(missed > 255 ? 255 : missed);
+    return n;
+}
+
+static const mb_want_t *want_find(size_t n, uint8_t kind, const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, uint8_t key)
+{
+    for (size_t i = 0; i < n; i++) {
+        const mb_want_t &w = s_want[i];
+        if (w.kind == kind && w.ep == ep && w.key == key && memcmp(w.ieee, ieee, ZBC_IEEE_LEN) == 0) {
+            return &w;
+        }
+    }
+    return nullptr;
+}
+
+static mb_ep_spec_t want_spec(const mb_want_t &w)
+{
+    mb_ep_spec_t spec = {};
+    spec.kind     = w.kind == MB_SLOT_LAMP ? MB_EP_LAMP : (w.kind == MB_SLOT_SWITCH ? MB_EP_SWITCH : MB_EP_OCCUPANCY);
+    spec.features = w.features;
+    spec.ct_min   = w.ct_min;
+    spec.ct_max   = w.ct_max;
+    return spec;
+}
+
+/* The device type esp_matter_bridge stores for it. Only a fallback: what an
+ * endpoint is built as is the spec's (device_type_cb). */
+static uint32_t want_device_type(const mb_want_t &w)
+{
+    if (w.kind == MB_SLOT_SWITCH) {
+        return ESP_MATTER_GENERIC_SWITCH_DEVICE_TYPE_ID;
+    }
+    if (w.kind == MB_SLOT_OCCUPANCY) {
+        return ESP_MATTER_OCCUPANCY_SENSOR_DEVICE_TYPE_ID;
+    }
+    switch (spec_lamp(want_spec(w))) {
+    case MB_LAMP_ONOFF:    return ESP_MATTER_ON_OFF_LIGHT_DEVICE_TYPE_ID;
+    case MB_LAMP_DIMMABLE: return ESP_MATTER_DIMMABLE_LIGHT_DEVICE_TYPE_ID;
+    case MB_LAMP_CT:       return ESP_MATTER_COLOR_TEMPERATURE_LIGHT_DEVICE_TYPE_ID;
+    default:               return ESP_MATTER_EXTENDED_COLOR_LIGHT_DEVICE_TYPE_ID;
+    }
+}
+
+static uint8_t want_shape(const mb_want_t &w)
+{
+    return mb_lamp_shape(w.features & ZBC_FEAT_LEVEL, w.features & ZBC_FEAT_COLOR_TEMP,
+                         w.features & ZBC_FEAT_ANY_COLOR, w.features & ZBC_FEAT_COLOR_HS);
+}
+
+static void set_label(uint16_t endpoint_id, const char *label)
+{
+    char buf[MB_LABEL_LEN];
+    strlcpy(buf, label, sizeof(buf));
+    esp_matter_attr_val_t v = esp_matter_char_str(buf, strlen(buf));
+    attribute::update(endpoint_id, BridgedDeviceBasicInformation::Id,
+                      BridgedDeviceBasicInformation::Attributes::NodeLabel::Id, &v);
+}
+
+/* The label is what a controller shows; the UniqueID what tells it the endpoint is
+ * the one it saw before; vendor and product are the device's own. */
+static void add_device_identity(endpoint_t *ep, const mb_want_t &w)
+{
+    namespace BA = cluster::bridged_device_basic_information::attribute;
+    cluster_t *c = cluster::get(ep, BridgedDeviceBasicInformation::Id);
+    if (!c) {
+        return;
+    }
+    char buf[MB_LABEL_LEN];
+    strlcpy(buf, w.label, sizeof(buf));
+    BA::create_node_label(c, buf, strlen(buf));
+    char uid[33];
+    mb_device_uid(uid, sizeof(uid), w.ieee, w.ep, w.kind == MB_SLOT_SWITCH ? w.key : -1);
+    set_unique_id(c, uid);
+    if (w.vendor[0]) {
+        strlcpy(buf, w.vendor, sizeof(buf));
+        BA::create_vendor_name(c, buf, strlen(buf));
+    }
+    if (w.product[0]) {
+        strlcpy(buf, w.product, sizeof(buf));
+        BA::create_product_name(c, buf, strlen(buf));
+    }
+}
+
+static const char *slot_kind_name(uint8_t kind)
+{
+    return kind == MB_SLOT_LAMP ? "light" : (kind == MB_SLOT_SWITCH ? "switch" : "occupancy sensor");
+}
+
+static bool adopt_device(mb_slot_t *slot, esp_matter_bridge::device_t *dev, const mb_want_t &w)
+{
+    add_device_identity(dev->endpoint, w);
+    if (w.kind == MB_SLOT_LAMP) {
+        hook_commands(dev->endpoint);
+    }
+    if (endpoint::enable(dev->endpoint) != ESP_OK) {
+        ESP_LOGE(TAG, "Could not enable the endpoint for \"%s\"", w.label);
+        esp_matter_bridge::remove_device(dev);
+        return false;
+    }
+    memset(slot, 0, sizeof(*slot));
+    slot->used        = true;
+    slot->kind        = w.kind;
+    memcpy(slot->ieee, w.ieee, ZBC_IEEE_LEN);
+    slot->ep          = w.ep;
+    slot->key         = w.key;
+    slot->button_id   = w.button_id;
+    slot->built_shape = w.kind == MB_SLOT_LAMP ? want_shape(w) : 0;
+    const mb_ep_spec_t spec = want_spec(w);
+    ct_range(spec, &slot->ct_min, &slot->ct_max);
+    slot->endpoint_id = endpoint::get_id(dev->endpoint);
+    slot->dev         = dev;
+    strlcpy(slot->name, w.label, sizeof(slot->name));
+    slot->reachable         = -1;
+    slot->diag.endpoint_id  = slot->endpoint_id;
+    slot->diag.group_on     = -1;
+    slot->diag.group_pct    = -1;
+    slot->diag.matter_on    = -1;
+    slot->diag.matter_level = -1;
+    slot->diag.al_active    = -1;
+    slot->diag.al_matter_on = -1;
+    slot->diag.matter_mode  = -1;
+    char ieee[19];
+    zbc_ieee_to_str(w.ieee, ieee);
+    ESP_LOGI(TAG, "\"%s\" (%s ep %u%s) is Matter endpoint %u, a %s", w.label, ieee, w.ep,
+             w.kind == MB_SLOT_SWITCH ? ", a button" : "", slot->endpoint_id, slot_kind_name(w.kind));
+    return true;
+}
+
+static void remove_slot(mb_slot_t &s)
+{
+    if (s.al_dev) {
+        esp_matter_bridge::remove_device(s.al_dev);
+    }
+    esp_matter_bridge::remove_device(s.dev);
+    s.used = false;
+}
+
+/* The device endpoints: every slot that mexp_db no longer asks for goes, every one
+ * it does gets an endpoint, and names follow the devices and buttons. A lamp
+ * whose clusters now say another light type is rebuilt at the next restart on the
+ * same id, as a room's Mode Select is. Called with the CHIP lock held. */
+static bool reconcile_devices(size_t wanted)
+{
+    bool changed = false;
+    for (int i = CONFIG_ZBC_MAX_GROUPS; i < MB_SLOTS; i++) {
+        mb_slot_t &s = s_slots[i];
+        if (!s.used) {
+            continue;
+        }
+        const mb_want_t *w = want_find(wanted, s.kind, s.ieee, s.ep, s.key);
+        if (!w) {
+            ESP_LOGI(TAG, "\"%s\" is no longer shown in Matter, removing endpoint %u", s.name, s.endpoint_id);
+            remove_slot(s);
+            changed = true;
+            continue;
+        }
+        s.button_id = w->button_id;
+        if (strcmp(s.name, w->label) != 0) {
+            strlcpy(s.name, w->label, sizeof(s.name));
+            set_label(s.endpoint_id, s.name);
+        }
+        if (s.kind == MB_SLOT_LAMP) {
+            const bool rebuild = want_shape(*w) != s.built_shape;
+            if (rebuild && !s.rebuild) {
+                ESP_LOGI(TAG, "\"%s\" can do something else now; its Matter light is rebuilt at the next restart",
+                         s.name);
+            }
+            s.rebuild = rebuild;
+        }
+    }
+    bool heap_short = false;
+    for (size_t k = 0; k < wanted; k++) {
+        const mb_want_t &w = s_want[k];
+        if (slot_by_device(w.kind, w.ieee, w.ep, w.key)) {
+            continue;
+        }
+        mb_slot_t *slot = slot_free(true);
+        if (!slot) {
+            s_skipped++;
+            continue;
+        }
+        const size_t free_heap = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+        if (free_heap < MB_DEV_HEAP_MIN) {
+            if (!s_heap_short) {
+                ESP_LOGW(TAG, "\"%s\" waits for a Matter endpoint: %u bytes of heap free, %u needed", w.label,
+                         (unsigned)free_heap, (unsigned)MB_DEV_HEAP_MIN);
+            }
+            heap_short = true;
+            s_skipped++;
+            continue;
+        }
+        mb_ep_spec_t spec = want_spec(w);
+        esp_matter_bridge::device_t *dev =
+            esp_matter_bridge::create_device(s_node, s_aggregator_ep, want_device_type(w), &spec);
+        if (!dev) {
+            ESP_LOGE(TAG, "Could not create a Matter endpoint for \"%s\"", w.label);
+            s_skipped++;
+            continue;
+        }
+        changed |= adopt_device(slot, dev, w);
+    }
+    s_heap_short = heap_short;
+    return changed;
+}
+
+/* After a reboot: bring back every bridged endpoint whose group or device still
+ * wants it, on the endpoint id it had, and forget the rest. Lights first, because a
+ * switch belongs to the slot its light makes - and esp_matter_bridge lists the ids
+ * in no particular order. Called with the CHIP lock held.
+ *
+ * An id no map claims is erased in the first pass. Besides an endpoint whose map
+ * was never saved, that is the 0s esp_matter_bridge loads into the new tail of its
+ * id array when CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_COUNT has grown: its free
+ * entries are kInvalidEndpointId, so until erase_bridged_device_info(0) turns the
+ * 0s into that, there would be no room for a new endpoint. */
 static void resume_bridged(void)
 {
-    mb_map_t lights, switches;
+    mb_map_t     lights, switches;
+    mb_dev_map_t devices;
     load_map(MB_NVS_KEY, &lights);
     load_map(MB_NVS_KEY_AL, &switches);
-    size_t n = group_db_snapshot(s_groups, CONFIG_ZBC_MAX_GROUPS);
+    load_dev_map(&devices);
+    size_t       n      = group_db_snapshot(s_groups, CONFIG_ZBC_MAX_GROUPS);
+    const size_t wanted = want_devices(&s_skipped);
 
     uint16_t ids[MAX_BRIDGED_DEVICE_COUNT];
     if (esp_matter_bridge::get_bridged_endpoint_ids(ids) != ESP_OK) {
         return;
     }
-    for (int pass = 0; pass < 2; pass++) {
+    bool zeros_freed = false;
+    for (int pass = 0; pass < 3; pass++) {
         for (uint16_t id : ids) {
             if (id == chip::kInvalidEndpointId) {
                 continue;
             }
-            const uint16_t light_group = map_group(&lights, id);
-            if ((pass == 0) != (light_group != 0)) {
+            const uint16_t        light_group = map_group(&lights, id);
+            const uint16_t        al_group    = light_group ? 0 : map_group(&switches, id);
+            const mb_dev_entry_t *de          = light_group || al_group ? nullptr : map_device(&devices, id);
+            const int             owner       = al_group ? 1 : (de ? 2 : 0);
+            if (owner != pass) {
+                continue;
+            }
+            if (pass == 0 && !light_group) {
+                if (id == 0) {
+                    if (!zeros_freed) {
+                        zeros_freed = true;
+                        esp_matter_bridge::erase_bridged_device_info(0);
+                    }
+                    continue;
+                }
+                ESP_LOGI(TAG, "Endpoint %u no longer stands for anything, removing it", id);
+                esp_matter_bridge::erase_bridged_device_info(id);
                 continue;
             }
             if (pass == 0) {
                 const zbc_group_t *g    = group_in(s_groups, n, light_group);
-                mb_slot_t         *slot = slot_free();
+                mb_slot_t         *slot = slot_free(false);
                 if (!g || !slot || slot_by_group(g->id)) {
                     ESP_LOGI(TAG, "Endpoint %u no longer stands for a group, removing it", id);
                     esp_matter_bridge::erase_bridged_device_info(id);
                     continue;
                 }
-                mb_ep_spec_t spec = { MB_EP_LIGHT, al_db_expose(g->id) == ZBC_AL_EXPOSE_MODE_SELECT };
+                mb_ep_spec_t spec = {};
+                spec.kind         = MB_EP_LIGHT;
+                spec.mode_select  = al_db_expose(g->id) == ZBC_AL_EXPOSE_MODE_SELECT;
                 esp_matter_bridge::device_t *dev = esp_matter_bridge::resume_device(s_node, id, &spec);
                 if (dev) {
                     adopt(slot, dev, g->id, g->name, spec.mode_select);
                 }
                 continue;
             }
-            const uint16_t al_group = map_group(&switches, id);
-            mb_slot_t     *slot     = al_group ? slot_by_group(al_group) : nullptr;
-            if (!slot || slot->al_endpoint_id || al_db_expose(al_group) != ZBC_AL_EXPOSE_ENDPOINT) {
-                ESP_LOGI(TAG, "Endpoint %u no longer stands for a group, removing it", id);
+            if (pass == 1) {
+                mb_slot_t *slot = slot_by_group(al_group);
+                if (!slot || slot->al_endpoint_id || al_db_expose(al_group) != ZBC_AL_EXPOSE_ENDPOINT) {
+                    ESP_LOGI(TAG, "Endpoint %u no longer stands for a group, removing it", id);
+                    esp_matter_bridge::erase_bridged_device_info(id);
+                    continue;
+                }
+                mb_ep_spec_t spec = {};
+                spec.kind         = MB_EP_ADAPTIVE;
+                esp_matter_bridge::device_t *dev = esp_matter_bridge::resume_device(s_node, id, &spec);
+                if (dev) {
+                    adopt_al(slot, dev);
+                }
+                continue;
+            }
+            /* A lamp comes back built from what it can do now, which is how one
+             * that gained colour gets it - on the id controllers know. */
+            const mb_want_t *w    = want_find(wanted, de->kind, de->ieee, de->ep, de->key);
+            mb_slot_t       *slot = slot_free(true);
+            if (!w || !slot || slot_by_device(w->kind, w->ieee, w->ep, w->key)) {
+                ESP_LOGI(TAG, "Endpoint %u no longer stands for a device, removing it", id);
                 esp_matter_bridge::erase_bridged_device_info(id);
                 continue;
             }
-            mb_ep_spec_t spec = { MB_EP_ADAPTIVE, false };
+            mb_ep_spec_t spec = want_spec(*w);
             esp_matter_bridge::device_t *dev = esp_matter_bridge::resume_device(s_node, id, &spec);
             if (dev) {
-                adopt_al(slot, dev);
+                adopt_device(slot, dev, *w);
             }
         }
     }
@@ -1332,18 +2482,17 @@ static void resume_bridged(void)
  * Adaptive Lighting switch wherever a group asks for one, and the names current. */
 static void reconcile(void)
 {
-    size_t n       = group_db_snapshot(s_groups, CONFIG_ZBC_MAX_GROUPS);
-    bool   changed = false;
+    size_t       n       = group_db_snapshot(s_groups, CONFIG_ZBC_MAX_GROUPS);
+    /* Before the CHIP lock, like the snapshot: this reads the device, button and
+     * exposure tables under their own mutexes. */
+    const size_t wanted  = want_devices(&s_skipped);
+    bool         changed = false;
 
     lock::ScopedChipStackLock lock(portMAX_DELAY);
     for (auto &s : s_slots) {
-        if (s.used && !group_in(s_groups, n, s.group_id)) {
+        if (s.used && s.kind == MB_SLOT_ROOM && !group_in(s_groups, n, s.group_id)) {
             ESP_LOGI(TAG, "Group %u is gone, removing Matter endpoint %u", s.group_id, s.endpoint_id);
-            if (s.al_dev) {
-                esp_matter_bridge::remove_device(s.al_dev);
-            }
-            esp_matter_bridge::remove_device(s.dev);
-            s.used  = false;
+            remove_slot(s);
             changed = true;
         }
     }
@@ -1352,11 +2501,13 @@ static void reconcile(void)
         const uint8_t      expose = al_db_expose(g->id);
         mb_slot_t         *slot   = slot_by_group(g->id);
         if (!slot) {
-            slot = slot_free();
+            slot = slot_free(false);
             if (!slot) {
                 break;
             }
-            mb_ep_spec_t spec = { MB_EP_LIGHT, expose == ZBC_AL_EXPOSE_MODE_SELECT };
+            mb_ep_spec_t spec = {};
+            spec.kind         = MB_EP_LIGHT;
+            spec.mode_select  = expose == ZBC_AL_EXPOSE_MODE_SELECT;
             esp_matter_bridge::device_t *dev = esp_matter_bridge::create_device(
                 s_node, s_aggregator_ep, ESP_MATTER_DIMMABLE_LIGHT_DEVICE_TYPE_ID, &spec);
             if (!dev) {
@@ -1385,7 +2536,8 @@ static void reconcile(void)
         /* The switch follows the preference at once. Turning it off and on again
          * gives it a new id, which is fine: somebody removed it on purpose. */
         if (expose == ZBC_AL_EXPOSE_ENDPOINT && !slot->al_endpoint_id) {
-            mb_ep_spec_t spec = { MB_EP_ADAPTIVE, false };
+            mb_ep_spec_t spec = {};
+            spec.kind         = MB_EP_ADAPTIVE;
             esp_matter_bridge::device_t *dev = esp_matter_bridge::create_device(
                 s_node, s_aggregator_ep, ESP_MATTER_ON_OFF_PLUG_IN_UNIT_DEVICE_TYPE_ID, &spec);
             if (!dev) {
@@ -1416,6 +2568,7 @@ static void reconcile(void)
             slot->expose_logged = false;
         }
     }
+    changed |= reconcile_devices(wanted);
     if (changed) {
         save_maps();
     }
@@ -1532,13 +2685,38 @@ static void refresh_status(void)
     }
     uint8_t        groups = 0;
     matter_group_t diag[CONFIG_ZBC_MAX_GROUPS] = {};
+    uint8_t        devices = 0;
+    static matter_device_t ddiag[MB_DEV_SLOTS];   /* bridge task only */
+    memset(ddiag, 0, sizeof(ddiag));
     for (const auto &s : s_slots) {
-        if (s.used) {
-            matter_group_t &d  = diag[groups++];
-            d                  = s.diag;
-            d.expose           = al_db_expose(s.group_id);
-            d.mode_select_live = s.mode_select_live;
-            d.al_endpoint      = s.al_endpoint_id;
+        if (!s.used) {
+            continue;
+        }
+        if (s.kind == MB_SLOT_ROOM) {
+            if (groups < CONFIG_ZBC_MAX_GROUPS) {
+                matter_group_t &d  = diag[groups++];
+                d                  = s.diag;
+                d.expose           = al_db_expose(s.group_id);
+                d.mode_select_live = s.mode_select_live;
+                d.al_endpoint      = s.al_endpoint_id;
+            }
+            continue;
+        }
+        if (devices < MB_DEV_SLOTS) {
+            matter_device_t &d = ddiag[devices++];
+            memcpy(d.ieee, s.ieee, ZBC_IEEE_LEN);
+            d.ep           = s.ep;
+            d.key          = s.key;
+            d.kind         = s.kind;
+            d.endpoint_id  = s.endpoint_id;
+            d.button_id    = s.button_id;
+            d.reachable    = s.reachable;
+            d.matter_on    = s.diag.matter_on;
+            d.matter_level = s.diag.matter_level;
+            d.held         = s.diag.held;
+            d.writes       = s.diag.writes;
+            d.last_err     = s.diag.last_err;
+            d.rebuild      = s.rebuild;
         }
     }
     const int32_t up_s = (int32_t)(esp_timer_get_time() / 1000000);
@@ -1561,6 +2739,10 @@ static void refresh_status(void)
     s_status.window_open   = window;
     s_status.groups        = groups;
     memcpy(s_status.group_list, diag, sizeof(diag));
+    s_status.devices         = devices;
+    s_status.devices_skipped = s_skipped;
+    s_status.devices_heap_short = s_heap_short;
+    memcpy(s_status.device_list, ddiag, sizeof(ddiag));
     xSemaphoreGive(s_status_mtx);
 }
 
@@ -1779,6 +2961,21 @@ void matter_bridge_get_status(matter_status_t *out)
     xSemaphoreTake(s_status_mtx, portMAX_DELAY);
     *out = s_status;
     xSemaphoreGive(s_status_mtx);
+}
+
+void matter_bridge_button_event(uint16_t button_id, uint8_t emit)
+{
+    /* Only what a switch reports; the rest would only fill the queue. */
+    if (!s_queue || (emit != ZBC_EMIT_SHORT && emit != ZBC_EMIT_DOUBLE && emit != ZBC_EMIT_LONG &&
+                     emit != ZBC_EMIT_LONG_RELEASE)) {
+        return;
+    }
+    mb_intent_t in = {};
+    in.kind        = MB_SWITCH;
+    in.button_id   = button_id;
+    in.emit        = emit;
+    in.at_us       = esp_timer_get_time();
+    xQueueSend(s_queue, &in, 0);
 }
 
 esp_err_t matter_bridge_open_window(void)

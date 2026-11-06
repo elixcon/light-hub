@@ -91,15 +91,19 @@ The updater compiles shared modules (`wifi_manager.c`, `settings.c`, `auth.c`, `
   from clusters and ColorCapabilities, never a model list), reporting, the command gate, settle
   reads, remote frames, the Zigbee OTA server and the worker task.
 - `*_db.c` are NVS-backed registries: devices keyed by IEEE address, groups of (device, endpoint),
-  curves, buttons, wired lights, Matter lamps, Adaptive Lighting. `button_db.c` keeps every
-  button's rules in one pool behind the buttons, laid out as stored, so a save writes the table in
-  place (host-tested by `test_bdbpool`). `config_backup.c` saves and
+  curves, buttons, wired lights, Matter lamps, Adaptive Lighting, and which device endpoints Matter
+  shows on their own (`mexp_db.c`). `button_db.c` keeps every button's rules in one pool behind
+  the buttons, laid out as stored, so a save writes the table in place (host-tested by
+  `test_bdbpool`). `config_backup.c` saves and
   restores them, and the restore is applied at boot before any table loads.
 - `buttons.c` runs every button's rules: pins, remote keys, and motion sensors, which are buttons
   with a third source (`ZBC_BTN_SRC_SENSOR`, events motion and clear in the first two gesture
   slots). It also runs rules' delayed actions from its own task. The occupancy machine
   (`motion_step`) and the delay table are host-tested (`test_motion`, `test_delayed`).
-- Matter is C++. `matter_bridge.cpp` exposes one dimmable light per group, and
+- Matter is C++. `matter_bridge.cpp` exposes one dimmable light per group and, where `mexp_db` asks,
+  a device endpoint on its own: a lamp through the `lighting_target_*` calls a room uses, each
+  button of a remote as a Generic Switch (`buttons.c` posts every gesture to it), a motion sensor as
+  an Occupancy Sensor that follows `buttons_sensor_state`.
   `matter_fabric.cpp`/`matter_commission.cpp`/`matter_ctl.cpp` are the controller for Wi-Fi Matter
   lamps (`matter_priv.h` is internal and runs on the CHIP thread; `matter_ctl.h` is the C API). No
   Thread: the radio runs Zigbee.

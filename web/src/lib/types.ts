@@ -25,6 +25,9 @@ export interface Endpoint {
   /* A motion sensor: whether it has been heard saying "unoccupied" itself,
    * which decides what its no-motion time is counted from. */
   reports_clear?: boolean;
+  /* Shown in Matter on its own, besides its rooms (POST .../ep/{ep}/matter).
+   * Absent is off, the default. */
+  matter?: boolean;
 }
 
 /* An end device's parent, from the coordinator's own neighbour table
@@ -407,6 +410,19 @@ export interface MatterController {
   pairing: { state: MatterPairState; step: string; error: string; node_id: string; lamps: number; s_ago: number };
 }
 
+/* A device endpoint the bridge shows on its own, as GET /api/matter has it. */
+export interface MatterDevice {
+  ieee: string;
+  ep: number;
+  kind: "light" | "switch" | "occupancy";
+  key?: number;
+  button?: number;
+  endpoint: number;
+  reachable: number;
+  writes: number;
+  last_err: string;
+}
+
 export interface MatterStatus {
   running: boolean;
   fabrics: number;
@@ -414,6 +430,13 @@ export interface MatterStatus {
   fabric_list: { index: number; vendor_id: string; label: string; ours?: boolean }[];
   window_open: boolean;
   groups: number;
+  /* Device endpoints shown on their own, and how many asked for have none: a
+   * sensor not set up yet, or no room left. */
+  devices?: number;
+  devices_skipped?: number;
+  /* Some of those wait for the coordinator to have the memory for another. */
+  devices_low_memory?: boolean;
+  device_list?: MatterDevice[];
   manual_code: string;
   qr_code: string;
   controller?: MatterController;

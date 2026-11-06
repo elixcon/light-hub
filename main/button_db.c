@@ -816,6 +816,17 @@ bool button_db_get(uint16_t id, zbc_button_t *out)
     return i >= 0;
 }
 
+bool button_db_name(uint16_t id, char out[ZBC_BUTTON_NAME_LEN])
+{
+    BDB_LOCK();
+    const int i = find_index(id);
+    if (i >= 0) {
+        strlcpy(out, s_table.head[i].name, ZBC_BUTTON_NAME_LEN);
+    }
+    BDB_UNLOCK();
+    return i >= 0;
+}
+
 size_t button_db_list_ids(uint16_t *ids, size_t max)
 {
     size_t n = 0;

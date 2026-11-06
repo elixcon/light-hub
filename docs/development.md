@@ -182,6 +182,7 @@ main/
   button_db.c        buttons: their source, and all their rules in one pool, in NVS
   light_db.c         wired lights and their wiring, in NVS
   mlight_db.c        Matter lamps: the device and endpoint each one is, in NVS
+  mexp_db.c          which Zigbee device endpoints Matter shows on their own, in NVS
   remote.c           what a Zigbee remote's frames mean, as a press; no dependencies
   colorspace.c       Planckian locus and hue/saturation <-> CIE xy, no dependencies
   curve_db.c         per-light response curves and the monotone cubic that reads them
@@ -192,7 +193,7 @@ main/
   local_lights.c     drives the wired lights: relays, dimmable and tunable-white PWM
   ntc.c, thermal.c   the NTC reading and the overheat hold on the wired lights
   buttons.c          samples the pins, tells the gestures apart, runs the winning rule
-  matter_bridge.cpp  the Matter bridge: one light per group
+  matter_bridge.cpp  the Matter bridge: one light per group, and devices shown on their own
   matter_fabric.cpp  the coordinator's own Matter fabric, for the lamps it controls
   matter_commission.cpp  pairing a Matter device, and finding the lamps on it
   matter_ctl.cpp     Matter lamps: the command gate, subscriptions, the C API

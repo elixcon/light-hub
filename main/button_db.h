@@ -257,6 +257,9 @@ esp_err_t button_db_set(uint16_t id, const zbc_button_t *in);
 esp_err_t button_db_remove(uint16_t id);
 
 bool      button_db_get(uint16_t id, zbc_button_t *out);
+/* Its name alone, without the copy of its rules button_db_get makes. False, with
+ * `out` untouched, for an unknown id. */
+bool      button_db_name(uint16_t id, char out[ZBC_BUTTON_NAME_LEN]);
 /* The ids alone, for a caller that copies one button at a time rather than
  * holding the whole table - see stream_buttons in http_server.c. In the order
  * the buttons were made. */
