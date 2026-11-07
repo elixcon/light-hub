@@ -66,7 +66,7 @@ typedef struct {
     uint8_t  kind;            /* MATTER_DEV_* */
     uint16_t endpoint_id;
     uint16_t button_id;       /* a switch or sensor: the button record that speaks for it */
-    int8_t   reachable;       /* BridgedDeviceBasicInformation Reachable as Matter has it; a switch: its remote's */
+    int8_t   reachable;       /* BridgedDeviceBasicInformation Reachable as last written; a switch: its remote's */
     int8_t   matter_on;       /* a lamp's OnOff, a sensor's Occupancy */
     int16_t  matter_level;    /* a lamp's CurrentLevel, 1-254 */
     bool     held;            /* sync holding off: a Matter command or sweep is settling */

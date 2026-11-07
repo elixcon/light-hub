@@ -16,7 +16,6 @@
 #pragma once
 
 #include <stdbool.h>
-#include <stddef.h>
 #include <stdint.h>
 
 #include "esp_err.h"
@@ -127,19 +126,6 @@ int64_t buttons_last_event_ms(uint16_t id);
  * rules and the no-motion ones are still to come, and the milliseconds until
  * those are due (-1 when none are). False when the button is not a sensor. */
 bool buttons_sensor_state(uint16_t id, bool *occupied, int64_t *clear_in_ms);
-
-/* A remote's button or a sensor's record on one device endpoint, as
- * buttons_zigbee_list hands them out: what the Matter bridge needs to give each
- * one an endpoint, without a copy of its rules. */
-typedef struct {
-    uint16_t id;
-    uint8_t  src;     /* ZBC_BTN_SRC_ZIGBEE or ZBC_BTN_SRC_SENSOR */
-    uint8_t  key;     /* which button of the endpoint; 0 for a sensor */
-} buttons_zb_ref_t;
-
-/* Up to max of them, from the sampler's copy under its spinlock; returns how
- * many. Cheap enough to ask once a second. */
-size_t buttons_zigbee_list(const uint8_t ieee[8], uint8_t ep, buttons_zb_ref_t *out, size_t max);
 
 /* The button's actions still waiting out their delays: how many, and the
  * milliseconds until the first. False when there are none. */

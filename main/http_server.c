@@ -55,8 +55,6 @@
 
 static const char *TAG = "http";
 
-/* Devices we have not heard from in a while are shown as stale in the UI. */
-#define OFFLINE_AFTER_US (10 * 60 * 1000000LL)
 static httpd_handle_t s_server;
 
 /* ------------------------------------------------------------- handlers */
@@ -409,7 +407,7 @@ static cJSON *device_to_json(const zbc_device_t *dev, int64_t now)
         wired_light_to_json(d, light_id, &light);
     }
 
-    bool fresh = dev->last_seen_us > 0 && (now - dev->last_seen_us) < OFFLINE_AFTER_US;
+    bool fresh = dev->last_seen_us > 0 && (now - dev->last_seen_us) < ZBC_OFFLINE_AFTER_US;
     cJSON_AddBoolToObject(d, "online", dev->online && fresh);
     cJSON_AddNumberToObject(d, "last_seen_s_ago",
                             dev->last_seen_us ? (double)((now - dev->last_seen_us) / 1000000) : -1);
@@ -895,9 +893,9 @@ static esp_err_t device_matter_post(httpd_req_t *req, const uint8_t ieee[ZBC_IEE
     }
     /* A remote's buttons may sit on an endpoint whose clusters say nothing of
      * presses; buttons set up on it make it one. */
-    buttons_zb_ref_t ref;
+    zbc_button_ref_t ref;
     if (want && !(e->features & (ZBC_FEAT_ONOFF | ZBC_FEAT_SWITCH | ZBC_FEAT_MOTION)) &&
-        buttons_zigbee_list(ieee, ep, &ref, 1) == 0) {
+        button_db_list_on(ieee, ep, &ref, 1) == 0) {
         return send_error(req, "409 Conflict", "this endpoint is not a light, a remote or a motion sensor");
     }
     const esp_err_t err = mexp_db_set(ieee, ep, want);
@@ -975,9 +973,6 @@ static esp_err_t device_delete(httpd_req_t *req, const uint8_t ieee[ZBC_IEEE_LEN
     }
     /* A device that is gone must not linger in a group and be commanded again,
      * nor leave a curve behind for whatever joins next. */
-    group_db_forget_device(ieee);
-    curve_db_forget_device(ieee);
-    mexp_db_forget_device(ieee);
     lighting_forget_device(ieee);
     /* A button whose source is a remote names the device, and one left pointing
      * at a device that is gone would fire at nothing - it keeps its name and
@@ -1292,7 +1287,7 @@ static cJSON *group_to_json(const zbc_group_t *g, int64_t now)
         const zbc_endpoint_t *e = NULL;
         if (lighting_get_device(g->members[m].ieee, &dev)) {
             e = lighting_find_endpoint(&dev, g->members[m].ep);
-            bool fresh = dev.last_seen_us > 0 && (now - dev.last_seen_us) < OFFLINE_AFTER_US;
+            bool fresh = dev.last_seen_us > 0 && (now - dev.last_seen_us) < ZBC_OFFLINE_AFTER_US;
             cJSON_AddStringToObject(jm, "name", dev.name);
             cJSON_AddBoolToObject(jm, "online", dev.online && fresh);
         } else {
@@ -2189,7 +2184,7 @@ static esp_err_t remotes_get(httpd_req_t *req)
 static void state_rev_string(char *out, size_t len)
 {
     snprintf(out, len, "%lu-%u", (unsigned long)zbc_state_rev(),
-             (unsigned)device_db_count_fresh(OFFLINE_AFTER_US));
+             (unsigned)device_db_count_fresh(ZBC_OFFLINE_AFTER_US));
 }
 
 static esp_err_t state_get(httpd_req_t *req)
@@ -3800,7 +3795,7 @@ static esp_err_t matter_get(httpd_req_t *req)
         zbc_ieee_to_str(d->ieee, ieee);
         cJSON_AddStringToObject(o, "ieee", ieee);
         cJSON_AddNumberToObject(o, "ep", d->ep);
-        cJSON_AddStringToObject(o, "kind", d->kind < 5 ? DEV_KINDS[d->kind] : "");
+        cJSON_AddStringToObject(o, "kind", d->kind < sizeof(DEV_KINDS) / sizeof(DEV_KINDS[0]) ? DEV_KINDS[d->kind] : "");
         if (d->kind == MATTER_DEV_SWITCH) {
             cJSON_AddNumberToObject(o, "key", d->key);
             cJSON_AddNumberToObject(o, "remote", d->parent_id);

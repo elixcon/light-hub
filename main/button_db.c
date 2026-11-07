@@ -827,6 +827,23 @@ bool button_db_name(uint16_t id, char out[ZBC_BUTTON_NAME_LEN])
     return i >= 0;
 }
 
+size_t button_db_list_on(const uint8_t ieee[ZBC_BTN_IEEE_LEN], uint8_t ep, zbc_button_ref_t *out, size_t max)
+{
+    size_t n = 0;
+    BDB_LOCK();
+    for (int i = 0; i < s_table.hdr.count && n < max; i++) {
+        const bdb_head_t *h = &s_table.head[i];
+        if (zbc_btn_src_is_device(h->src) && h->zb_ep == ep && memcmp(h->ieee, ieee, ZBC_BTN_IEEE_LEN) == 0) {
+            out[n].id  = h->id;
+            out[n].src = h->src;
+            out[n].key = h->zb_key;
+            n++;
+        }
+    }
+    BDB_UNLOCK();
+    return n;
+}
+
 size_t button_db_list_ids(uint16_t *ids, size_t max)
 {
     size_t n = 0;

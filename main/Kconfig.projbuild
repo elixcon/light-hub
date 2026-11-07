@@ -82,11 +82,11 @@ menu "Elixcon Light Hub"
         default 12
         help
             A Zigbee lamp or motion sensor shown in Matter on its own takes one, and
-            a remote one per button. Rooms have endpoints of their own and never
-            count here. Each endpoint costs heap for as long as it exists - a switch
-            under 1 KB, a light 4-10 KB - and the bridge makes no new one while less
-            than 48 KB is free (MB_DEV_HEAP_MIN), so the heap, not this count, is
-            usually what runs out first.
+            a remote one for itself and one per button. Rooms have endpoints of
+            their own and never count here. Each endpoint costs heap for as long as
+            it exists - a switch under 1 KB, a light 4-10 KB - and the bridge makes
+            no new one while less than 48 KB is free (MB_DEV_HEAP_MIN), so the heap,
+            not this count, is usually what runs out first.
             CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_COUNT has to grow with it, and
             matter_bridge.cpp refuses to build if it falls behind. Changing it
             changes nothing stored: the table is kept by count.

@@ -186,6 +186,9 @@ size_t    device_db_count(void);
  * and heard from within max_age_us. One definition, so a caller working from a
  * copied row and the count below cannot come to disagree about what "there" is. */
 bool      device_db_is_fresh(const zbc_device_t *dev, int64_t max_age_us);
+/* How long a device may go unheard before the web page and Matter call it
+ * offline - the same age for both, so they never disagree about a lamp. */
+#define ZBC_OFFLINE_AFTER_US (10 * 60 * 1000000LL)
 /* How many devices are fresh by that definition - the number the web page's
  * "offline" badge is derived from, which can change with nothing else moving;
  * see state_rev.h. */

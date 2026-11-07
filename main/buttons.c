@@ -1451,13 +1451,11 @@ static int slot_of(uint16_t id)
 
 static void dispatch(const btn_msg_t *msg)
 {
-    /* Every gesture, rules or none, a release included: a remote or sensor shown
-     * in Matter on its own (mexp_db.h) is a trigger for a controller's own
-     * automations. A post and nothing more - the bridge finds out whether this
-     * button is one of its. A hold's repeats say nothing a controller can use. */
-    if (msg->emit != ZBC_EMIT_NONE && msg->emit != ZBC_EMIT_LONG_REPEAT) {
-        matter_bridge_button_event(msg->id, (uint8_t)msg->emit);
-    }
+    /* Every gesture, rules or none, a release included: a remote shown in Matter
+     * on its own (mexp_db.h) is a trigger for a controller's own automations. A
+     * post and nothing more - the bridge decides which gestures a switch reports
+     * and finds out whether this button is one of its. */
+    matter_bridge_button_event(msg->id, (uint8_t)msg->emit);
 
     /* A release stops whatever is ramping and asks nothing else. Going back to
      * the rules for it would be wrong twice over: the conditions may have moved
@@ -1795,24 +1793,6 @@ bool buttons_sensor_state(uint16_t id, bool *occupied, int64_t *clear_in_ms)
         *clear_in_ms = at == 0 ? -1 : (left > 0 ? left / 1000 : 0);
     }
     return true;
-}
-
-size_t buttons_zigbee_list(const uint8_t ieee[ZBC_BTN_IEEE_LEN], uint8_t ep, buttons_zb_ref_t *out, size_t max)
-{
-    size_t n = 0;
-    portENTER_CRITICAL(&s_live_mux);
-    for (int i = 0; i < CONFIG_ZBC_MAX_BUTTONS && n < max; i++) {
-        const btn_live_t *l = &s_live[i];
-        if (l->used && (l->src == ZBC_BTN_SRC_ZIGBEE || l->src == ZBC_BTN_SRC_SENSOR) && l->zb_ep == ep &&
-            memcmp(l->ieee, ieee, ZBC_BTN_IEEE_LEN) == 0) {
-            out[n].id  = l->id;
-            out[n].src = l->src;
-            out[n].key = l->zb_key;
-            n++;
-        }
-    }
-    portEXIT_CRITICAL(&s_live_mux);
-    return n;
 }
 
 bool buttons_delayed(uint16_t id, int *count, int64_t *next_ms)

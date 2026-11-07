@@ -45,6 +45,12 @@ static int index_of(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep)
     return -1;
 }
 
+/* Nothing past `count` is read, saved or listed, so the last entry fills the gap. */
+static void remove_at_locked(int i)
+{
+    s_blob.e[i] = s_blob.e[--s_blob.hdr.count];
+}
+
 static esp_err_t save_locked(void)
 {
     zbc_state_bump();          /* the device's page shows the setting */
@@ -154,8 +160,7 @@ esp_err_t mexp_db_set(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, bool expose)
             err = save_locked();
         }
     } else if (!expose && i >= 0) {
-        s_blob.e[i] = s_blob.e[--s_blob.hdr.count];
-        memset(&s_blob.e[s_blob.hdr.count], 0, sizeof(s_blob.e[0]));
+        remove_at_locked(i);
         err = save_locked();
     }
     xSemaphoreGive(s_lock);
@@ -184,8 +189,7 @@ static void forget(const uint8_t ieee[ZBC_IEEE_LEN], int ep)
     bool dropped = false;
     for (int i = 0; i < s_blob.hdr.count;) {
         if (memcmp(s_blob.e[i].ieee, ieee, ZBC_IEEE_LEN) == 0 && (ep < 0 || s_blob.e[i].ep == ep)) {
-            s_blob.e[i] = s_blob.e[--s_blob.hdr.count];
-            memset(&s_blob.e[s_blob.hdr.count], 0, sizeof(s_blob.e[0]));
+            remove_at_locked(i);
             dropped = true;
         } else {
             i++;

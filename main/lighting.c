@@ -458,6 +458,9 @@ static void forget_restore(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep)
 
 void lighting_forget_device(const uint8_t ieee[ZBC_IEEE_LEN])
 {
+    group_db_forget_device(ieee);
+    curve_db_forget_device(ieee);
+    mexp_db_forget_device(ieee);
     forget_restore(ieee, 0);
 }
 

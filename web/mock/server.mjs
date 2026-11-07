@@ -27,7 +27,7 @@ const devices = [
 const PAIR_STEPS = ["find", "pase", "arm", "csr", "root", "noc", "case", "complete", "read"];
 let pairing = { state: "idle", step: "idle", error: "", node_id: "", lamps: 0, s_ago: 0, started: 0 };
 /* The device endpoints shown in Matter on their own: a lamp or sensor is one, a
- * remote one per button set up on it - as the bridge counts them. */
+ * remote one for itself and one per button set up on it - as the bridge counts them. */
 function matterDevices() {
   const list = [];
   for (const d of devices) for (const e of d.endpoints) {

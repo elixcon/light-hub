@@ -412,7 +412,8 @@ static void test_a_lamp_is_the_light_its_clusters_make_it(void)
        "a colour lamp gaining hue and saturation is rebuilt");
     ok(mb_lamp_shape(true, true, false, true) == mb_lamp_shape(true, true, false, false),
        "hue and saturation mean nothing to a tunable white");
-    ok((mb_lamp_shape(true, true, true, true) & 0x0F) == MB_LAMP_COLOR, "the type is the low nibble");
+    ok(mb_shape_type(mb_lamp_shape(true, true, true, true)) == MB_LAMP_COLOR, "the shape keeps the type");
+    ok(mb_shape_type(mb_lamp_shape(true, false, false, false)) == MB_LAMP_DIMMABLE, "a dimmer's too");
     ok(mb_lamp_shape(false, false, false, false) != mb_lamp_shape(true, false, false, false),
        "a relay that turns out to dim is rebuilt");
 }
@@ -470,24 +471,20 @@ static void test_a_button_reports_what_the_hub_decided(void)
     ok(mb_switch_events(ZBC_EMIT_NONE, s) == 0, "nothing is nothing");
 }
 
-/* The UniqueID is at most 32 characters, whatever the address, endpoint and
- * button; and two buttons of one remote, or a lamp and a button, never share one. */
+/* The UniqueID is at most 32 characters, whatever the address and endpoint; and
+ * two endpoints of one device never share one. */
 static void test_a_unique_id_fits_and_is_unique(void)
 {
     const uint8_t ff[8] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
     char a[33], b[33];
-    ok(mb_device_uid(a, sizeof(a), ff, 240, 255) <= 32, "the longest a switch can have fits");
-    ok(strlen(a) == 32, "and is not cut short");
-    ok(mb_device_uid(a, sizeof(a), ff, 240, -1) <= 32, "nor a lamp's");
+    ok(mb_device_uid(a, sizeof(a), ff, 240) <= 32, "the longest an endpoint can have fits");
+    ok(strlen(a) == 28, "and is not cut short");
 
     const uint8_t ieee[8] = { 0x00, 0x17, 0x88, 0x01, 0x02, 0x6e, 0xf2, 0xa8 };
-    mb_device_uid(a, sizeof(a), ieee, 11, -1);
+    mb_device_uid(a, sizeof(a), ieee, 11);
     ok(strcmp(a, "elixcon-00178801026ef2a8-11") == 0, "a lamp's names its address and endpoint");
-    mb_device_uid(a, sizeof(a), ieee, 1, 0);
-    mb_device_uid(b, sizeof(b), ieee, 1, 1);
-    ok(strcmp(a, b) != 0, "two buttons of one remote differ");
-    mb_device_uid(b, sizeof(b), ieee, 1, -1);
-    ok(strcmp(a, b) != 0, "a button differs from its endpoint's lamp");
+    mb_device_uid(b, sizeof(b), ieee, 1);
+    ok(strcmp(a, b) != 0, "two endpoints of one device differ");
 }
 
 int main(void)

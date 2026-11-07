@@ -117,11 +117,6 @@ using namespace chip::app::Clusters;
  * three seconds, close to a held button's sweep. */
 #define MB_DEFAULT_RATE 80
 
-/* A lamp is offline to Matter as it is to the web page: marked gone, or not heard
- * from in this long (OFFLINE_AFTER_US in http_server.c). A remote or sensor sleeps
- * and says nothing until it is used, so for those only marked gone counts. */
-#define MB_OFFLINE_AFTER_US (10 * 60 * 1000000LL)
-
 /* The least free heap a new device endpoint is made with. Each one is heap for as
  * long as it exists - measured on hardware, a switch under 1 KB, a light 4-10 KB,
  * a colour light the most - and a controller's traffic takes about 32 KB on top of
@@ -442,10 +437,17 @@ static mb_lamp_t mb_lamp_type(bool level, bool ct, bool color)
  * whether it takes hue and saturation as well as x and y. An endpoint is built once
  * - a cluster cannot be added to an enabled endpoint - so a lamp whose clusters say
  * something else now is rebuilt at the next restart, on the same id. */
+#define MB_SHAPE_HS 0x10
+
 static uint8_t mb_lamp_shape(bool level, bool ct, bool color, bool hs)
 {
     const mb_lamp_t t = mb_lamp_type(level, ct, color);
-    return (uint8_t)((uint8_t)t | (t == MB_LAMP_COLOR && hs ? 0x10 : 0));
+    return (uint8_t)((uint8_t)t | (t == MB_LAMP_COLOR && hs ? MB_SHAPE_HS : 0));
+}
+
+static mb_lamp_t mb_shape_type(uint8_t shape)
+{
+    return (mb_lamp_t)(shape & 0x0F);
 }
 
 /* A Generic Switch's events, as the Switch cluster names them. */
@@ -517,19 +519,18 @@ static uint8_t mb_sw_position(uint8_t event)
     return event == MB_SW_INITIAL_PRESS || event == MB_SW_LONG_PRESS || event == MB_SW_MULTI_ONGOING ? 1 : 0;
 }
 
-/* The UniqueID a device endpoint is known by: the device's address and endpoint
- * and, for a switch, which button (`key`, -1 for none). That is what tells a
- * controller this is the light it saw before, however the device is renamed. At
- * most 32 characters, the attribute's limit: "elixcon-" and the 16 hex digits
- * leave room for two numbers of three digits. */
-static int mb_device_uid(char *out, size_t cap, const uint8_t ieee[8], uint8_t ep, int key)
+/* The UniqueID a device endpoint is known by: the device's address and endpoint.
+ * That is what tells a controller this is the light it saw before, however the
+ * device is renamed. A remote's buttons have none: they are endpoints below the
+ * remote, not bridged devices. At most 32 characters, the attribute's limit:
+ * "elixcon-" and the 16 hex digits leave room for the endpoint. */
+static int mb_device_uid(char *out, size_t cap, const uint8_t ieee[8], uint8_t ep)
 {
     char hex[17];
     for (int i = 0; i < 8; i++) {
         snprintf(hex + 2 * i, 3, "%02x", ieee[i]);
     }
-    return key >= 0 ? snprintf(out, cap, "elixcon-%s-%u-%u", hex, (unsigned)ep, (unsigned)key)
-                    : snprintf(out, cap, "elixcon-%s-%u", hex, (unsigned)ep);
+    return snprintf(out, cap, "elixcon-%s-%u", hex, (unsigned)ep);
 }
 
 /* >>> end host-test region: matter <<< */
@@ -552,9 +553,6 @@ static_assert((int)MB_SLOT_LAMP == (int)MATTER_DEV_LAMP && (int)MB_SLOT_SWITCH =
                   (int)MB_SLOT_OCCUPANCY == (int)MATTER_DEV_OCCUPANCY && (int)MB_SLOT_REMOTE == (int)MATTER_DEV_REMOTE,
               "matter_device_t.kind is the slot's");
 
-/* The capability bits a lamp's endpoint is built from. */
-#define MB_LAMP_BITS (ZBC_FEAT_LEVEL | ZBC_FEAT_COLOR_TEMP | ZBC_FEAT_ANY_COLOR)
-
 typedef struct {
     bool     used;
     uint8_t  kind;            /* mb_slot_kind_t */
@@ -573,12 +571,11 @@ typedef struct {
      * plain endpoint below its remote, `ep_handle`. */
     esp_matter_bridge::device_t *dev;
     endpoint_t *ep_handle;   /* SWITCH */
-    char     name[MB_LABEL_LEN];   /* ROOM: the group's name; the others: the label */
-    /* SWITCH: the name a controller is given for the button, as a Descriptor tag.
-     * The Descriptor reads its tags once, so this stays as the endpoint was made
-     * with, and a renamed button shows its new name after a restart. */
-    char     tag_label[MB_LABEL_LEN];
-    uint8_t  position;        /* SWITCH: which button of the remote, from 1 */
+    /* ROOM: the group's name; the others: the label. A SWITCH's is its Descriptor
+     * tag's label, which the Descriptor reads in place and only once - so it stays
+     * as the endpoint was made with, and a renamed button shows its new name after
+     * a restart. */
+    char     name[MB_LABEL_LEN];
     /* Written by the CHIP task, read by the bridge task: 32 bits so a read can
      * never be torn, compared with a signed difference so it survives the wrap. */
     volatile uint32_t quiet_until_ms;
@@ -586,7 +583,9 @@ typedef struct {
     mb_move_t move;          /* bridge task only */
     mb_on_hold_t on_hold;    /* bridge task only */
     matter_group_t diag;     /* bridge task only; copied out by refresh_status */
-    int8_t   reachable;      /* devices: Reachable as Matter has it, -1 unknown */
+    /* Devices: Reachable as the bridge last wrote it, the only writer; -1 until the
+     * first write. */
+    int8_t   reachable;
     /* Adaptive Lighting. Whether the light was built with the Mode Select cluster
      * is decided when it is created or resumed and never changes while it runs:
      * a cluster cannot be added to an enabled endpoint, and rebuilding the endpoint
@@ -641,12 +640,10 @@ typedef struct {
     uint8_t  ep;
     uint8_t  key;
     uint8_t  position;       /* SWITCH: which button of the remote, from 1 */
+    uint8_t  shape;          /* LAMP: mb_lamp_shape(), 0 for the others */
     uint16_t button_id;
-    uint16_t features;       /* LAMP */
     uint16_t ct_min, ct_max; /* LAMP, mireds, 0 unknown */
     char     label[MB_LABEL_LEN];
-    char     vendor[ZBC_STRING_LEN];
-    char     product[ZBC_STRING_LEN];
 } mb_want_t;
 
 static node_t           *s_node;
@@ -711,10 +708,10 @@ static mb_slot_t *slot_by_group(uint16_t group_id)
     return nullptr;
 }
 
-static mb_slot_t *slot_by_button(uint16_t button_id)
+static mb_slot_t *switch_by_button(uint16_t button_id)
 {
     for (auto &s : s_slots) {
-        if (s.used && (s.kind == MB_SLOT_SWITCH || s.kind == MB_SLOT_OCCUPANCY) && s.button_id == button_id) {
+        if (s.used && s.kind == MB_SLOT_SWITCH && s.button_id == button_id) {
             return &s;
         }
     }
@@ -769,19 +766,38 @@ static const zbc_group_t *group_in(const zbc_group_t *groups, size_t n, uint16_t
 
 /* ------------------------------------------------------------ persistence */
 
-static void load_map(const char *key, mb_map_t *map)
+/* A map exactly `size` bytes long, or false with nothing read. */
+static bool load_blob(const char *key, void *buf, size_t size)
 {
-    memset(map, 0, sizeof(*map));
     nvs_handle_t h;
     if (nvs_open_from_partition(MB_NVS_PART, MB_NVS_NS, NVS_READONLY, &h) != ESP_OK) {
+        return false;
+    }
+    size_t    len = size;
+    const bool ok = nvs_get_blob(h, key, buf, &len) == ESP_OK && len == size;
+    nvs_close(h);
+    return ok;
+}
+
+static void save_blob(const char *key, const void *buf, size_t size)
+{
+    nvs_handle_t h;
+    if (nvs_open_from_partition(MB_NVS_PART, MB_NVS_NS, NVS_READWRITE, &h) != ESP_OK) {
+        ESP_LOGW(TAG, "Could not open %s to save the map \"%s\"", MB_NVS_PART, key);
         return;
     }
-    size_t len = sizeof(*map);
-    if (nvs_get_blob(h, key, map, &len) != ESP_OK || len != sizeof(*map) ||
-        map->version != MB_MAP_VERSION || map->count > CONFIG_ZBC_MAX_GROUPS) {
-        memset(map, 0, sizeof(*map));
+    if (nvs_set_blob(h, key, buf, size) != ESP_OK || nvs_commit(h) != ESP_OK) {
+        ESP_LOGW(TAG, "Could not save the map \"%s\"", key);
     }
     nvs_close(h);
+}
+
+static void load_map(const char *key, mb_map_t *map)
+{
+    if (!load_blob(key, map, sizeof(*map)) || map->version != MB_MAP_VERSION ||
+        map->count > CONFIG_ZBC_MAX_GROUPS) {
+        memset(map, 0, sizeof(*map));
+    }
 }
 
 /* The group a stored endpoint stands for, 0 when this map does not have it. Group
@@ -807,30 +823,15 @@ static void save_map(const char *key, bool adaptive)
             map.count++;
         }
     }
-    nvs_handle_t h;
-    if (nvs_open_from_partition(MB_NVS_PART, MB_NVS_NS, NVS_READWRITE, &h) != ESP_OK) {
-        ESP_LOGW(TAG, "Could not open %s to save the group map", MB_NVS_PART);
-        return;
-    }
-    if (nvs_set_blob(h, key, &map, sizeof(map)) != ESP_OK || nvs_commit(h) != ESP_OK) {
-        ESP_LOGW(TAG, "Could not save the group map \"%s\"", key);
-    }
-    nvs_close(h);
+    save_blob(key, &map, sizeof(map));
 }
 
 static void load_dev_map(mb_dev_map_t *map)
 {
-    memset(map, 0, sizeof(*map));
-    nvs_handle_t h;
-    if (nvs_open_from_partition(MB_NVS_PART, MB_NVS_NS, NVS_READONLY, &h) != ESP_OK) {
-        return;
-    }
-    size_t len = sizeof(*map);
-    if (nvs_get_blob(h, MB_NVS_KEY_DEV, map, &len) != ESP_OK || len != sizeof(*map) ||
-        map->version != MB_DEV_MAP_VERSION || map->count > MB_DEV_SLOTS) {
+    if (!load_blob(MB_NVS_KEY_DEV, map, sizeof(*map)) || map->version != MB_DEV_MAP_VERSION ||
+        map->count > MB_DEV_SLOTS) {
         memset(map, 0, sizeof(*map));
     }
-    nvs_close(h);
 }
 
 /* The device endpoint a stored endpoint stands for, nullptr when the map does not
@@ -859,15 +860,7 @@ static void save_dev_map(void)
             e.endpoint_id = s.endpoint_id;
         }
     }
-    nvs_handle_t h;
-    if (nvs_open_from_partition(MB_NVS_PART, MB_NVS_NS, NVS_READWRITE, &h) != ESP_OK) {
-        ESP_LOGW(TAG, "Could not open %s to save the device map", MB_NVS_PART);
-        return;
-    }
-    if (nvs_set_blob(h, MB_NVS_KEY_DEV, &map, sizeof(map)) != ESP_OK || nvs_commit(h) != ESP_OK) {
-        ESP_LOGW(TAG, "Could not save the device map");
-    }
-    nvs_close(h);
+    save_blob(MB_NVS_KEY_DEV, &map, sizeof(map));
 }
 
 static void save_maps(void)
@@ -1362,8 +1355,8 @@ static void note_write(mb_slot_t &s, const char *what, esp_err_t err);
  * CurrentPosition moved before each one, as a switch's would. */
 static void button_event(const mb_intent_t &in)
 {
-    mb_slot_t *slot = slot_by_button(in.button_id);
-    if (!slot || slot->kind != MB_SLOT_SWITCH) {
+    mb_slot_t *slot = switch_by_button(in.button_id);
+    if (!slot) {
         return;
     }
     mb_sw_step_t steps[MB_SW_MAX_STEPS];
@@ -1531,18 +1524,18 @@ static void see_room_or_lamp(const mb_slot_t &s, mb_seen_t &g, uint32_t t)
 
 /* A device's side: whether it is there, and for a lamp its colour as it last
  * reported it, for a sensor what its rules make of it. */
-static void see_device(const mb_slot_t &s, mb_seen_t &g, uint32_t t, int64_t now_us)
+static void see_device(const mb_slot_t &s, mb_seen_t &g, uint32_t t)
 {
     if (!device_db_get(s.ieee, &s_dev)) {
         return;
     }
-    /* `online` is not kept across a restart: until the device is heard from, it
-     * is false. A lamp is read at every boot and answers within seconds; a remote
-     * or a sensor says nothing until it is used, and one not heard from since the
-     * restart is not known to be gone - only one heard and then marked gone is. */
-    const bool heard = s_dev.last_seen_us > 0;
-    const bool fresh = heard && now_us - s_dev.last_seen_us < MB_OFFLINE_AFTER_US;
-    g.reachable      = (int8_t)(s.kind == MB_SLOT_LAMP ? s_dev.online && fresh : s_dev.online || !heard);
+    /* A lamp is offline to Matter as it is to the web page. `online` is not kept
+     * across a restart: until the device is heard from, it is false. A lamp is
+     * read at every boot and answers within seconds; a remote or a sensor sleeps
+     * and says nothing until it is used, and one not heard from since the restart
+     * is not known to be gone - only one heard and then marked gone is. */
+    g.reachable = (int8_t)(s.kind == MB_SLOT_LAMP ? device_db_is_fresh(&s_dev, ZBC_OFFLINE_AFTER_US)
+                                                  : s_dev.online || s_dev.last_seen_us == 0);
     if (s.kind == MB_SLOT_OCCUPANCY) {
         bool occupied = false;
         g.occupied = buttons_sensor_state(s.button_id, &occupied, nullptr) ? (int8_t)occupied : -1;
@@ -1567,7 +1560,7 @@ static void see_device(const mb_slot_t &s, mb_seen_t &g, uint32_t t, int64_t now
  * unless it can only switch. */
 static bool slot_dims(const mb_slot_t &s)
 {
-    return s.kind == MB_SLOT_ROOM || (s.kind == MB_SLOT_LAMP && (s.built_shape & 0x0F) != MB_LAMP_ONOFF);
+    return s.kind == MB_SLOT_ROOM || (s.kind == MB_SLOT_LAMP && mb_shape_type(s.built_shape) != MB_LAMP_ONOFF);
 }
 
 /* OnOff and CurrentLevel, for a room and a lamp alike. */
@@ -1649,7 +1642,8 @@ static void sync_color(mb_slot_t &s, const mb_seen_t &g)
     if (!g.color_known || g.color_held) {
         return;
     }
-    const uint8_t type = s.built_shape & 0x0F;
+    const mb_lamp_t type = mb_shape_type(s.built_shape);
+    const bool      hs   = (s.built_shape & MB_SHAPE_HS) != 0;
     if (type != MB_LAMP_CT && type != MB_LAMP_COLOR) {
         return;
     }
@@ -1662,34 +1656,33 @@ static void sync_color(mb_slot_t &s, const mb_seen_t &g)
     if (type != MB_LAMP_COLOR) {
         return;
     }
-    if ((s.built_shape & 0x10) && g.hue >= 0 && g.hue <= 254 && g.sat >= 0 && g.sat <= 254) {
+    if (hs && g.hue >= 0 && g.hue <= 254 && g.sat >= 0 && g.sat <= 254) {
         put_u8(s, ColorControl::Id, CA::CurrentHue::Id, esp_matter_uint8((uint8_t)g.hue), "CurrentHue");
         put_u8(s, ColorControl::Id, CA::CurrentSaturation::Id, esp_matter_uint8((uint8_t)g.sat), "CurrentSaturation");
     }
     /* A lamp without hue and saturation was built without them, so a report of
      * that mode has nothing to show it with. */
-    if (g.mode >= 0 && g.mode <= 2 && (g.mode != 0 || (s.built_shape & 0x10))) {
+    if (g.mode >= 0 && g.mode <= 2 && (g.mode != 0 || hs)) {
         put_u8(s, ColorControl::Id, CA::ColorMode::Id, esp_matter_enum8((uint8_t)g.mode), "ColorMode");
         put_u8(s, ColorControl::Id, CA::EnhancedColorMode::Id, esp_matter_enum8((uint8_t)g.mode), "EnhancedColorMode");
     }
 }
 
 /* Whether a controller should show the device as there at all. Writing Reachable
- * is what raises the ReachableChanged event. */
+ * is what raises the ReachableChanged event. Nothing but this writes it, so the
+ * slot's copy is what Matter has, and is compared without a read. */
 static void sync_reachable(mb_slot_t &s, const mb_seen_t &g)
 {
-    esp_matter_attr_val_t v = esp_matter_invalid(nullptr);
-    const bool have = attribute::get_val(s.endpoint_id, BridgedDeviceBasicInformation::Id,
-                                         BridgedDeviceBasicInformation::Attributes::Reachable::Id, &v) == ESP_OK;
-    s.reachable = have ? (int8_t)v.val.b : -1;
-    if (g.reachable < 0 || (have && v.val.b == (bool)g.reachable)) {
+    if (g.reachable < 0 || s.reachable == g.reachable) {
         return;
     }
-    esp_matter_attr_val_t nv = esp_matter_bool(g.reachable != 0);
-    note_write(s, "Reachable",
-               attribute::update(s.endpoint_id, BridgedDeviceBasicInformation::Id,
-                                 BridgedDeviceBasicInformation::Attributes::Reachable::Id, &nv));
-    s.reachable = g.reachable;
+    esp_matter_attr_val_t nv  = esp_matter_bool(g.reachable != 0);
+    const esp_err_t       err = attribute::update(s.endpoint_id, BridgedDeviceBasicInformation::Id,
+                                                  BridgedDeviceBasicInformation::Attributes::Reachable::Id, &nv);
+    note_write(s, "Reachable", err);
+    if (err == ESP_OK) {
+        s.reachable = g.reachable;
+    }
 }
 
 /* A sensor's occupancy follows what its rules make of its reports - the same
@@ -1716,8 +1709,7 @@ static void sync_occupancy(mb_slot_t &s, const mb_seen_t &g)
  * lit, and the last commanded percentage; a lamp's the same for the one light. */
 static void sync_attributes(void)
 {
-    const uint32_t t   = now_ms();
-    const int64_t  now = esp_timer_get_time();
+    const uint32_t t = now_ms();
     static mb_seen_t g[MB_SLOTS];       /* bridge task only */
     for (size_t i = 0; i < MB_SLOTS; i++) {
         const mb_slot_t &s = s_slots[i];
@@ -1737,7 +1729,7 @@ static void sync_attributes(void)
         /* A button has no Bridged Device Basic Information of its own: whether
          * it is there is its remote's. */
         if (s.kind != MB_SLOT_ROOM && s.kind != MB_SLOT_SWITCH) {
-            see_device(s, g[i], t, now);
+            see_device(s, g[i], t);
         }
     }
 
@@ -1773,21 +1765,20 @@ static void sync_attributes(void)
 /* ------------------------------------------------------ groups -> endpoints */
 
 /* What an endpoint is built as: a group's light or its "<name> Adaptive" switch,
- * or a device endpoint's lamp, switch or sensor. */
+ * or a device endpoint as its slot kind says - a lamp, a sensor, or a remote,
+ * which is a bridged node and nothing else, its buttons below it. */
 typedef enum {
     MB_EP_LIGHT = 0,
     MB_EP_ADAPTIVE,
-    MB_EP_LAMP,
-    MB_EP_SWITCH,
-    MB_EP_OCCUPANCY,
-    MB_EP_REMOTE,        /* a bridged node and nothing else: its buttons are below it */
+    MB_EP_DEVICE,
 } mb_ep_kind_t;
 
 typedef struct {
     mb_ep_kind_t kind;
     bool         mode_select;    /* a light with the Adaptive Lighting Mode Select cluster */
-    uint16_t     features;       /* MB_EP_LAMP: the lamp's ZBC_FEAT_* */
-    uint16_t     ct_min, ct_max; /* MB_EP_LAMP: its range in mireds, 0 unknown */
+    uint8_t      slot;           /* MB_EP_DEVICE: mb_slot_kind_t */
+    uint8_t      shape;          /* a lamp: mb_lamp_shape() */
+    uint16_t     ct_min, ct_max; /* a lamp: its range in mireds, 0 unknown */
 } mb_ep_spec_t;
 
 /* What a colour-temperature range the lamp never reported is taken as: 6500 K to
@@ -1795,16 +1786,16 @@ typedef struct {
 #define MB_CT_MIN_DEFAULT 153
 #define MB_CT_MAX_DEFAULT 500
 
-static void ct_range(const mb_ep_spec_t &spec, uint16_t *lo, uint16_t *hi)
+static void ct_range(uint16_t min, uint16_t max, uint16_t *lo, uint16_t *hi)
 {
-    *lo = spec.ct_min ? spec.ct_min : MB_CT_MIN_DEFAULT;
-    *hi = spec.ct_max > *lo ? spec.ct_max : (MB_CT_MAX_DEFAULT > *lo ? MB_CT_MAX_DEFAULT : *lo + 1);
+    *lo = min ? min : MB_CT_MIN_DEFAULT;
+    *hi = max > *lo ? max : (MB_CT_MAX_DEFAULT > *lo ? MB_CT_MAX_DEFAULT : *lo + 1);
 }
 
 static void ct_config(cluster::color_control::feature::color_temperature::config_t &c, const mb_ep_spec_t &spec)
 {
     uint16_t lo, hi;
-    ct_range(spec, &lo, &hi);
+    ct_range(spec.ct_min, spec.ct_max, &lo, &hi);
     const uint16_t mid = 370 < lo ? lo : (370 > hi ? hi : 370);   /* 2700 K, where a lamp usually is */
     c.color_temp_physical_min_mireds        = lo;
     c.color_temp_physical_max_mireds        = hi;
@@ -1813,18 +1804,12 @@ static void ct_config(cluster::color_control::feature::color_temperature::config
     c.start_up_color_temperature_mireds     = nullable<uint16_t>(mid);
 }
 
-static mb_lamp_t spec_lamp(const mb_ep_spec_t &spec)
-{
-    return mb_lamp_type(spec.features & ZBC_FEAT_LEVEL, spec.features & ZBC_FEAT_COLOR_TEMP,
-                        spec.features & ZBC_FEAT_ANY_COLOR);
-}
-
 /* A lamp's light, by the most it can do. Hue and saturation are a feature of
  * their own on top of the Extended Color Light, added only for a lamp that has
  * them - an xy-only lamp would be told hues it converts badly or not at all. */
 static esp_err_t add_lamp(endpoint_t *ep, const mb_ep_spec_t &spec)
 {
-    switch (spec_lamp(spec)) {
+    switch (mb_shape_type(spec.shape)) {
     case MB_LAMP_ONOFF: {
         endpoint::on_off_light::config_t config;
         return endpoint::on_off_light::add(ep, &config);
@@ -1844,7 +1829,7 @@ static esp_err_t add_lamp(endpoint_t *ep, const mb_ep_spec_t &spec)
         endpoint::extended_color_light::config_t config;
         ct_config(config.color_control_color_temperature, spec);
         esp_err_t err = endpoint::extended_color_light::add(ep, &config);
-        if (err != ESP_OK || !(spec.features & ZBC_FEAT_COLOR_HS)) {
+        if (err != ESP_OK || !(spec.shape & MB_SHAPE_HS)) {
             return err;
         }
         cluster_t *cc = cluster::get(ep, ColorControl::Id);
@@ -1865,13 +1850,6 @@ static void switch_config(endpoint::generic_switch::config_t &config)
     config.switch_cluster.feature_flags = SF::momentary_switch::get_id() | SF::momentary_switch_release::get_id() |
                                           SF::momentary_switch_long_press::get_id() |
                                           SF::momentary_switch_multi_press::get_id();
-}
-
-static esp_err_t add_switch(endpoint_t *ep)
-{
-    endpoint::generic_switch::config_t config;
-    switch_config(config);
-    return endpoint::generic_switch::add(ep, &config);
 }
 
 /* A motion sensor. Without a sensing feature the cluster is left out silently, so
@@ -1931,25 +1909,17 @@ static void init_modes(void)
 static esp_err_t device_type_cb(endpoint_t *ep, uint32_t device_type_id, void *priv)
 {
     const mb_ep_spec_t *spec = static_cast<const mb_ep_spec_t *>(priv);
-    if (spec && spec->kind == MB_EP_LAMP) {
-        return add_lamp(ep, *spec);
+    if (spec && spec->kind == MB_EP_DEVICE) {
+        switch (spec->slot) {
+        case MB_SLOT_LAMP:      return add_lamp(ep, *spec);
+        case MB_SLOT_OCCUPANCY: return add_occupancy(ep);
+        case MB_SLOT_REMOTE:    return ESP_OK;   /* esp_matter_bridge made it a bridged node already */
+        default:                return ESP_ERR_INVALID_ARG;   /* a button is never a bridged device */
+        }
     }
-    const mb_ep_kind_t kind =
-        spec ? spec->kind
-             : device_type_id == ESP_MATTER_ON_OFF_PLUG_IN_UNIT_DEVICE_TYPE_ID ? MB_EP_ADAPTIVE
-             : device_type_id == ESP_MATTER_GENERIC_SWITCH_DEVICE_TYPE_ID     ? MB_EP_SWITCH
-             : device_type_id == ESP_MATTER_OCCUPANCY_SENSOR_DEVICE_TYPE_ID   ? MB_EP_OCCUPANCY
-             : device_type_id == ESP_MATTER_BRIDGED_NODE_DEVICE_TYPE_ID       ? MB_EP_REMOTE
-                                                                              : MB_EP_LIGHT;
-    if (kind == MB_EP_REMOTE) {
-        return ESP_OK;   /* esp_matter_bridge made it a bridged node already */
-    }
-    if (kind == MB_EP_SWITCH) {
-        return add_switch(ep);
-    }
-    if (kind == MB_EP_OCCUPANCY) {
-        return add_occupancy(ep);
-    }
+    const mb_ep_kind_t kind = spec ? spec->kind
+                                   : (device_type_id == ESP_MATTER_ON_OFF_PLUG_IN_UNIT_DEVICE_TYPE_ID ? MB_EP_ADAPTIVE
+                                                                                                        : MB_EP_LIGHT);
     if (kind == MB_EP_ADAPTIVE) {
         endpoint::on_off_plug_in_unit::config_t config;
         return endpoint::on_off_plug_in_unit::add(ep, &config);
@@ -2048,6 +2018,25 @@ static void add_identity(endpoint_t *ep, uint16_t group_id, const char *name, bo
     set_unique_id(c, uid);
 }
 
+/* A slot of `kind` on `endpoint_id`, its diagnostics all "unknown" until the first
+ * pass reads them. */
+static void slot_init(mb_slot_t *slot, uint8_t kind, uint16_t endpoint_id, const char *name)
+{
+    memset(slot, 0, sizeof(*slot));
+    slot->used        = true;
+    slot->kind        = kind;
+    slot->endpoint_id = endpoint_id;
+    strlcpy(slot->name, name, sizeof(slot->name));
+    slot->diag.endpoint_id  = endpoint_id;
+    slot->diag.group_on     = -1;
+    slot->diag.group_pct    = -1;
+    slot->diag.matter_on    = -1;
+    slot->diag.matter_level = -1;
+    slot->diag.al_active    = -1;
+    slot->diag.al_matter_on = -1;
+    slot->diag.matter_mode  = -1;
+}
+
 static bool adopt(mb_slot_t *slot, esp_matter_bridge::device_t *dev, uint16_t group_id, const char *name,
                   bool mode_select)
 {
@@ -2058,22 +2047,11 @@ static bool adopt(mb_slot_t *slot, esp_matter_bridge::device_t *dev, uint16_t gr
         esp_matter_bridge::remove_device(dev);
         return false;
     }
-    memset(slot, 0, sizeof(*slot));
-    slot->used        = true;
-    slot->group_id    = group_id;
-    slot->endpoint_id = endpoint::get_id(dev->endpoint);
-    slot->dev         = dev;
-    strlcpy(slot->name, name, sizeof(slot->name));
-    slot->mode_select_live  = mode_select;
-    slot->diag.group_id     = group_id;
-    slot->diag.endpoint_id  = slot->endpoint_id;
-    slot->diag.group_on     = -1;
-    slot->diag.group_pct    = -1;
-    slot->diag.matter_on    = -1;
-    slot->diag.matter_level = -1;
-    slot->diag.al_active    = -1;
-    slot->diag.al_matter_on = -1;
-    slot->diag.matter_mode  = -1;
+    slot_init(slot, MB_SLOT_ROOM, endpoint::get_id(dev->endpoint), name);
+    slot->group_id         = group_id;
+    slot->dev              = dev;
+    slot->mode_select_live = mode_select;
+    slot->diag.group_id    = group_id;
     ESP_LOGI(TAG, "Group %u \"%s\" is Matter endpoint %u%s", group_id, name, slot->endpoint_id,
              mode_select ? ", with an Adaptive Lighting Mode Select" : "");
     return true;
@@ -2145,12 +2123,10 @@ static size_t want_devices(uint8_t *skipped)
         mb_want_t w = {};
         memcpy(w.ieee, list[i].ieee, ZBC_IEEE_LEN);
         w.ep = list[i].ep;
-        strlcpy(w.vendor, s_dev.manufacturer, sizeof(w.vendor));
-        strlcpy(w.product, s_dev.model, sizeof(w.product));
 
-        buttons_zb_ref_t refs[CONFIG_ZBC_MAX_BUTTONS];
+        zbc_button_ref_t refs[CONFIG_ZBC_MAX_BUTTONS];
         if (e->features & ZBC_FEAT_MOTION) {
-            const size_t nr = buttons_zigbee_list(w.ieee, w.ep, refs, CONFIG_ZBC_MAX_BUTTONS);
+            const size_t nr = button_db_list_on(w.ieee, w.ep, refs, CONFIG_ZBC_MAX_BUTTONS);
             for (size_t k = 0; k < nr; k++) {
                 if (refs[k].src == ZBC_BTN_SRC_SENSOR) {
                     w.button_id = refs[k].id;
@@ -2170,20 +2146,14 @@ static size_t want_devices(uint8_t *skipped)
              * switch per button, in the order the buttons were set up: the page
              * sets a known remote up top to bottom (remotes.ts), which its key
              * numbers are not - a Hue dimmer's run On, Down, Up, Off. Apple Home
-             * numbers a remote's buttons and shows no names, so this order is
-             * what tells them apart there. */
-            const size_t nr = buttons_zigbee_list(w.ieee, w.ep, refs, CONFIG_ZBC_MAX_BUTTONS);
-            for (size_t a = 1; a < nr; a++) {
-                for (size_t b = a; b > 0 && refs[b - 1].id > refs[b].id; b--) {
-                    const buttons_zb_ref_t x = refs[b];
-                    refs[b]                  = refs[b - 1];
-                    refs[b - 1]              = x;
-                }
-            }
-            /* The remote first, as the accessory its buttons go under: a want
+             * numbers a remote's buttons and shows no names, so this order -
+             * button_db_list_on's - is what tells them apart there.
+             *
+             * The remote first, as the accessory its buttons go under: a want
              * list is made in order, and a button is made only below a remote
              * that has its endpoint. A remote with no button set up is nothing. */
-            uint8_t position = 0;
+            const size_t nr       = button_db_list_on(w.ieee, w.ep, refs, CONFIG_ZBC_MAX_BUTTONS);
+            uint8_t      position = 0;
             for (size_t k = 0; k < nr; k++) {
                 if (refs[k].src != ZBC_BTN_SRC_ZIGBEE) {
                     continue;
@@ -2205,7 +2175,8 @@ static size_t want_devices(uint8_t *skipped)
             }
         } else {
             w.kind     = MB_SLOT_LAMP;
-            w.features = e->features & MB_LAMP_BITS;
+            w.shape    = mb_lamp_shape(e->features & ZBC_FEAT_LEVEL, e->features & ZBC_FEAT_COLOR_TEMP,
+                                       e->features & ZBC_FEAT_ANY_COLOR, e->features & ZBC_FEAT_COLOR_HS);
             w.ct_min   = e->ct_min_mireds > 0 && e->ct_min_mireds < 0xFFFF ? (uint16_t)e->ct_min_mireds : 0;
             w.ct_max   = e->ct_max_mireds > 0 && e->ct_max_mireds < 0xFFFF ? (uint16_t)e->ct_max_mireds : 0;
             if (lamp_endpoints(s_dev) > 1) {
@@ -2234,18 +2205,16 @@ static const mb_want_t *want_find(size_t n, uint8_t kind, const uint8_t ieee[ZBC
 static mb_ep_spec_t want_spec(const mb_want_t &w)
 {
     mb_ep_spec_t spec = {};
-    spec.kind     = w.kind == MB_SLOT_LAMP     ? MB_EP_LAMP
-                  : w.kind == MB_SLOT_REMOTE   ? MB_EP_REMOTE
-                  : w.kind == MB_SLOT_SWITCH   ? MB_EP_SWITCH
-                                               : MB_EP_OCCUPANCY;
-    spec.features = w.features;
-    spec.ct_min   = w.ct_min;
-    spec.ct_max   = w.ct_max;
+    spec.kind   = MB_EP_DEVICE;
+    spec.slot   = w.kind;
+    spec.shape  = w.shape;
+    spec.ct_min = w.ct_min;
+    spec.ct_max = w.ct_max;
     return spec;
 }
 
-/* The device type esp_matter_bridge stores for it. Only a fallback: what an
- * endpoint is built as is the spec's (device_type_cb). */
+/* The device type esp_matter_bridge stores for it, kept true to what it is. What
+ * the endpoint is built as is the spec's (device_type_cb). */
 static uint32_t want_device_type(const mb_want_t &w)
 {
     if (w.kind == MB_SLOT_REMOTE) {
@@ -2254,18 +2223,12 @@ static uint32_t want_device_type(const mb_want_t &w)
     if (w.kind == MB_SLOT_OCCUPANCY) {
         return ESP_MATTER_OCCUPANCY_SENSOR_DEVICE_TYPE_ID;
     }
-    switch (spec_lamp(want_spec(w))) {
+    switch (mb_shape_type(w.shape)) {
     case MB_LAMP_ONOFF:    return ESP_MATTER_ON_OFF_LIGHT_DEVICE_TYPE_ID;
     case MB_LAMP_DIMMABLE: return ESP_MATTER_DIMMABLE_LIGHT_DEVICE_TYPE_ID;
     case MB_LAMP_CT:       return ESP_MATTER_COLOR_TEMPERATURE_LIGHT_DEVICE_TYPE_ID;
     default:               return ESP_MATTER_EXTENDED_COLOR_LIGHT_DEVICE_TYPE_ID;
     }
-}
-
-static uint8_t want_shape(const mb_want_t &w)
-{
-    return mb_lamp_shape(w.features & ZBC_FEAT_LEVEL, w.features & ZBC_FEAT_COLOR_TEMP,
-                         w.features & ZBC_FEAT_ANY_COLOR, w.features & ZBC_FEAT_COLOR_HS);
 }
 
 static void set_label(uint16_t endpoint_id, const char *label)
@@ -2278,7 +2241,8 @@ static void set_label(uint16_t endpoint_id, const char *label)
 }
 
 /* The label is what a controller shows; the UniqueID what tells it the endpoint is
- * the one it saw before; vendor and product are the device's own. */
+ * the one it saw before; vendor and product are the device's own, read here once
+ * rather than carried in every want. */
 static void add_device_identity(endpoint_t *ep, const mb_want_t &w)
 {
     namespace BA = cluster::bridged_device_basic_information::attribute;
@@ -2290,14 +2254,17 @@ static void add_device_identity(endpoint_t *ep, const mb_want_t &w)
     strlcpy(buf, w.label, sizeof(buf));
     BA::create_node_label(c, buf, strlen(buf));
     char uid[33];
-    mb_device_uid(uid, sizeof(uid), w.ieee, w.ep, -1);
+    mb_device_uid(uid, sizeof(uid), w.ieee, w.ep);
     set_unique_id(c, uid);
-    if (w.vendor[0]) {
-        strlcpy(buf, w.vendor, sizeof(buf));
+    if (!device_db_get(w.ieee, &s_dev)) {
+        return;
+    }
+    if (s_dev.manufacturer[0]) {
+        strlcpy(buf, s_dev.manufacturer, sizeof(buf));
         BA::create_vendor_name(c, buf, strlen(buf));
     }
-    if (w.product[0]) {
-        strlcpy(buf, w.product, sizeof(buf));
+    if (s_dev.model[0]) {
+        strlcpy(buf, s_dev.model, sizeof(buf));
         BA::create_product_name(c, buf, strlen(buf));
     }
 }
@@ -2313,28 +2280,14 @@ static const char *slot_kind_name(uint8_t kind)
 /* A slot as a want describes it, on endpoint `ep`. */
 static void fill_slot(mb_slot_t *slot, const mb_want_t &w, endpoint_t *ep)
 {
-    memset(slot, 0, sizeof(*slot));
-    slot->used        = true;
-    slot->kind        = w.kind;
+    slot_init(slot, w.kind, endpoint::get_id(ep), w.label);
     memcpy(slot->ieee, w.ieee, ZBC_IEEE_LEN);
     slot->ep          = w.ep;
     slot->key         = w.key;
     slot->button_id   = w.button_id;
-    slot->built_shape = w.kind == MB_SLOT_LAMP ? want_shape(w) : 0;
-    const mb_ep_spec_t spec = want_spec(w);
-    ct_range(spec, &slot->ct_min, &slot->ct_max);
-    slot->position    = w.position;
-    slot->endpoint_id = endpoint::get_id(ep);
-    strlcpy(slot->name, w.label, sizeof(slot->name));
-    slot->reachable         = -1;
-    slot->diag.endpoint_id  = slot->endpoint_id;
-    slot->diag.group_on     = -1;
-    slot->diag.group_pct    = -1;
-    slot->diag.matter_on    = -1;
-    slot->diag.matter_level = -1;
-    slot->diag.al_active    = -1;
-    slot->diag.al_matter_on = -1;
-    slot->diag.matter_mode  = -1;
+    slot->built_shape = w.shape;
+    ct_range(w.ct_min, w.ct_max, &slot->ct_min, &slot->ct_max);
+    slot->reachable = -1;
     char ieee[19];
     zbc_ieee_to_str(w.ieee, ieee);
     ESP_LOGI(TAG, "\"%s\" (%s ep %u%s) is Matter endpoint %u, a %s", w.label, ieee, w.ep,
@@ -2396,11 +2349,10 @@ static bool adopt_switch(mb_slot_t *slot, endpoint_t *ep, const mb_want_t &w, co
     }
     fill_slot(slot, w, ep);
     slot->ep_handle = ep;
-    strlcpy(slot->tag_label, w.label, sizeof(slot->tag_label));
     chip::app::DataModel::Provider::SemanticTag tag;
     tag.namespaceID = MB_NS_COMMON_NUMBER;
     tag.tag         = w.position;
-    tag.label.SetValue(chip::app::DataModel::MakeNullable(chip::CharSpan::fromCharString(slot->tag_label)));
+    tag.label.SetValue(chip::app::DataModel::MakeNullable(chip::CharSpan::fromCharString(slot->name)));
     endpoint::set_semantic_tags(ep, &tag, 1);
     if (endpoint::enable(ep) != ESP_OK) {
         ESP_LOGE(TAG, "Could not enable the endpoint for \"%s\"", w.label);
@@ -2454,15 +2406,13 @@ static bool reconcile_devices(size_t wanted)
             continue;
         }
         s.button_id = w->button_id;
-        if (strcmp(s.name, w->label) != 0) {
+        /* A button's name is its tag's label, which stays until a restart. */
+        if (s.kind != MB_SLOT_SWITCH && strcmp(s.name, w->label) != 0) {
             strlcpy(s.name, w->label, sizeof(s.name));
-            /* A button's name is its tag, which stays until a restart. */
-            if (s.kind != MB_SLOT_SWITCH) {
-                set_label(s.endpoint_id, s.name);
-            }
+            set_label(s.endpoint_id, s.name);
         }
         if (s.kind == MB_SLOT_LAMP) {
-            const bool rebuild = want_shape(*w) != s.built_shape;
+            const bool rebuild = w->shape != s.built_shape;
             if (rebuild && !s.rebuild) {
                 ESP_LOGI(TAG, "\"%s\" can do something else now; its Matter light is rebuilt at the next restart",
                          s.name);
@@ -2685,16 +2635,11 @@ static void reconcile(void)
             changed = true;
         } else if (strcmp(slot->name, g->name) != 0) {
             strlcpy(slot->name, g->name, sizeof(slot->name));
-            char label[33];
-            make_label(label, sizeof(label), g->name, false);
-            esp_matter_attr_val_t v = esp_matter_char_str(label, strlen(label));
-            attribute::update(slot->endpoint_id, BridgedDeviceBasicInformation::Id,
-                              BridgedDeviceBasicInformation::Attributes::NodeLabel::Id, &v);
+            set_label(slot->endpoint_id, g->name);
             if (slot->al_endpoint_id) {
+                char label[MB_LABEL_LEN];
                 make_label(label, sizeof(label), g->name, true);
-                v = esp_matter_char_str(label, strlen(label));
-                attribute::update(slot->al_endpoint_id, BridgedDeviceBasicInformation::Id,
-                                  BridgedDeviceBasicInformation::Attributes::NodeLabel::Id, &v);
+                set_label(slot->al_endpoint_id, label);
             }
         }
 
@@ -2848,45 +2793,16 @@ static void refresh_status(void)
             f.live_after_s = -1;
         }
     }
+    /* The rooms before the status lock, as al_db_expose takes a lock of its own. */
     uint8_t        groups = 0;
     matter_group_t diag[CONFIG_ZBC_MAX_GROUPS] = {};
-    uint8_t        devices = 0;
-    static matter_device_t ddiag[MB_DEV_SLOTS];   /* bridge task only */
-    memset(ddiag, 0, sizeof(ddiag));
     for (const auto &s : s_slots) {
-        if (!s.used) {
-            continue;
-        }
-        if (s.kind == MB_SLOT_ROOM) {
-            if (groups < CONFIG_ZBC_MAX_GROUPS) {
-                matter_group_t &d  = diag[groups++];
-                d                  = s.diag;
-                d.expose           = al_db_expose(s.group_id);
-                d.mode_select_live = s.mode_select_live;
-                d.al_endpoint      = s.al_endpoint_id;
-            }
-            continue;
-        }
-        if (devices < MB_DEV_SLOTS) {
-            matter_device_t &d = ddiag[devices++];
-            memcpy(d.ieee, s.ieee, ZBC_IEEE_LEN);
-            d.ep           = s.ep;
-            d.key          = s.key;
-            d.kind         = s.kind;
-            d.endpoint_id  = s.endpoint_id;
-            d.button_id    = s.button_id;
-            d.reachable    = s.reachable;
-            if (s.kind == MB_SLOT_SWITCH) {
-                const mb_slot_t *remote = remote_of(s.ieee, s.ep);
-                d.parent_id = remote ? remote->endpoint_id : 0;
-                d.reachable = remote ? remote->reachable : -1;
-            }
-            d.matter_on    = s.diag.matter_on;
-            d.matter_level = s.diag.matter_level;
-            d.held         = s.diag.held;
-            d.writes       = s.diag.writes;
-            d.last_err     = s.diag.last_err;
-            d.rebuild      = s.rebuild;
+        if (s.used && s.kind == MB_SLOT_ROOM && groups < CONFIG_ZBC_MAX_GROUPS) {
+            matter_group_t &d  = diag[groups++];
+            d                  = s.diag;
+            d.expose           = al_db_expose(s.group_id);
+            d.mode_select_live = s.mode_select_live;
+            d.al_endpoint      = s.al_endpoint_id;
         }
     }
     const int32_t up_s = (int32_t)(esp_timer_get_time() / 1000000);
@@ -2909,10 +2825,36 @@ static void refresh_status(void)
     s_status.window_open   = window;
     s_status.groups        = groups;
     memcpy(s_status.group_list, diag, sizeof(diag));
-    s_status.devices         = devices;
-    s_status.devices_skipped = s_skipped;
+    /* The devices straight into the status, as nothing here takes a lock. */
+    uint8_t devices = 0;
+    memset(s_status.device_list, 0, sizeof(s_status.device_list));
+    for (const auto &s : s_slots) {
+        if (!s.used || s.kind == MB_SLOT_ROOM || devices >= MB_DEV_SLOTS) {
+            continue;
+        }
+        matter_device_t &d = s_status.device_list[devices++];
+        memcpy(d.ieee, s.ieee, ZBC_IEEE_LEN);
+        d.ep          = s.ep;
+        d.key         = s.key;
+        d.kind        = s.kind;
+        d.endpoint_id = s.endpoint_id;
+        d.button_id   = s.button_id;
+        d.reachable   = s.reachable;
+        if (s.kind == MB_SLOT_SWITCH) {
+            const mb_slot_t *remote = remote_of(s.ieee, s.ep);
+            d.parent_id = remote ? remote->endpoint_id : 0;
+            d.reachable = remote ? remote->reachable : -1;
+        }
+        d.matter_on    = s.diag.matter_on;
+        d.matter_level = s.diag.matter_level;
+        d.held         = s.diag.held;
+        d.writes       = s.diag.writes;
+        d.last_err     = s.diag.last_err;
+        d.rebuild      = s.rebuild;
+    }
+    s_status.devices            = devices;
+    s_status.devices_skipped    = s_skipped;
     s_status.devices_heap_short = s_heap_short;
-    memcpy(s_status.device_list, ddiag, sizeof(ddiag));
     xSemaphoreGive(s_status_mtx);
 }
 
@@ -3135,16 +3077,16 @@ void matter_bridge_get_status(matter_status_t *out)
 
 void matter_bridge_button_event(uint16_t button_id, uint8_t emit)
 {
-    /* Only what a switch reports; the rest would only fill the queue. */
-    if (!s_queue || (emit != ZBC_EMIT_SHORT && emit != ZBC_EMIT_DOUBLE && emit != ZBC_EMIT_LONG &&
-                     emit != ZBC_EMIT_LONG_RELEASE)) {
+    /* Only what a switch reports (mb_switch_events); the rest would only fill the
+     * queue. */
+    mb_sw_step_t steps[MB_SW_MAX_STEPS];
+    if (!s_queue || mb_switch_events(emit, steps) == 0) {
         return;
     }
     mb_intent_t in = {};
     in.kind        = MB_SWITCH;
     in.button_id   = button_id;
     in.emit        = emit;
-    in.at_us       = esp_timer_get_time();
     xQueueSend(s_queue, &in, 0);
 }
 

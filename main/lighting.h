@@ -59,10 +59,11 @@ esp_err_t lighting_set_brightness(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep,
  * maps to zero would skip the Off it needs to send next time. */
 esp_err_t lighting_set_onoff(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, zb_onoff_cmd_t cmd);
 
-/* The device is gone: what was last told to each of its endpoints, and the
- * level each comes back at, go with it. A wired light's or a Matter lamp's
- * made-up address is given out again, and the next light to get it must not
- * start from this one's. */
+/* The device is gone: its rooms, its curves and Matter (mexp_db) let go of it, so
+ * it is never commanded again and leaves nothing behind for whatever joins next,
+ * and what was last told to each of its endpoints, and the level each comes back
+ * at, go with it. A wired light's or a Matter lamp's made-up address is given out
+ * again, and the next light to get it must not start from this one's. */
 void      lighting_forget_device(const uint8_t ieee[ZBC_IEEE_LEN]);
 /* A Light Node no longer has this light: its rooms, its curves and Matter (mexp_db)
  * let go of it, and what it was last told goes, for the light that gets its

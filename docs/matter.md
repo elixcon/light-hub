@@ -79,7 +79,7 @@ remote's button under 1 KB, a light 4 to 10 KB, and a colour light the most. Con
 plenty on top while they pair or subscribe. So the coordinator shares nothing new while it has less
 than 48 KB free, and a few lights are about what a coordinator with several rooms has room for.
 Beyond that there is room for 12 shared endpoints in all, a light or a sensor taking one and a
-remote one per button (`CONFIG_ZBC_MAX_MATTER_EXPOSED`). The Matter page says when something asked
+remote one for itself and one per button (`CONFIG_ZBC_MAX_MATTER_EXPOSED`). The Matter page says when something asked
 for is not shared, and why. A light that turns out to be able to do more than it could when it was shared, colour
 discovered later for instance, gets it at the next restart, under the same identity.
 
