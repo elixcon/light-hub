@@ -45,6 +45,28 @@ CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=y
 CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=16
 
 #
+# Wi-Fi code in IRAM
+#
+# On the C6 IRAM is the same SRAM the heap comes from, and the Wi-Fi driver's
+# speed options kept 48 KB of it as code. The board moves little over Wi-Fi: a
+# page, polls of a few KB, Matter's small messages. Updates are written by the
+# updater, which keeps its own settings. Measured on the dev board (2026-11-07,
+# modem sleep on): 45 KB more heap free, the 118 KB page in 0.37-0.49 s instead
+# of 0.12-0.40. Streamed responses took 70-80 ms longer too, until json_stream
+# wrote each chunk in one piece and httpd's sockets went TCP_NODELAY; since then
+# an unchanged /api/state poll and a full one are as quick as before or quicker.
+# A flood of datagrams to a closed port made the board unreachable for its whole
+# length until icmp_limit.c capped the replies. SLP_IRAM_OPT only shortens the
+# wake for each beacon in modem sleep, which saves current on a board that runs
+# on mains power; it also selected the light-sleep functions into IRAM
+# (CONFIG_PM_SLEEP_FUNC_IN_IRAM, CONFIG_PM_SLP_IRAM_OPT), and light sleep is off
+# (CONFIG_PM_ENABLE).
+CONFIG_ESP_WIFI_IRAM_OPT=n
+CONFIG_ESP_WIFI_EXTRA_IRAM_OPT=n
+CONFIG_ESP_WIFI_RX_IRAM_OPT=n
+CONFIG_ESP_WIFI_SLP_IRAM_OPT=n
+
+#
 # HTTP server
 #
 CONFIG_HTTPD_MAX_URI_LEN=256
@@ -85,9 +107,14 @@ CONFIG_MAX_GROUP_KEYS_PER_FABRIC=4
 # beside the ones Apple Home's traffic to the bridge holds.
 CONFIG_MAX_EXCHANGE_CONTEXTS=16
 # Root + aggregator + two per group (CONFIG_ZBC_MAX_GROUPS, 8: the light and its
-# "<name> Adaptive" switch, when the group exposes Adaptive Lighting that way) + two
-# spare. matter_bridge.cpp refuses to build if this falls behind the group count.
-CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_COUNT=20
+# "<name> Adaptive" switch, when the group exposes Adaptive Lighting that way) + one
+# per device endpoint shown on its own (CONFIG_ZBC_MAX_MATTER_EXPOSED, 24) + two
+# spare = 44. matter_bridge.cpp refuses to build if this falls behind those counts.
+# Never lower it: esp_matter_bridge stores its endpoint list at this size, a shorter
+# buffer cannot read it back, and every room would come back on a new id - a new
+# light to every controller. Raising it is safe (see resume_bridged). 20 until
+# v0.3.0, 32 until 2026-11-07; each one more costs about 450 bytes of static RAM.
+CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_COUNT=44
 # One Mode Select per group's light, for groups exposing Adaptive Lighting as one.
 CONFIG_ESP_MATTER_MODE_SELECT_CLUSTER_ENDPOINT_COUNT=8
 # Everything Matter keeps goes in its own partition (see partitions.csv), so it
@@ -101,7 +128,8 @@ CONFIG_CHIP_KVS_NAMESPACE_PARTITION_LABEL="nvs_matter"
 # Clusters no light bridge uses, compiled out for flash. This is Espressif's own
 # list from examples/light (esp-matter 1.6.1), less Bridged Device Basic
 # Information - which carries each group's name and is the one cluster a bridge
-# cannot do without.
+# cannot do without - and less Occupancy Sensing and Switch, which a motion sensor
+# and a remote's buttons shown on their own are (main/mexp_db.h).
 CONFIG_SUPPORT_ACCOUNT_LOGIN_CLUSTER=n
 CONFIG_SUPPORT_ACTIONS_CLUSTER=n
 CONFIG_SUPPORT_ACTIVATED_CARBON_FILTER_MONITORING_CLUSTER=n
@@ -168,7 +196,6 @@ CONFIG_SUPPORT_MICROWAVE_OVEN_MODE_CLUSTER=n
 CONFIG_SUPPORT_MODE_SELECT_CLUSTER=y
 CONFIG_SUPPORT_NETWORK_IDENTITY_MANAGEMENT_CLUSTER=n
 CONFIG_SUPPORT_NITROGEN_DIOXIDE_CONCENTRATION_MEASUREMENT_CLUSTER=n
-CONFIG_SUPPORT_OCCUPANCY_SENSING_CLUSTER=n
 CONFIG_SUPPORT_OPERATIONAL_STATE_CLUSTER=n
 CONFIG_SUPPORT_OPERATIONAL_STATE_OVEN_CLUSTER=n
 CONFIG_SUPPORT_OPERATIONAL_STATE_RVC_CLUSTER=n
@@ -195,7 +222,6 @@ CONFIG_SUPPORT_SERVICE_AREA_CLUSTER=n
 CONFIG_SUPPORT_SMOKE_CO_ALARM_CLUSTER=n
 CONFIG_SUPPORT_SOFTWARE_DIAGNOSTICS_CLUSTER=n
 CONFIG_SUPPORT_SOIL_MEASUREMENT_CLUSTER=n
-CONFIG_SUPPORT_SWITCH_CLUSTER=n
 CONFIG_SUPPORT_TARGET_NAVIGATOR_CLUSTER=n
 CONFIG_SUPPORT_TEMPERATURE_CONTROL_CLUSTER=n
 CONFIG_SUPPORT_TEMPERATURE_MEASUREMENT_CLUSTER=n

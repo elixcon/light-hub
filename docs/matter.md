@@ -44,6 +44,45 @@ stay in their rooms, curves and buttons, marked *needs pairing again*.
 `GET /api/matter` lists the last commands each controller sent, which is where to look when two
 controllers behave differently with the same light.
 
+### Devices on their own
+
+A Zigbee light, remote or motion sensor can also be shared by itself, beside the rooms. Turn on
+*Show in Matter on its own* on its page. It is off unless you turn it on, and the accessory appears
+in the controllers, or disappears from them, within a few seconds.
+
+- **A light** becomes the kind of Matter light it can be: on/off, dimmable, colour temperature or
+  full colour, from the clusters the lamp has. Commands go through the same path as the light's own
+  page, so its response curves and the fade time still apply. A colour set from a controller stays
+  until the next brightness change. On a lamp with a warmth curve, that change sets the colour
+  from the curve again. A light in a room is shared both ways: the room still switches all its
+  lights, and the light alone switches only itself.
+- **A remote** becomes one accessory, with a switch inside it for each button that is set up on
+  its page. Buttons that are not set up are not shared. A controller can run automations on a
+  single, a double and a long press of each. Apple Home numbers the buttons (Button 1, Button 2,
+  and so on) in the order they were set up here, which for a known remote is top to bottom. Home
+  Assistant gets each button's name from here; a renamed button keeps its old name there until
+  the coordinator restarts. To tell a single press from a double, every single press of a shared remote then waits
+  300 ms, its own rules on the coordinator included, as a button with a double-press rule already
+  does. A triple press is not reported. The remote's own rules keep running.
+- **A motion sensor** becomes an occupancy sensor. It has to be set up on its page first, because
+  its no-motion time is what decides when it clears, for the controllers as for its own rules.
+
+A device the coordinator has marked as gone shows as *No Response* in the controllers. For a light,
+that also happens after ten minutes without a word from it. A remote or a sensor sleeps between
+presses, so silence alone does not mark it.
+
+A colour change that sweeps (a controller's colour loop, or a held colour-temperature button) is
+not carried out. The light keeps its colour, and the controller's slider goes back to it.
+
+What runs out first is memory. Every shared endpoint takes some for as long as it is shared: a
+remote's button under 1 KB, a light 4 to 10 KB, and a colour light the most. Controllers need
+plenty on top while they pair or subscribe. So the coordinator shares nothing new while it has less
+than 48 KB free, and a few lights are about what a coordinator with several rooms has room for.
+Beyond that there is room for 24 shared endpoints in all, a light or a sensor taking one and a
+remote one for itself and one per button (`CONFIG_ZBC_MAX_MATTER_EXPOSED`). The Matter page says when something asked
+for is not shared, and why. A light that turns out to be able to do more than it could when it was shared, colour
+discovered later for instance, gets it at the next restart, under the same identity.
+
 ## Matter lamps
 
 The coordinator is also a Matter controller. A Matter lamp you already have in Apple Home, Home

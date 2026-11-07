@@ -19,6 +19,7 @@
 #include "device_db.h"
 #include "group_db.h"
 #include "light_db.h"
+#include "mexp_db.h"
 #include "mlight_db.h"
 #include "settings.h"
 #include "zb_coordinator.h"
@@ -94,6 +95,7 @@ static const cb_entry_t CB_ENTRIES[] = {
     { "mlights",     CB_BLOB, CB_SECT_TABLES },
     { "adaptive",    CB_BLOB, CB_SECT_TABLES },
     { "al_days",     CB_BLOB, CB_SECT_TABLES },
+    { "matter_dev",  CB_BLOB, CB_SECT_TABLES },
 };
 #define CB_ENTRY_COUNT (sizeof(CB_ENTRIES) / sizeof(CB_ENTRIES[0]))
 
@@ -206,6 +208,9 @@ static bool blob_ok(const char *key, const void *blob, size_t len)
     if (strcmp(key, "al_days") == 0) {
         return al_db_days_blob_ok(blob, len);
     }
+    if (strcmp(key, "matter_dev") == 0) {
+        return mexp_db_blob_ok(blob, len);
+    }
     if (strcmp(key, "auth") == 0) {
         return auth_blob_ok(blob, len);
     }
@@ -219,7 +224,7 @@ static const char *blob_what(const char *key)
         { "devices", "devices" },   { "groups", "rooms" },          { "curves", "curves" },
         { "buttons", "buttons" },   { "lights", "wired lights" },   { "mlights", "Matter lamps" },
         { "adaptive", "Adaptive Lighting settings" }, { "al_days", "rooms' Adaptive Lighting days" },
-        { "auth", "access keys" },
+        { "matter_dev", "devices shown in Matter" }, { "auth", "access keys" },
     };
     for (size_t i = 0; i < sizeof(NAMES) / sizeof(NAMES[0]); i++) {
         if (strcmp(NAMES[i].key, key) == 0) {
@@ -230,21 +235,23 @@ static const char *blob_what(const char *key)
 }
 
 /* The largest blob a table of this build can hold, and so the longest line a
- * file from it has: the registry at 32 devices is ~8 KB. Anything longer is
- * from a build with bigger tables, which this one would truncate. */
+ * file from it has: the old device table at 32 devices is ~8 KB. Anything longer
+ * is from a build with bigger tables, which this one would truncate. */
 static size_t blob_max(void)
 {
     size_t m = 4096;
 #define CB_TABLE(rec, n) do { const size_t s = 8 + (size_t)(n) * sizeof(rec); if (s > m) { m = s; } } while (0)
-    CB_TABLE(zbc_device_t, CONFIG_ZBC_MAX_DEVICES);
     CB_TABLE(zbc_group_t, CONFIG_ZBC_MAX_GROUPS);
     CB_TABLE(zbc_curveset_t, CONFIG_ZBC_MAX_CURVES);
     CB_TABLE(zbc_light_t, CONFIG_ZBC_MAX_LIGHTS);
     CB_TABLE(zbc_mlight_t, CONFIG_ZBC_MAX_MATTER_LIGHTS);
 #undef CB_TABLE
-    /* Its records are not all one size: the table says. */
+    /* Their records are not all one size: the tables say. */
     if (button_db_blob_max() > m) {
         m = button_db_blob_max();
+    }
+    if (device_db_blob_max() > m) {
+        m = device_db_blob_max();
     }
     return m;
 }
@@ -416,6 +423,21 @@ static cJSON *header_json(nvs_handle_t nvs, uint8_t omit)
 
 static esp_err_t export_entry(nvs_handle_t nvs, const cb_entry_t *e, cb_sink_fn sink, void *ctx)
 {
+    /* The devices are a record each, not this key, which is only where a restore
+     * leaves the table for the boot to take in (device_db.h): packed into one. */
+    if (strcmp(e->key, "devices") == 0) {
+        uint8_t  *table;
+        size_t    len;
+        esp_err_t err = device_db_export_table(&table, &len);
+        if (err == ESP_ERR_NOT_FOUND) {
+            return ESP_ERR_NVS_NOT_FOUND;   /* no devices: left out, as an empty table was */
+        }
+        if (err == ESP_OK) {
+            err = emit_blob(sink, ctx, e->key, table, len);
+            free(table);
+        }
+        return err;
+    }
     if (e->type == CB_STR || e->type == CB_BLOB) {
         uint8_t  *bytes;
         size_t    len;
@@ -920,6 +942,9 @@ void config_backup_apply(void)
     }
     if (replaced & CB_SECT_TABLES) {
         forget_runtime_keys(live);
+        /* The file's devices, copied above, are the table now; a file without any
+         * is a box without any. The boot takes the table in (device_db_init). */
+        device_db_drop_records();
     }
     nvs_commit(live);
     nvs_close(live);

@@ -63,6 +63,14 @@ names both versions. Bugfix releases count as the same ESP-IDF, so a v6.0.3 boot
 build, and a v6.1 one does not take a v6.0 build. To go back further, flash the older release's USB zip,
 bootloader included.
 
+Two things that changed after v0.3.1 do not go back with the firmware:
+
+- The devices are stored as a record each, which an older coordinator does not read: it starts
+  with no devices, and it refuses a backup made after the update. Download a backup before
+  updating; an older coordinator restores that one.
+- Matter has room for 44 endpoints. A coordinator with fewer cannot read the list the bridge
+  stored, and every room and shared device would come back as a new accessory in each controller.
+
 ## Partition table changes
 
 A change to the partition table normally needs a USB flash: `idf.py -p /dev/cu.usbmodem* flash`, or

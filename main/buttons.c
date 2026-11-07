@@ -13,6 +13,8 @@
 #include "auth.h"
 #include "buttons.h"
 #include "lighting.h"
+#include "matter_bridge.h"
+#include "mexp_db.h"
 #include "node_proto.h"
 #include "settings.h"
 #include "state_rev.h"
@@ -632,7 +634,11 @@ void buttons_reload(void)
         x->inverted    = b->inverted;
         x->pull        = b->pull;
         x->is_switch   = b->src == ZBC_BTN_SRC_GPIO && b->input == ZBC_INPUT_SWITCH;
-        x->want_double = !x->is_switch && b->rule_count[ZBC_EV_DOUBLE] > 0;
+        /* A key shown in Matter waits for a double press whatever its rules
+         * say: a controller may have an automation on one. */
+        x->want_double = !x->is_switch &&
+                         (b->rule_count[ZBC_EV_DOUBLE] > 0 ||
+                          (b->src == ZBC_BTN_SRC_ZIGBEE && mexp_db_has(b->ieee, b->zb_ep)));
         memcpy(x->ieee, b->ieee, ZBC_BTN_IEEE_LEN);
         x->zb_ep       = b->zb_ep;
         x->zb_key      = b->zb_key;
@@ -1445,6 +1451,12 @@ static int slot_of(uint16_t id)
 
 static void dispatch(const btn_msg_t *msg)
 {
+    /* Every gesture, rules or none, a release included: a remote shown in Matter
+     * on its own (mexp_db.h) is a trigger for a controller's own automations. A
+     * post and nothing more - the bridge decides which gestures a switch reports
+     * and finds out whether this button is one of its. */
+    matter_bridge_button_event(msg->id, (uint8_t)msg->emit);
+
     /* A release stops whatever is ramping and asks nothing else. Going back to
      * the rules for it would be wrong twice over: the conditions may have moved
      * on during the sweep, and there may no longer be a rule at all - and the

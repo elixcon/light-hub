@@ -1,6 +1,9 @@
 /* Matter over Wi-Fi: every light group appears as one dimmable light, and - when the
  * group asks for it - its Adaptive Lighting mode as a Mode Select on that light or
- * as a second on/off endpoint (see al_db.h).
+ * as a second on/off endpoint (see al_db.h). A Zigbee device endpoint can be shown
+ * on its own as well, off by default (mexp_db.h): a lamp as the light its clusters
+ * make it, a remote as one accessory with a Generic Switch for each button, a
+ * motion sensor as an Occupancy Sensor.
  *
  * The coordinator is a Matter bridge - an Aggregator endpoint with one bridged
  * Dimmable Light per group, named after it. A Matter command becomes a call to
@@ -48,6 +51,30 @@ typedef struct {
     int8_t   matter_mode;     /* the light's Mode Select CurrentMode, -1 unknown or no cluster */
 } matter_group_t;
 
+/* What a device endpoint shown on its own is (matter_device_t.kind). */
+#define MATTER_DEV_LAMP      1
+#define MATTER_DEV_SWITCH    2
+#define MATTER_DEV_OCCUPANCY 3
+#define MATTER_DEV_REMOTE    4   /* a remote: its switches are the buttons below it */
+
+/* The same diagnosis for a device endpoint shown on its own. -1 is "unknown". */
+typedef struct {
+    uint8_t  ieee[8];
+    uint8_t  ep;
+    uint8_t  key;             /* a switch: which button of the endpoint; 0 otherwise */
+    uint16_t parent_id;       /* a switch: its remote's endpoint; 0 otherwise */
+    uint8_t  kind;            /* MATTER_DEV_* */
+    uint16_t endpoint_id;
+    uint16_t button_id;       /* a switch or sensor: the button record that speaks for it */
+    int8_t   reachable;       /* BridgedDeviceBasicInformation Reachable as last written; a switch: its remote's */
+    int8_t   matter_on;       /* a lamp's OnOff, a sensor's Occupancy */
+    int16_t  matter_level;    /* a lamp's CurrentLevel, 1-254 */
+    bool     held;            /* sync holding off: a Matter command or sweep is settling */
+    uint32_t writes;          /* attribute writes and switch events that succeeded */
+    int32_t  last_err;        /* esp_err_t of the last write that failed, 0 if none has */
+    bool     rebuild;         /* a lamp that can do something else now: rebuilt at the next restart */
+} matter_device_t;
+
 /* One controller the bridge has been added to. A controller may add more than one
  * fabric - so the count alone does not say who is there, and this does. */
 typedef struct {
@@ -90,6 +117,12 @@ typedef struct {
     bool    window_open;      /* a new controller can commission it now */
     uint8_t groups;           /* groups currently bridged */
     matter_group_t group_list[CONFIG_ZBC_MAX_GROUPS];
+    uint8_t devices;          /* device endpoints currently bridged on their own */
+    /* Those asked for that have no endpoint: a sensor not set up yet, more than
+     * CONFIG_ZBC_MAX_MATTER_EXPOSED, or too little heap left for another. */
+    uint8_t devices_skipped;
+    bool    devices_heap_short;   /* some of those wait for free heap */
+    matter_device_t device_list[CONFIG_ZBC_MAX_MATTER_EXPOSED];
     char    manual_code[24];  /* 11-digit manual pairing code, "" until known */
     char    qr_code[64];      /* "MT:..." payload for a QR code, "" until known */
     uint32_t         commands_seen;  /* the next is written at this modulo the ring */
@@ -100,6 +133,11 @@ typedef struct {
 esp_err_t matter_bridge_start(void);
 
 void      matter_bridge_get_status(matter_status_t *out);
+
+/* A button's gesture (zbc_btn_emit_t), from the buttons task, for the switch the
+ * button is shown as if it is one. Never blocks: a post to the bridge's queue,
+ * dropped when that is full. Nothing before matter_bridge_start. */
+void      matter_bridge_button_event(uint16_t button_id, uint8_t emit);
 
 /* Opens a commissioning window for 15 minutes, for adding the bridge to a
  * controller after the one opened at boot has timed out.

@@ -18,6 +18,7 @@
 #include "lighting.h"
 #include "local_lights.h"
 #include "matter_ctl.h"
+#include "mexp_db.h"
 #include "mlight_db.h"
 #include "settings.h"
 #include "state_rev.h"
@@ -457,6 +458,9 @@ static void forget_restore(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep)
 
 void lighting_forget_device(const uint8_t ieee[ZBC_IEEE_LEN])
 {
+    group_db_forget_device(ieee);
+    curve_db_forget_device(ieee);
+    mexp_db_forget_device(ieee);
     forget_restore(ieee, 0);
 }
 
@@ -464,6 +468,7 @@ void lighting_forget_endpoint(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep)
 {
     group_db_forget_endpoint(ieee, ep);
     curve_db_forget_endpoint(ieee, ep);
+    mexp_db_forget_endpoint(ieee, ep);
     forget_restore(ieee, ep);
 }
 
@@ -2153,6 +2158,26 @@ esp_err_t lighting_target_set_brightness(const lighting_target_t *t, int input_p
     return lighting_set_brightness(t->ieee, t->ep, input_pct, transition_ds);
 }
 
+esp_err_t lighting_target_switch_on_to(const lighting_target_t *t, int input_pct, uint16_t transition_ds)
+{
+    if (t->ep == 0) {
+        return lighting_group_switch_on_to(t->group_id, input_pct, transition_ds);
+    }
+    zbc_device_t          dev;
+    const zbc_endpoint_t *e = target_endpoint(t, &dev);
+    if (!e) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    /* A brightness lights a dark lamp by itself (set_brightness_ex). A light that
+     * can only switch would read it through its curve's switch point instead,
+     * and this asks for on whatever the curve says - as the room's call does for
+     * a member like it. */
+    if (!(e->features & ZBC_FEAT_LEVEL)) {
+        return lighting_set_onoff(t->ieee, t->ep, ZB_ONOFF_ON);
+    }
+    return lighting_set_brightness(t->ieee, t->ep, input_pct, transition_ds);
+}
+
 esp_err_t lighting_target_ramp_to(const lighting_target_t *t, int input_pct, uint16_t transition_ds)
 {
     if (t->ep == 0) {
@@ -2208,6 +2233,17 @@ esp_err_t lighting_set_color_hs(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, ui
     al_note_manual_endpoint(ieee, ep, "colour changed");
     stream_hand_endpoint(ieee, ep);
     return out_set_hs(ieee, ep, hue, saturation, transition_ds);
+}
+
+esp_err_t lighting_set_color_xy(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, uint16_t x, uint16_t y,
+                                uint16_t transition_ds)
+{
+    if (zbc_light_id_from_ieee(ieee)) {
+        return ESP_ERR_NOT_SUPPORTED;   /* white LEDs only */
+    }
+    al_note_manual_endpoint(ieee, ep, "colour changed");
+    stream_hand_endpoint(ieee, ep);
+    return out_set_xy(ieee, ep, x, y, transition_ds);
 }
 
 #if CONFIG_ZBC_WLED

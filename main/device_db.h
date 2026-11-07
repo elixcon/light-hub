@@ -15,6 +15,7 @@
 extern "C" {
 #endif
 
+/* >>> host-test region: dev-types <<< */
 #define ZBC_IEEE_LEN     8
 #define ZBC_NAME_LEN     32
 #define ZBC_STRING_LEN   33  /* ZCL character strings here are capped at 32 chars */
@@ -45,10 +46,9 @@ static inline bool zbc_short_known(uint16_t short_addr)
 #define ZBC_FEAT_COLOR_XY   (1u << 4)  /* colour, CIE xy only */
 #define ZBC_FEAT_ANY_COLOR  (ZBC_FEAT_COLOR_HS | ZBC_FEAT_COLOR_XY)
 /* This endpoint sends us button presses - a wireless remote, or a wall switch
- * with no lamp behind it. A spare bit of the existing features word on purpose:
- * a new field in zbc_endpoint_t changes sizeof(zbc_device_t), the load-time size
- * check then rejects the stored table, and the names the user gave their lights
- * are gone. Bits 9..15 are still free. */
+ * with no lamp behind it. Bits 10..15 are still free; a bit is stored with the
+ * features word, where a new field of zbc_endpoint_t would need a place in the
+ * stored record (device_db.c, dr_encode) as well. */
 #define ZBC_FEAT_SWITCH     (1u << 5)
 /* A Hue dimmer whose buttons have been heard on Philips' own cluster (0xFC00),
  * on its button endpoint: from then on that is where its presses are read, and
@@ -109,6 +109,7 @@ typedef struct {
     int64_t  last_seen_us;                    /* esp_timer_get_time() of last contact */
     bool     online;
 } zbc_device_t;
+/* >>> end host-test region: dev-types <<< */
 
 esp_err_t device_db_init(void);
 
@@ -119,9 +120,9 @@ esp_err_t device_db_upsert(const uint8_t ieee[ZBC_IEEE_LEN], uint16_t short_addr
 esp_err_t device_db_set_identity(const uint8_t ieee[ZBC_IEEE_LEN], const char *manufacturer, const char *model);
 
 /* Link quality (0-255) from the last neighbour scan that saw this device.
- * Runtime only, and deliberately not part of zbc_device_t: the registry blob is
- * written raw, so a new field there would discard every stored device and the
- * names with them. device_db_lqa() returns ZBC_UNKNOWN until a scan reports one. */
+ * Runtime only, like online and last_seen_us: a measurement of now, which a
+ * restart makes meaningless. device_db_lqa() returns ZBC_UNKNOWN until a scan
+ * reports one. */
 esp_err_t device_db_set_lqa(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t lqa);
 int       device_db_lqa(const uint8_t ieee[ZBC_IEEE_LEN]);
 esp_err_t device_db_add_endpoint(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, uint16_t device_id, uint16_t features);
@@ -186,6 +187,9 @@ size_t    device_db_count(void);
  * and heard from within max_age_us. One definition, so a caller working from a
  * copied row and the count below cannot come to disagree about what "there" is. */
 bool      device_db_is_fresh(const zbc_device_t *dev, int64_t max_age_us);
+/* How long a device may go unheard before the web page and Matter call it
+ * offline - the same age for both, so they never disagree about a lamp. */
+#define ZBC_OFFLINE_AFTER_US (10 * 60 * 1000000LL)
 /* How many devices are fresh by that definition - the number the web page's
  * "offline" badge is derived from, which can change with nothing else moving;
  * see state_rev.h. */
@@ -195,17 +199,28 @@ size_t    device_db_count_fresh(int64_t max_age_us);
  * boot. cb must not call back into device_db. */
 void      device_db_for_each(void (*cb)(const zbc_device_t *dev, void *ctx), void *ctx);
 
-esp_err_t device_db_save(void);
 esp_err_t device_db_erase(void);
 
-/* Whether a stored registry blob is one the boot load takes rather than
- * discards: its version, and a size that fits it. The one statement of that,
- * shared with the configuration restore, which refuses a file whose table the
- * load would throw away. */
+/* The whole table as one blob, as a configuration backup carries it: every
+ * device's stored record, packed (device_db.c, "Stored records"). *out is
+ * malloc'd and the caller frees it. ESP_ERR_NOT_FOUND with no devices, which a
+ * backup leaves out; ESP_ERR_NO_MEM, which must stop it, or the file would read
+ * as a box without devices. */
+esp_err_t device_db_export_table(uint8_t **out, size_t *len);
+/* Whether a table blob is one the boot takes rather than discards: one packed
+ * as above, or the table builds before the records stored. The one statement of
+ * that, shared with the configuration restore, which refuses a file whose table
+ * the boot would throw away. A restore writes it where the old builds kept
+ * theirs, and the boot replaces every record with it. */
 bool      device_db_blob_ok(const void *blob, size_t len);
+/* The longest table blob this build reads: a backup line is refused past it. */
+size_t    device_db_blob_max(void);
 /* Sets every row of such a blob to ZBC_SHORT_NONE: a registry restored onto
  * another network keeps its names, and none of its addresses. */
 void      device_db_blob_forget_addresses(void *blob, size_t len);
+/* Erases every device's stored record, before device_db_init: a restore that
+ * replaces the tables with a file holding no devices leaves none. */
+void      device_db_drop_records(void);
 
 /* "0x00124b0001abcdef" <-> bytes, most significant byte first. */
 void      zbc_ieee_to_str(const uint8_t ieee[ZBC_IEEE_LEN], char out[19]);

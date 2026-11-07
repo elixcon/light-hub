@@ -47,7 +47,8 @@ and the lamp's physical `min_kelvin` and `max_kelvin`, so a client never has to 
 can do. With a level curve active, bind a slider to `input_pct`, not `brightness_pct` (see [Response
 curves](lighting.md#setting-curves-from-a-script)). A remote's endpoint has `switch` and a motion
 sensor's `motion`, with `reports_clear` saying whether the sensor reports the end of motion itself
-(see [motion sensors](buttons-and-remotes.md#motion-sensors)).
+(see [motion sensors](buttons-and-remotes.md#motion-sensors)). An endpoint shown in Matter on its
+own has `"matter": true` (see [Matter](matter.md#devices-on-their-own)).
 
 A group's `on` comes from its lights, so a light switched elsewhere still shows. Its
 `brightness_pct` is the value the group was last set to, because lamps settle a percent or two apart
@@ -86,6 +87,7 @@ those are only on `/api/status`.
 | `PATCH` | `/api/devices/{ieee}` | `{"name":"Desk lamp"}` |
 | `POST` | `/api/devices/{ieee}/wifi` | `{"minutes":15}`, optional: asks a [Light Node](light-node.md) to open Wi-Fi until that many minutes without a request. Answers `202`, and `409` for any other device. Its control endpoint then shows `node_wifi` (`off`, `joining`, `station` or `hotspot`) and `node_ip` |
 | `DELETE` | `/api/devices/{ieee}` | asks a lamp to leave and forgets the device (a sleepy remote or sensor is only forgotten); a wired light gives its pin back; a Matter lamp is forgotten, and its device is told to forget the coordinator (RemoveFabric) when it was the device's last lamp |
+| `POST` | `/api/devices/{ieee}/ep/{ep}/matter` | `{"expose":true\|false}`: shows a Zigbee lamp, a remote's endpoint (one accessory, with a switch per button set up on it) or a motion sensor in Matter on its own, besides its rooms. Off by default, and taken at once. `409` for a wired light, a Matter lamp or an endpoint that is none of the three, `507` when there is no room left |
 | `GET` | `/api/devices/{ieee}/ep/{ep}/curves` | this light's response curves |
 | `POST` | `/api/devices/{ieee}/ep/{ep}/curves` | replaces them: `level` points, `chroma` stops; a `null` member clears that part |
 | `DELETE` | `/api/devices/{ieee}/ep/{ep}/curves` | back to passing the brightness straight through |
@@ -161,7 +163,7 @@ DNRGB; byte 1 the timeout in seconds, 255 for none).
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/api/matter` | pairing code, QR payload, which controllers it is in (`ours` marks the coordinator's own fabric) and each one's `subscriptions` (`live`, `kept` to resume after a restart, the controller's intervals, `resume_tries`, `live_after_s`), whether pairing is open, the last commands controllers sent, and `controller`: its own `fabric_index`, each paired Matter device with its subscription (`online`, `drops`, `reports`, `last_error`), and the `pairing` in progress (`state`, `step`, `error`, `lamps`, `heap_low` per step) |
+| `GET` | `/api/matter` | pairing code, QR payload, which controllers it is in (`ours` marks the coordinator's own fabric) and each one's `subscriptions` (`live`, `kept` to resume after a restart, the controller's intervals, `resume_tries`, `live_after_s`), whether pairing is open, the last commands controllers sent, and `controller`: its own `fabric_index`, each paired Matter device with its subscription (`online`, `drops`, `reports`, `last_error`), and the `pairing` in progress (`state`, `step`, `error`, `lamps`, `heap_low` per step). `group_list` has what the bridge last saw and wrote for each room. `device_list` has each device endpoint shown on its own: `ieee`, `ep`, `kind` (`light`, `occupancy`, `remote`, or `switch` for one of a remote's buttons, with its `key` and the `remote` endpoint it is inside), the `button` record behind a switch or sensor, its Matter `endpoint`, `reachable`, `writes` and `last_err`; `devices_skipped` counts the ones asked for that have no endpoint, and `devices_low_memory` says some of them wait for the heap to have room |
 | `POST` | `/api/matter/window` | opens pairing for 15 minutes |
 | `POST` | `/api/matter/reset` | asks every Matter lamp to forget the coordinator, forgets every Matter controller and its own fabric, then reboots |
 | `POST` | `/api/matter/lamps/pair` | `{"code":"3497-011-2332"}` or `{"code":"MT:…"}` pairs a Matter device in pairing mode, `202`; progress in `/api/matter` `controller.pairing`. `409` while one runs, or when the coordinator has no fabric slot left |

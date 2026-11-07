@@ -1061,10 +1061,8 @@ static const uint16_t ZBC_BINDABLE[] = {
     EZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING,
 };
 #define ZBC_BINDABLE_CLUSTERS ((int)(sizeof(ZBC_BINDABLE) / sizeof(ZBC_BINDABLE[0])))
-/* The most of them one endpoint wants (wanted_reports): a remote's three. A
- * lamp wants two and a sensor one, so the answer tables below are sized by this
- * rather than by every cluster there is - each cluster more would cost 3.5 KB
- * of RAM that no endpoint could ever use. */
+/* The most of them one endpoint wants (wanted_reports): a remote's three, a lamp
+ * two and a sensor one. It sizes the arrays wanted_reports fills. */
 #define ZBC_WANTED_PER_EP 3
 /* zb_report_state() hands one endpoint's out over the API, so the two sizes are
  * one number; an endpoint wanting more without widening that struct would have
@@ -1088,106 +1086,154 @@ static uint32_t bind_cluster_index(uint16_t cluster_id)
  * worth asking again, a definite "no" is not. Runtime only; the lamp's own
  * tables are the record.
  *
- * Two tables because they are two answers: a Configure Reporting lost after a
- * successful bind leaves the lamp bound but silent, and must be asked again.
+ * Two answers per cluster, a bind and a configuration, because a Configure
+ * Reporting lost after a successful bind leaves the lamp bound but silent, and
+ * must be asked again.
  *
  * Keyed by IEEE, which survives a rejoin; a short address can pass to another
- * device. `refused` keeps which answer it was, for the API: a refusal stops the
- * asking just the same. */
+ * device. A row per endpoint with a bit per cluster, since the IEEE is most of
+ * a row: 1.7 KB, where a row per answer took 10.7. `refused` keeps which answer
+ * it was, for the API: a refusal stops the asking just the same. */
+typedef enum { ZBC_DONE_BIND = 0, ZBC_DONE_CONFIG, ZBC_DONE_KINDS } zbc_done_kind_t;
+
+/* The clusters an answer is kept for, a bit each: the bindable ones in their
+ * order, then the Hue dimmer's button cluster (hue_bind_post). */
+#define ZBC_DONE_BIT_HUE ZBC_BINDABLE_CLUSTERS
+_Static_assert(ZBC_DONE_BIT_HUE < 8, "a done row keeps one cluster per bit of a byte");
+
 typedef struct {
-    bool     used;
-    bool     refused;
-    uint8_t  ieee[ZBC_IEEE_LEN];
-    uint8_t  ep;
-    uint16_t cluster_id;
+    uint8_t ieee[ZBC_IEEE_LEN];
+    uint8_t ep;                          /* 0, which no endpoint is: a free row */
+    uint8_t answered[ZBC_DONE_KINDS];    /* a bit per cluster, done_bit() */
+    uint8_t refused[ZBC_DONE_KINDS];     /* of those, the ones answered with a no */
 } zbc_done_t;
 
-#define ZBC_DONE_ENTRIES (CONFIG_ZBC_MAX_DEVICES * CONFIG_ZBC_MAX_ENDPOINTS_PER_DEVICE * ZBC_WANTED_PER_EP)
-static zbc_done_t s_bound[ZBC_DONE_ENTRIES];
-static zbc_done_t s_configured[ZBC_DONE_ENTRIES];
+/* As many endpoints as the devices can have. A Hue dimmer's button binding sits
+ * on an endpoint of its own, which fits where a device has fewer; when the rows
+ * run out an answer goes unrecorded and is asked for again at the next scan. */
+#define ZBC_DONE_ROWS (CONFIG_ZBC_MAX_DEVICES * CONFIG_ZBC_MAX_ENDPOINTS_PER_DEVICE)
+static zbc_done_t s_done[ZBC_DONE_ROWS];
 
-/* The row holding this answer, or -1. done_mark never makes a second. */
-static int done_find(const zbc_done_t *t, const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep,
-                     uint16_t cluster_id)
+static int done_bit(uint16_t cluster_id)
 {
-    for (size_t i = 0; i < ZBC_DONE_ENTRIES; i++) {
-        if (t[i].used && t[i].ep == ep && t[i].cluster_id == cluster_id &&
-            memcmp(t[i].ieee, ieee, ZBC_IEEE_LEN) == 0) {
-            return (int)i;
+    if (cluster_id == ZB_REMOTE_CL_HUE) {
+        return ZBC_DONE_BIT_HUE;
+    }
+    for (int i = 0; i < ZBC_BINDABLE_CLUSTERS; i++) {
+        if (ZBC_BINDABLE[i] == cluster_id) {
+            return i;
         }
     }
     return -1;
 }
 
-static bool done_has_ieee(const zbc_done_t *t, const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep,
-                         uint16_t cluster_id)
+/* The endpoint's row, or -1. A row, once made, keeps its device and endpoint
+ * until the restart, which is what lets zb_report_state read without a lock. */
+static int done_row(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep)
 {
-    return done_find(t, ieee, ep, cluster_id) >= 0;
+    if (ep == 0) {
+        return -1;
+    }
+    for (int i = 0; i < ZBC_DONE_ROWS; i++) {
+        if (s_done[i].ep == ep && memcmp(s_done[i].ieee, ieee, ZBC_IEEE_LEN) == 0) {
+            return i;
+        }
+    }
+    return -1;
 }
 
-static bool done_has(const zbc_done_t *t, uint16_t short_addr, uint8_t ep, uint16_t cluster_id)
+/* The answer's bit in its row, or 0 while there is none. */
+static uint8_t done_answered(zbc_done_kind_t k, const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep,
+                             uint16_t cluster_id)
+{
+    const int i = done_row(ieee, ep);
+    const int b = done_bit(cluster_id);
+    return i >= 0 && b >= 0 ? (uint8_t)(s_done[i].answered[k] & (1u << b)) : 0;
+}
+
+static bool done_has_ieee(zbc_done_kind_t k, const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep,
+                          uint16_t cluster_id)
+{
+    return done_answered(k, ieee, ep, cluster_id) != 0;
+}
+
+static bool done_has(zbc_done_kind_t k, uint16_t short_addr, uint8_t ep, uint16_t cluster_id)
 {
     uint8_t ieee[ZBC_IEEE_LEN];
-    return ieee_of(short_addr, ieee) && done_has_ieee(t, ieee, ep, cluster_id);
+    return ieee_of(short_addr, ieee) && done_has_ieee(k, ieee, ep, cluster_id);
 }
 
 /* Whether the answer recorded for this endpoint and cluster was a refusal;
  * false while there is none. */
-static bool done_refused_ieee(const zbc_done_t *t, const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep,
+static bool done_refused_ieee(zbc_done_kind_t k, const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep,
                               uint16_t cluster_id)
 {
-    const int i = done_find(t, ieee, ep, cluster_id);
-    return i >= 0 && t[i].refused;
+    const int i = done_row(ieee, ep);
+    const int b = done_bit(cluster_id);
+    if (i < 0 || b < 0 || !(s_done[i].answered[k] & (1u << b))) {
+        return false;
+    }
+    return (s_done[i].refused[k] & (1u << b)) != 0;
 }
 
-static void done_mark(zbc_done_t *t, uint16_t short_addr, uint8_t ep, uint16_t cluster_id,
+/* The first answer stands until done_forget. */
+static void done_mark(zbc_done_kind_t k, uint16_t short_addr, uint8_t ep, uint16_t cluster_id,
                       bool refused)
 {
-    uint8_t ieee[ZBC_IEEE_LEN];
-    if (done_has(t, short_addr, ep, cluster_id) || !ieee_of(short_addr, ieee)) {
+    uint8_t   ieee[ZBC_IEEE_LEN];
+    const int b = done_bit(cluster_id);
+    if (b < 0 || ep == 0 || !ieee_of(short_addr, ieee)) {
         return;
     }
-    for (size_t i = 0; i < ZBC_DONE_ENTRIES; i++) {
-        if (!t[i].used) {
-            t[i].refused    = refused;
-            memcpy(t[i].ieee, ieee, ZBC_IEEE_LEN);
-            t[i].ep         = ep;
-            t[i].cluster_id = cluster_id;
-            t[i].used       = true;      /* last: zb_report_state reads without a lock */
+    int i = done_row(ieee, ep);
+    if (i < 0) {
+        for (i = 0; i < ZBC_DONE_ROWS && s_done[i].ep != 0; i++) {
+        }
+        if (i == ZBC_DONE_ROWS) {
             return;
         }
+        memcpy(s_done[i].ieee, ieee, ZBC_IEEE_LEN);
+        s_done[i].ep = ep;               /* after the IEEE: zb_report_state reads without a lock */
     }
+    const uint8_t bit = (uint8_t)(1u << b);
+    if (s_done[i].answered[k] & bit) {
+        return;
+    }
+    /* `refused` before `answered`, for the same reader. */
+    s_done[i].refused[k] = refused ? (uint8_t)(s_done[i].refused[k] | bit) : (uint8_t)(s_done[i].refused[k] & ~bit);
+    s_done[i].answered[k] |= bit;
 }
 
 /* For an answer the device has since lost: a Hue dimmer that announces has been
  * reset or re-paired, and its binding table with it. */
-static void done_forget(zbc_done_t *t, const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep,
+static void done_forget(zbc_done_kind_t k, const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep,
                         uint16_t cluster_id)
 {
-    const int i = done_find(t, ieee, ep, cluster_id);
-    if (i >= 0) {
-        t[i].used = false;
+    const int i = done_row(ieee, ep);
+    const int b = done_bit(cluster_id);
+    if (i >= 0 && b >= 0) {
+        s_done[i].answered[k] &= (uint8_t)~(1u << b);
     }
 }
 
 static bool bind_done(uint16_t short_addr, uint8_t ep, uint16_t cluster_id)
 {
-    return done_has(s_bound, short_addr, ep, cluster_id);
+    return done_has(ZBC_DONE_BIND, short_addr, ep, cluster_id);
 }
 
 static void mark_bound(uint16_t short_addr, uint8_t ep, uint16_t cluster_id, bool refused)
 {
-    done_mark(s_bound, short_addr, ep, cluster_id, refused);
+    done_mark(ZBC_DONE_BIND, short_addr, ep, cluster_id, refused);
 }
 
 static bool config_done(uint16_t short_addr, uint8_t ep, uint16_t cluster_id)
 {
-    return done_has(s_configured, short_addr, ep, cluster_id);
+    return done_has(ZBC_DONE_CONFIG, short_addr, ep, cluster_id);
 }
 
 static void mark_configured(uint16_t short_addr, uint8_t ep, uint16_t cluster_id, bool refused)
 {
-    done_mark(s_configured, short_addr, ep, cluster_id, refused);
+    done_mark(ZBC_DONE_CONFIG, short_addr, ep, cluster_id, refused);
 }
 
 /* Short address, endpoint and cluster packed into the ZDO callback's user_ctx,
@@ -3782,7 +3828,7 @@ static void hue_note_announce(uint16_t short_addr, const uint8_t ieee[ZBC_IEEE_L
         return;
     }
     device_db_clear_features(ieee, HUE_DIMMER_BUTTON_EP, ZBC_FEAT_HUE_BUTTONS);
-    done_forget(s_bound, ieee, HUE_DIMMER_NOTIFY_EP, ZB_REMOTE_CL_HUE);
+    done_forget(ZBC_DONE_BIND, ieee, HUE_DIMMER_NOTIFY_EP, ZB_REMOTE_CL_HUE);
     hue_bind_post(short_addr, true);
 }
 
@@ -6839,19 +6885,20 @@ void zb_report_state(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, uint16_t feat
     zbc_report_want_t want[ZBC_WANTED_PER_EP];
     const int         n = wanted_reports(features, want);
 
-    /* No lock: both tables are keyed by IEEE, so there is no short address to
-     * translate, and each entry is written once and never rewritten - a reader
-     * racing a write sees the answer either before or after it arrives. Called
-     * from the HTTP task while the mainloop runs. */
+    /* No lock: the answers are keyed by IEEE, so there is no short address to
+     * translate, a row keeps its device and endpoint once made, and each answer
+     * is a bit set after its `refused` - a reader racing a write sees the answer
+     * either before or after it arrives. Called from the HTTP task while the
+     * mainloop runs. */
     out->count = n < ZB_REPORT_MAX_CLUSTERS ? n : ZB_REPORT_MAX_CLUSTERS;
     for (int i = 0; i < out->count; i++) {
         const uint16_t cl          = want[i].cluster_id;
         out->c[i].cluster          = want[i].name;
-        out->c[i].bind_refused     = done_refused_ieee(s_bound, ieee, ep, cl);
-        out->c[i].bound            = done_has_ieee(s_bound, ieee, ep, cl) && !out->c[i].bind_refused;
+        out->c[i].bind_refused     = done_refused_ieee(ZBC_DONE_BIND, ieee, ep, cl);
+        out->c[i].bound            = done_has_ieee(ZBC_DONE_BIND, ieee, ep, cl) && !out->c[i].bind_refused;
         out->c[i].wants_config     = want[i].configure;
-        out->c[i].config_refused   = want[i].configure && done_refused_ieee(s_configured, ieee, ep, cl);
-        out->c[i].configured       = want[i].configure && done_has_ieee(s_configured, ieee, ep, cl) &&
+        out->c[i].config_refused   = want[i].configure && done_refused_ieee(ZBC_DONE_CONFIG, ieee, ep, cl);
+        out->c[i].configured       = want[i].configure && done_has_ieee(ZBC_DONE_CONFIG, ieee, ep, cl) &&
                                      !out->c[i].config_refused;
     }
 }

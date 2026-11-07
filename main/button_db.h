@@ -257,6 +257,21 @@ esp_err_t button_db_set(uint16_t id, const zbc_button_t *in);
 esp_err_t button_db_remove(uint16_t id);
 
 bool      button_db_get(uint16_t id, zbc_button_t *out);
+/* Its name alone, without the copy of its rules button_db_get makes. False, with
+ * `out` untouched, for an unknown id. */
+bool      button_db_name(uint16_t id, char out[ZBC_BUTTON_NAME_LEN]);
+/* A remote's button or a sensor's record on one device endpoint, as
+ * button_db_list_on hands them out: what the Matter bridge needs to give each
+ * one an endpoint, without a copy of its rules. */
+typedef struct {
+    uint16_t id;
+    uint8_t  src;     /* ZBC_BTN_SRC_ZIGBEE or ZBC_BTN_SRC_SENSOR */
+    uint8_t  key;     /* which button of the endpoint; 0 for a sensor */
+} zbc_button_ref_t;
+/* Up to max of those on the endpoint, in the order the buttons were made - which
+ * is also id order, each new id being one past the highest; returns how many. */
+size_t    button_db_list_on(const uint8_t ieee[ZBC_BTN_IEEE_LEN], uint8_t ep, zbc_button_ref_t *out,
+                            size_t max);
 /* The ids alone, for a caller that copies one button at a time rather than
  * holding the whole table - see stream_buttons in http_server.c. In the order
  * the buttons were made. */

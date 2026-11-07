@@ -11,6 +11,7 @@
 	import ViewHeader from "$lib/components/ViewHeader.svelte";
 	import GestureEditor from "$lib/components/GestureEditor.svelte";
 	import SensorState from "$lib/components/SensorState.svelte";
+	import MatterExposeRow from "$lib/components/MatterExposeRow.svelte";
 	import { data, refresh, schedule } from "$lib/state.svelte.ts";
 	import { navigate } from "$lib/router.svelte.ts";
 	import { api, post, patch, del } from "$lib/api.ts";
@@ -142,6 +143,10 @@
 				<p class="text-muted-foreground text-sm">This sensor is no longer paired. Its rules are kept until you remove them.</p>
 			{/if}
 			{#if rec}<SensorState button={rec} />{/if}
+			{#if rec && c.device}
+				<MatterExposeRow ieee={c.ieee} eps={[c.ep]} on={!!c.device.endpoints.find((x) => x.ep === c.ep)?.matter}
+					help="Your controllers get it as an occupancy sensor to run automations on. It clears after the no-motion time set here." />
+			{/if}
 
 			{#if !rec}
 				{#if !data.groups.length}
