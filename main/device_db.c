@@ -1,3 +1,4 @@
+#include <stddef.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,28 +16,370 @@
 
 static const char *TAG = "device_db";
 
+/* A record per device, in a namespace of their own, under a key made from the
+ * device's IEEE address (dr_key). A change rewrites that device's record alone,
+ * a few dozen bytes. The whole table was a quarter of a kilobyte per device, and
+ * saving it needed room for two copies at once in the partition the Zigbee
+ * stack's network shares, 36 KB whose place is fixed: about 40 devices was as
+ * far as it went. */
+#define DB_REC_NAMESPACE "zbc_dev"
+/* The whole table under one key: what builds before the records stored, and what
+ * a configuration restore writes (config_backup.c lists the key). The boot
+ * replaces every record with it, then erases it (db_load_table). */
 #define DB_NVS_NAMESPACE "zbc"
-/* In config_backup.c's list too: a backup carries this table under this key. */
 #define DB_NVS_KEY       "devices"
-/* Bumped whenever zbc_device_t changes layout; a mismatch drops the stored
- * blob instead of reinterpreting it. */
-#define DB_BLOB_VERSION  2
+
+/* >>> host-test region: devrow <<< */
+/* Stored records.
+ *
+ * A record is a device's stored fields written out a byte at a time, not the
+ * struct: a field added to zbc_device_t costs no stored device. Only what
+ * survives a restart is in it - the address, the names, and per endpoint its
+ * number, device id, features and colour-temperature range. Live state and
+ * last_seen never were kept. Strings take their length and endpoints their
+ * number, so a lamp with one endpoint and a short model is about 60 bytes.
+ *
+ *    0  DR_VERSION          1  its slot: its place in the table, so the list
+ *    2  endpoint count         keeps the order devices joined in
+ *    3  IEEE, 8 bytes      11  short address
+ *   13  name, manufacturer, model: a length byte each, then its bytes
+ *   then per endpoint DR_EP_BYTES: number, device id, features (16 bits each),
+ *        coolest and warmest colour temperature in mireds (32 bits each, signed)
+ *
+ * Numbers are little-endian. */
+#define DR_VERSION  1
+#define DR_HEAD     13
+#define DR_EP_BYTES 13
+#define DR_MAX      (DR_HEAD + 3 + (ZBC_NAME_LEN - 1) + 2 * (ZBC_STRING_LEN - 1) + \
+                     CONFIG_ZBC_MAX_ENDPOINTS_PER_DEVICE * DR_EP_BYTES)
+
+/* The table as one blob, for a configuration backup: the header the old table
+ * had - version (32 bits), count, two bytes reserved - then per device its
+ * record's length (16 bits) and the record. */
+#define DR_TABLE_V2   2      /* the struct array builds before the records stored */
+#define DR_TABLE_V3   3
+#define DR_TABLE_HEAD 8
+#define DR_TABLE_MAX(n) (DR_TABLE_HEAD + (size_t)(n) * (2 + DR_MAX))
+
+_Static_assert(CONFIG_ZBC_MAX_DEVICES <= 255, "a record keeps its slot in one byte");
+
+/* The table as the builds before the records wrote it, frozen as it was: four
+ * endpoints a device, the structs as laid out then. Read from such a build's
+ * flash, or from its backup; never written. */
+typedef struct {
+    uint8_t  ep;
+    uint16_t device_id;
+    uint16_t features;
+    int8_t   on_off;
+    int16_t  level;
+    int32_t  ct_mireds;
+    int32_t  ct_min_mireds;
+    int32_t  ct_max_mireds;
+    int16_t  hue;
+    int16_t  saturation;
+    int8_t   color_mode;
+} dr_v2_endpoint_t;
 
 typedef struct {
-    uint32_t version;
-    uint16_t count;
-    uint16_t reserved;
-} db_blob_header_t;
+    bool             in_use;
+    uint8_t          ieee[8];
+    uint16_t         short_addr;
+    char             name[32];
+    char             manufacturer[33];
+    char             model[33];
+    uint8_t          ep_count;
+    dr_v2_endpoint_t eps[4];
+    int64_t          last_seen_us;
+    bool             online;
+} dr_v2_device_t;
+
+_Static_assert(sizeof(dr_v2_endpoint_t) == 32, "the old table's endpoint is 32 bytes");
+_Static_assert(sizeof(dr_v2_device_t) == 256 && offsetof(dr_v2_device_t, short_addr) == 10 &&
+               offsetof(dr_v2_device_t, eps) == 112, "the old table's row is laid out as it was");
+
+static void dr_put16(uint8_t *p, uint16_t v)
+{
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+}
+
+static void dr_put32(uint8_t *p, uint32_t v)
+{
+    dr_put16(p, (uint16_t)v);
+    dr_put16(p + 2, (uint16_t)(v >> 16));
+}
+
+static uint16_t dr_get16(const uint8_t *p)
+{
+    return (uint16_t)(p[0] | p[1] << 8);
+}
+
+static uint32_t dr_get32(const uint8_t *p)
+{
+    return dr_get16(p) | (uint32_t)dr_get16(p + 2) << 16;
+}
+
+/* A record's key: "d" and the IEEE address in eleven characters of six bits
+ * each. An NVS key holds 15, too few for the address in hex. */
+static void dr_key(const uint8_t ieee[ZBC_IEEE_LEN], char out[13])
+{
+    static const char DIGITS[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    uint64_t v = 0;
+    for (int i = 0; i < ZBC_IEEE_LEN; i++) {
+        v = v << 8 | ieee[i];
+    }
+    out[0] = 'd';
+    for (int i = 11; i >= 1; i--) {
+        out[i] = DIGITS[v & 63];
+        v >>= 6;
+    }
+    out[12] = '\0';
+}
+
+/* An endpoint as stored: what it is, and every live value unknown. */
+static void dr_endpoint(zbc_endpoint_t *e, uint8_t ep, uint16_t device_id, uint16_t features,
+                        int32_t ct_min, int32_t ct_max)
+{
+    *e = (zbc_endpoint_t){
+        .ep            = ep,
+        .device_id     = device_id,
+        .features      = features,
+        .on_off        = ZBC_UNKNOWN,
+        .level         = ZBC_UNKNOWN,
+        .ct_mireds     = ZBC_UNKNOWN,
+        .ct_min_mireds = ct_min,
+        .ct_max_mireds = ct_max,
+        .hue           = ZBC_UNKNOWN,
+        .saturation    = ZBC_UNKNOWN,
+        .color_mode    = ZBC_UNKNOWN,
+    };
+}
+
+/* The record of a device at table slot `slot`: its length, or 0 when it does not
+ * fit in `cap`. */
+static size_t dr_encode(const zbc_device_t *d, uint8_t slot, uint8_t *out, size_t cap)
+{
+    const char  *str[3] = { d->name, d->manufacturer, d->model };
+    const size_t max[3] = { sizeof(d->name), sizeof(d->manufacturer), sizeof(d->model) };
+    const int    eps    = d->ep_count < CONFIG_ZBC_MAX_ENDPOINTS_PER_DEVICE ? d->ep_count
+                                                                           : CONFIG_ZBC_MAX_ENDPOINTS_PER_DEVICE;
+    size_t len[3];
+    size_t need = DR_HEAD + 3 + (size_t)eps * DR_EP_BYTES;
+    for (int k = 0; k < 3; k++) {
+        len[k] = strnlen(str[k], max[k] - 1);
+        need += len[k];
+    }
+    if (need > cap) {
+        return 0;
+    }
+    out[0] = DR_VERSION;
+    out[1] = slot;
+    out[2] = (uint8_t)eps;
+    memcpy(out + 3, d->ieee, ZBC_IEEE_LEN);
+    dr_put16(out + 11, d->short_addr);
+    uint8_t *p = out + DR_HEAD;
+    for (int k = 0; k < 3; k++) {
+        *p++ = (uint8_t)len[k];
+        memcpy(p, str[k], len[k]);
+        p += len[k];
+    }
+    for (int e = 0; e < eps; e++, p += DR_EP_BYTES) {
+        const zbc_endpoint_t *src = &d->eps[e];
+        p[0] = src->ep;
+        dr_put16(p + 1, src->device_id);
+        dr_put16(p + 3, src->features);
+        dr_put32(p + 5, (uint32_t)src->ct_min_mireds);
+        dr_put32(p + 9, (uint32_t)src->ct_max_mireds);
+    }
+    return need;
+}
+
+/* A record back into a device: in use, offline, never seen, every live value
+ * unknown. False for one this build does not read - another version, or a length
+ * its counts do not add up to. A string longer than this build keeps is cut, and
+ * endpoints past its limit are left out. */
+static bool dr_decode(const uint8_t *in, size_t len, zbc_device_t *d, uint8_t *slot)
+{
+    if (len < DR_HEAD || in[0] != DR_VERSION) {
+        return false;
+    }
+    memset(d, 0, sizeof(*d));
+    char        *str[3] = { d->name, d->manufacturer, d->model };
+    const size_t max[3] = { sizeof(d->name), sizeof(d->manufacturer), sizeof(d->model) };
+    size_t       at     = DR_HEAD;
+    for (int k = 0; k < 3; k++) {
+        if (at >= len) {
+            return false;
+        }
+        const size_t n = in[at++];
+        if (n > len - at) {
+            return false;
+        }
+        const size_t keep = n < max[k] - 1 ? n : max[k] - 1;
+        memcpy(str[k], in + at, keep);
+        str[k][keep] = '\0';
+        at += n;
+    }
+    const size_t eps = in[2];
+    if (len - at != eps * DR_EP_BYTES) {
+        return false;
+    }
+    d->in_use = true;
+    memcpy(d->ieee, in + 3, ZBC_IEEE_LEN);
+    d->short_addr = dr_get16(in + 11);
+    for (size_t e = 0; e < eps && e < CONFIG_ZBC_MAX_ENDPOINTS_PER_DEVICE; e++, at += DR_EP_BYTES) {
+        dr_endpoint(&d->eps[d->ep_count++], in[at], dr_get16(in + at + 1), dr_get16(in + at + 3),
+                    (int32_t)dr_get32(in + at + 5), (int32_t)dr_get32(in + at + 9));
+    }
+    *slot = in[1];
+    return true;
+}
+
+/* A row of the old table, as the boot load of the builds before took it. */
+static void dr_from_v2(const dr_v2_device_t *v, zbc_device_t *d)
+{
+    memset(d, 0, sizeof(*d));
+    d->in_use = true;
+    memcpy(d->ieee, v->ieee, ZBC_IEEE_LEN);
+    d->short_addr = v->short_addr;
+    memcpy(d->name, v->name, sizeof(d->name) - 1);
+    memcpy(d->manufacturer, v->manufacturer, sizeof(d->manufacturer) - 1);
+    memcpy(d->model, v->model, sizeof(d->model) - 1);
+    for (int e = 0; e < v->ep_count && e < 4 && e < CONFIG_ZBC_MAX_ENDPOINTS_PER_DEVICE; e++) {
+        const dr_v2_endpoint_t *src = &v->eps[e];
+        dr_endpoint(&d->eps[d->ep_count++], src->ep, src->device_id, src->features, src->ct_min_mireds,
+                    src->ct_max_mireds);
+    }
+}
+
+/* `d` into a table of `max` slots: at `slot` when that is free, else at the
+ * first free one. The slot it took, or -1 when the table is full. */
+static int dr_place(zbc_device_t *out, int max, const zbc_device_t *d, int slot)
+{
+    if (slot < 0 || slot >= max || out[slot].in_use) {
+        for (slot = 0; slot < max && out[slot].in_use; slot++) {
+        }
+        if (slot == max) {
+            return -1;
+        }
+    }
+    out[slot] = *d;
+    return slot;
+}
+
+static bool dr_known(const zbc_device_t *out, int max, const uint8_t ieee[ZBC_IEEE_LEN])
+{
+    for (int i = 0; i < max; i++) {
+        if (out[i].in_use && memcmp(out[i].ieee, ieee, ZBC_IEEE_LEN) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Every device of a table blob into `out`, a table of `max` slots: a record at
+ * the slot it names, the old table's rows in their order. Devices past `max` are
+ * left out, as the builds before left out those past a smaller table. The count
+ * placed, or -1 for a blob this build does not read, with `out` then holding
+ * some of it. With `out` NULL it only checks the blob. */
+static int dr_table_parse(const uint8_t *blob, size_t len, zbc_device_t *out, int max)
+{
+    if (!blob || len < DR_TABLE_HEAD) {
+        return -1;
+    }
+    const uint32_t version = dr_get32(blob);
+    const size_t   count   = dr_get16(blob + 4);
+    int            placed  = 0;
+    zbc_device_t   d;
+    if (version == DR_TABLE_V2) {
+        if (len != DR_TABLE_HEAD + count * sizeof(dr_v2_device_t)) {
+            return -1;
+        }
+        for (size_t i = 0; out && i < count; i++) {
+            dr_v2_device_t row;
+            memcpy(&row, blob + DR_TABLE_HEAD + i * sizeof(row), sizeof(row));
+            dr_from_v2(&row, &d);
+            if (!dr_known(out, max, d.ieee) && dr_place(out, max, &d, -1) >= 0) {
+                placed++;
+            }
+        }
+        return placed;
+    }
+    if (version != DR_TABLE_V3) {
+        return -1;
+    }
+    size_t at = DR_TABLE_HEAD;
+    for (size_t i = 0; i < count; i++) {
+        if (len - at < 2 || len - at - 2 < dr_get16(blob + at)) {
+            return -1;
+        }
+        const size_t rl = dr_get16(blob + at);
+        uint8_t      slot;
+        if (!dr_decode(blob + at + 2, rl, &d, &slot)) {
+            return -1;
+        }
+        at += 2 + rl;
+        if (out && !dr_known(out, max, d.ieee) && dr_place(out, max, &d, slot) >= 0) {
+            placed++;
+        }
+    }
+    return at == len ? placed : -1;
+}
+
+/* The table blob of `devs`, a table of `n` slots, in slot order: its length, or
+ * 0 when `cap` is too small. */
+static size_t dr_table_pack(const zbc_device_t *devs, int n, uint8_t *out, size_t cap)
+{
+    if (cap < DR_TABLE_HEAD) {
+        return 0;
+    }
+    size_t   at    = DR_TABLE_HEAD;
+    uint16_t count = 0;
+    for (int i = 0; i < n; i++) {
+        if (!devs[i].in_use) {
+            continue;
+        }
+        const size_t rl = cap - at >= 2 ? dr_encode(&devs[i], (uint8_t)i, out + at + 2, cap - at - 2) : 0;
+        if (!rl) {
+            return 0;
+        }
+        dr_put16(out + at, (uint16_t)rl);
+        at += 2 + rl;
+        count++;
+    }
+    dr_put32(out, DR_TABLE_V3);
+    dr_put16(out + 4, count);
+    dr_put16(out + 6, 0);
+    return at;
+}
+
+/* Every device of a table blob this build reads given ZBC_SHORT_NONE. */
+static void dr_table_forget_addresses(uint8_t *blob, size_t len)
+{
+    if (dr_table_parse(blob, len, NULL, 0) < 0) {
+        return;
+    }
+    const size_t count = dr_get16(blob + 4);
+    if (dr_get32(blob) == DR_TABLE_V2) {
+        for (size_t i = 0; i < count; i++) {
+            dr_put16(blob + DR_TABLE_HEAD + i * sizeof(dr_v2_device_t) + offsetof(dr_v2_device_t, short_addr),
+                     ZBC_SHORT_NONE);
+        }
+        return;
+    }
+    for (size_t i = 0, at = DR_TABLE_HEAD; i < count; i++) {
+        dr_put16(blob + at + 2 + 11, ZBC_SHORT_NONE);
+        at += 2 + dr_get16(blob + at);
+    }
+}
+/* >>> end host-test region: devrow <<< */
 
 static zbc_device_t      s_devices[CONFIG_ZBC_MAX_DEVICES];
 static SemaphoreHandle_t s_lock;
 
 /* Link quality from the last neighbour scan that saw each device, parallel to
- * s_devices by slot. It lives here rather than in zbc_device_t because the blob
- * is written raw: any new field changes sizeof(zbc_device_t), the load-time size
- * check rejects the stored table, and the names the user gave their lights are
- * gone. That price is not worth paying for a number that is meaningless a reboot
- * later anyway - lqa is a measurement of now, like online and last_seen_us. */
+ * s_devices by slot. A measurement of now, like online and last_seen_us, so it
+ * is never stored. */
 static int16_t           s_lqa[CONFIG_ZBC_MAX_DEVICES];
 
 #define DB_LOCK()   xSemaphoreTakeRecursive(s_lock, portMAX_DELAY)
@@ -65,132 +408,199 @@ static zbc_device_t *find_by_short(uint16_t short_addr)
     return NULL;
 }
 
-static esp_err_t db_save_locked(void)
+static esp_err_t db_write_record(nvs_handle_t nvs, int slot)
+{
+    uint8_t      row[DR_MAX];
+    const size_t len = dr_encode(&s_devices[slot], (uint8_t)slot, row, sizeof(row));
+    char         key[13];
+    dr_key(s_devices[slot].ieee, key);
+    return len ? nvs_set_blob(nvs, key, row, len) : ESP_ERR_INVALID_SIZE;
+}
+
+/* The device's record, after a change to it. */
+static esp_err_t db_save_locked(const zbc_device_t *dev)
 {
     zbc_state_bump();          /* the page shows this table */
     nvs_handle_t nvs;
-    esp_err_t err = nvs_open(DB_NVS_NAMESPACE, NVS_READWRITE, &nvs);
-    if (err != ESP_OK) {
-        return err;
-    }
-
-    size_t   used = 0;
-    for (int i = 0; i < CONFIG_ZBC_MAX_DEVICES; i++) {
-        if (s_devices[i].in_use) {
-            used++;
-        }
-    }
-
-    size_t blob_size = sizeof(db_blob_header_t) + used * sizeof(zbc_device_t);
-    uint8_t *blob = calloc(1, blob_size);
-    if (!blob) {
-        nvs_close(nvs);
-        return ESP_ERR_NO_MEM;
-    }
-
-    db_blob_header_t hdr = { .version = DB_BLOB_VERSION, .count = (uint16_t)used };
-    memcpy(blob, &hdr, sizeof(hdr));
-
-    zbc_device_t *out = (zbc_device_t *)(blob + sizeof(hdr));
-    for (int i = 0; i < CONFIG_ZBC_MAX_DEVICES; i++) {
-        if (!s_devices[i].in_use) {
-            continue;
-        }
-        *out = s_devices[i];
-        /* Runtime-only fields are not meaningful across a reboot. */
-        out->online       = false;
-        out->last_seen_us = 0;
-        for (int e = 0; e < out->ep_count; e++) {
-            /* Capabilities and the lamp's physical colour temperature range are
-             * properties of the device; everything else is live state. */
-            out->eps[e].on_off     = ZBC_UNKNOWN;
-            out->eps[e].level      = ZBC_UNKNOWN;
-            out->eps[e].ct_mireds  = ZBC_UNKNOWN;
-            out->eps[e].hue        = ZBC_UNKNOWN;
-            out->eps[e].saturation = ZBC_UNKNOWN;
-            out->eps[e].color_mode = ZBC_UNKNOWN;
-        }
-        out++;
-    }
-
-    err = nvs_set_blob(nvs, DB_NVS_KEY, blob, blob_size);
+    esp_err_t    err = nvs_open(DB_REC_NAMESPACE, NVS_READWRITE, &nvs);
     if (err == ESP_OK) {
-        err = nvs_commit(nvs);
+        err = db_write_record(nvs, (int)(dev - s_devices));
+        if (err == ESP_OK) {
+            err = nvs_commit(nvs);
+        }
+        nvs_close(nvs);
     }
-    free(blob);
-    nvs_close(nvs);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Could not store \"%s\": %s", dev->name, esp_err_to_name(err));
+    }
+    return err;
+}
+
+/* The record of a device that has gone. */
+static esp_err_t db_forget_locked(const uint8_t ieee[ZBC_IEEE_LEN])
+{
+    zbc_state_bump();
+    char key[13];
+    dr_key(ieee, key);
+    nvs_handle_t nvs;
+    esp_err_t    err = nvs_open(DB_REC_NAMESPACE, NVS_READWRITE, &nvs);
+    if (err == ESP_OK) {
+        err = nvs_erase_key(nvs, key);
+        if (err == ESP_OK || err == ESP_ERR_NVS_NOT_FOUND) {
+            err = nvs_commit(nvs);
+        }
+        nvs_close(nvs);
+    }
     return err;
 }
 
 bool device_db_blob_ok(const void *blob, size_t len)
 {
-    db_blob_header_t hdr;
-    if (!blob || len < sizeof(hdr)) {
-        return false;
-    }
-    memcpy(&hdr, blob, sizeof(hdr));
-    return hdr.version == DB_BLOB_VERSION &&
-           len == sizeof(hdr) + (size_t)hdr.count * sizeof(zbc_device_t);
+    return dr_table_parse(blob, len, NULL, 0) >= 0;
+}
+
+size_t device_db_blob_max(void)
+{
+    const size_t v2 = DR_TABLE_HEAD + CONFIG_ZBC_MAX_DEVICES * sizeof(dr_v2_device_t);
+    const size_t v3 = DR_TABLE_MAX(CONFIG_ZBC_MAX_DEVICES);
+    return v2 > v3 ? v2 : v3;
 }
 
 void device_db_blob_forget_addresses(void *blob, size_t len)
 {
-    if (!device_db_blob_ok(blob, len)) {
-        return;
+    dr_table_forget_addresses(blob, len);
+}
+
+void device_db_drop_records(void)
+{
+    nvs_handle_t nvs;
+    if (nvs_open(DB_REC_NAMESPACE, NVS_READWRITE, &nvs) == ESP_OK) {
+        nvs_erase_all(nvs);
+        nvs_commit(nvs);
+        nvs_close(nvs);
     }
-    db_blob_header_t hdr;
-    memcpy(&hdr, blob, sizeof(hdr));
-    uint8_t *row = (uint8_t *)blob + sizeof(hdr);
-    for (int i = 0; i < hdr.count; i++, row += sizeof(zbc_device_t)) {
-        const uint16_t none = ZBC_SHORT_NONE;
-        memcpy(row + offsetof(zbc_device_t, short_addr), &none, sizeof(none));
+}
+
+/* A table under the old key, from a build before the records or from a restore:
+ * true when there is one this build reads, which then is the table and replaces
+ * every record. It is erased once each of its devices has its record and not
+ * before, so a power cut part way moves it again at the next boot. One this
+ * build does not read is dropped, as the builds before dropped it. */
+static bool db_load_table(void)
+{
+    nvs_handle_t nvs;
+    size_t       len = 0;
+    if (nvs_open(DB_NVS_NAMESPACE, NVS_READWRITE, &nvs) != ESP_OK) {
+        return false;
+    }
+    if (nvs_get_blob(nvs, DB_NVS_KEY, NULL, &len) != ESP_OK) {
+        nvs_close(nvs);
+        return false;
+    }
+    uint8_t *blob = malloc(len ? len : 1);
+    if (!blob) {
+        nvs_close(nvs);          /* left for the next boot */
+        return false;
+    }
+    int n = -1;
+    if (nvs_get_blob(nvs, DB_NVS_KEY, blob, &len) == ESP_OK) {
+        n = dr_table_parse(blob, len, s_devices, CONFIG_ZBC_MAX_DEVICES);
+    }
+    free(blob);
+    if (n < 0) {
+        memset(s_devices, 0, sizeof(s_devices));
+        ESP_LOGW(TAG, "The stored device table is from an incompatible build, discarding it");
+        nvs_erase_key(nvs, DB_NVS_KEY);
+        nvs_commit(nvs);
+        nvs_close(nvs);
+        return false;
+    }
+    nvs_handle_t rec;
+    bool         all = nvs_open(DB_REC_NAMESPACE, NVS_READWRITE, &rec) == ESP_OK;
+    if (all) {
+        all = nvs_erase_all(rec) == ESP_OK;
+        for (int i = 0; i < CONFIG_ZBC_MAX_DEVICES && all; i++) {
+            all = !s_devices[i].in_use || db_write_record(rec, i) == ESP_OK;
+        }
+        all = all && nvs_commit(rec) == ESP_OK;
+        nvs_close(rec);
+    }
+    if (all) {
+        nvs_erase_key(nvs, DB_NVS_KEY);
+        nvs_commit(nvs);
+        ESP_LOGI(TAG, "Moved %d device(s) from the table to a record each", n);
+    } else {
+        ESP_LOGE(TAG, "Could not write every device's record: the table stays, and moves again at the next boot");
+    }
+    nvs_close(nvs);
+    return true;
+}
+
+/* Every record: at the slot it names, or, when that is taken or past this
+ * build's table, the first free one, and then stored again with that slot. A
+ * record this build does not read is left in flash as it is. */
+static void db_load_records(void)
+{
+    nvs_handle_t nvs;
+    if (nvs_open(DB_REC_NAMESPACE, NVS_READONLY, &nvs) != ESP_OK) {
+        return;                  /* no records yet */
+    }
+    bool moved[CONFIG_ZBC_MAX_DEVICES] = { false };
+    for (int pass = 0; pass < 2; pass++) {
+        nvs_iterator_t it = NULL;
+        for (esp_err_t res = nvs_entry_find(NVS_DEFAULT_PART_NAME, DB_REC_NAMESPACE, NVS_TYPE_BLOB, &it);
+             res == ESP_OK; res = nvs_entry_next(&it)) {
+            nvs_entry_info_t info;
+            nvs_entry_info(it, &info);
+            size_t       len = 0;
+            uint8_t     *row = NULL;
+            zbc_device_t d;
+            uint8_t      slot = 0;
+            const bool   read = nvs_get_blob(nvs, info.key, NULL, &len) == ESP_OK && (row = malloc(len ? len : 1)) &&
+                              nvs_get_blob(nvs, info.key, row, &len) == ESP_OK && dr_decode(row, len, &d, &slot);
+            free(row);
+            if (!read) {
+                if (pass == 0) {
+                    ESP_LOGW(TAG, "Record %s is in a format this build does not read; left as it is", info.key);
+                }
+                continue;
+            }
+            if (find_by_ieee(d.ieee)) {
+                continue;        /* placed in the first pass */
+            }
+            if (pass == 0) {
+                if (slot < CONFIG_ZBC_MAX_DEVICES && !s_devices[slot].in_use) {
+                    s_devices[slot] = d;
+                }
+                continue;
+            }
+            const int at = dr_place(s_devices, CONFIG_ZBC_MAX_DEVICES, &d, -1);
+            if (at < 0) {
+                ESP_LOGW(TAG, "No room for \"%s\" (%d devices at most); its record is left in flash", d.name,
+                         CONFIG_ZBC_MAX_DEVICES);
+                continue;
+            }
+            moved[at] = true;
+        }
+        nvs_release_iterator(it);
+    }
+    nvs_close(nvs);
+    for (int i = 0; i < CONFIG_ZBC_MAX_DEVICES; i++) {
+        if (moved[i]) {
+            db_save_locked(&s_devices[i]);
+        }
     }
 }
 
 static void db_load(void)
 {
-    nvs_handle_t nvs;
-    if (nvs_open(DB_NVS_NAMESPACE, NVS_READONLY, &nvs) != ESP_OK) {
-        ESP_LOGI(TAG, "No stored device list yet");
-        return;
+    if (!db_load_table()) {
+        db_load_records();
     }
-
-    size_t blob_size = 0;
-    esp_err_t err = nvs_get_blob(nvs, DB_NVS_KEY, NULL, &blob_size);
-    if (err != ESP_OK || blob_size < sizeof(db_blob_header_t)) {
-        nvs_close(nvs);
-        return;
-    }
-
-    uint8_t *blob = malloc(blob_size);
-    if (!blob) {
-        nvs_close(nvs);
-        return;
-    }
-    err = nvs_get_blob(nvs, DB_NVS_KEY, blob, &blob_size);
-    nvs_close(nvs);
-    if (err != ESP_OK) {
-        free(blob);
-        return;
-    }
-
-    if (!device_db_blob_ok(blob, blob_size)) {
-        ESP_LOGW(TAG, "Stored device list is from an incompatible build, discarding");
-        free(blob);
-        return;
-    }
-    db_blob_header_t hdr;
-    memcpy(&hdr, blob, sizeof(hdr));
-
-    const zbc_device_t *in = (const zbc_device_t *)(blob + sizeof(hdr));
     int loaded = 0;
-    for (int i = 0; i < hdr.count && loaded < CONFIG_ZBC_MAX_DEVICES; i++) {
-        s_devices[loaded]        = in[i];
-        s_devices[loaded].in_use = true;
-        s_devices[loaded].online = false;
-        loaded++;
+    for (int i = 0; i < CONFIG_ZBC_MAX_DEVICES; i++) {
+        loaded += s_devices[i].in_use;
     }
-    free(blob);
     ESP_LOGI(TAG, "Restored %d device(s) from NVS", loaded);
 }
 
@@ -269,12 +679,13 @@ esp_err_t device_db_upsert(const uint8_t ieee[ZBC_IEEE_LEN], uint16_t short_addr
             if (&s_devices[i] != dev && s_devices[i].in_use && s_devices[i].short_addr == short_addr) {
                 s_devices[i].short_addr = ZBC_SHORT_NONE;
                 s_devices[i].online     = false;
+                db_save_locked(&s_devices[i]);
             }
         }
     }
 
     if ((created && *created) || moved) {
-        err = db_save_locked();
+        err = db_save_locked(dev);
     }
     DB_UNLOCK();
     return err;
@@ -309,7 +720,7 @@ esp_err_t device_db_set_identity(const uint8_t ieee[ZBC_IEEE_LEN], const char *m
     }
     dev->last_seen_us = esp_timer_get_time();
     dev->online       = true;
-    esp_err_t err = changed ? db_save_locked() : ESP_OK;
+    esp_err_t err = changed ? db_save_locked(dev) : ESP_OK;
     DB_UNLOCK();
     return err;
 }
@@ -331,7 +742,7 @@ esp_err_t device_db_add_endpoint(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, u
                                  (dev->eps[i].features | features) != dev->eps[i].features;
             dev->eps[i].device_id = device_id;
             dev->eps[i].features |= features;
-            esp_err_t err = changed ? db_save_locked() : ESP_OK;
+            esp_err_t err = changed ? db_save_locked(dev) : ESP_OK;
             DB_UNLOCK();
             return err;
         }
@@ -353,7 +764,7 @@ esp_err_t device_db_add_endpoint(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, u
         .saturation    = ZBC_UNKNOWN,
         .color_mode    = ZBC_UNKNOWN,
     };
-    esp_err_t err = db_save_locked();
+    esp_err_t err = db_save_locked(dev);
     DB_UNLOCK();
     return err;
 }
@@ -367,7 +778,7 @@ esp_err_t device_db_add_features(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, u
         for (int i = 0; i < dev->ep_count; i++) {
             if (dev->eps[i].ep == ep && (dev->eps[i].features & features) != features) {
                 dev->eps[i].features |= features;
-                err = db_save_locked();
+                err = db_save_locked(dev);
                 break;
             }
         }
@@ -391,7 +802,7 @@ esp_err_t device_db_clear_features(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep,
         }
         const uint16_t before = dev->eps[i].features;
         dev->eps[i].features &= (uint16_t)~features;
-        err = before == dev->eps[i].features ? ESP_OK : db_save_locked();
+        err = before == dev->eps[i].features ? ESP_OK : db_save_locked(dev);
         break;
     }
     DB_UNLOCK();
@@ -403,7 +814,7 @@ static esp_err_t erase_endpoint_locked(zbc_device_t *dev, int i)
     memmove(&dev->eps[i], &dev->eps[i + 1], (size_t)(dev->ep_count - i - 1) * sizeof(dev->eps[0]));
     dev->ep_count--;
     memset(&dev->eps[dev->ep_count], 0, sizeof(dev->eps[0]));
-    return db_save_locked();              /* which bumps the state revision */
+    return db_save_locked(dev);           /* which bumps the state revision */
 }
 
 esp_err_t device_db_remove_endpoint(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep)
@@ -450,7 +861,7 @@ esp_err_t device_db_rename(const uint8_t ieee[ZBC_IEEE_LEN], const char *name)
         return ESP_ERR_NOT_FOUND;
     }
     strlcpy(dev->name, name, sizeof(dev->name));
-    esp_err_t err = db_save_locked();
+    esp_err_t err = db_save_locked(dev);
     DB_UNLOCK();
     return err;
 }
@@ -464,8 +875,10 @@ esp_err_t device_db_remove(const uint8_t ieee[ZBC_IEEE_LEN])
         return ESP_ERR_NOT_FOUND;
     }
     s_lqa[dev - s_devices] = ZBC_UNKNOWN;
+    uint8_t ieee_copy[ZBC_IEEE_LEN];
+    memcpy(ieee_copy, dev->ieee, ZBC_IEEE_LEN);
     memset(dev, 0, sizeof(*dev));
-    esp_err_t err = db_save_locked();
+    esp_err_t err = db_forget_locked(ieee_copy);
     DB_UNLOCK();
     return err;
 }
@@ -518,7 +931,7 @@ esp_err_t device_db_set_attr_by_short(uint16_t short_addr, uint8_t ep, zbc_attr_
     case ZBC_ATTR_CT_MAX:     persist = e->ct_max_mireds != value; e->ct_max_mireds = value; break;
     }
 
-    esp_err_t err = persist ? db_save_locked() : ESP_OK;
+    esp_err_t err = persist ? db_save_locked(dev) : ESP_OK;
     DB_UNLOCK();
     return err;
 }
@@ -722,14 +1135,6 @@ void device_db_for_each(void (*cb)(const zbc_device_t *dev, void *ctx), void *ct
     DB_UNLOCK();
 }
 
-esp_err_t device_db_save(void)
-{
-    DB_LOCK();
-    esp_err_t err = db_save_locked();
-    DB_UNLOCK();
-    return err;
-}
-
 esp_err_t device_db_erase(void)
 {
     DB_LOCK();
@@ -737,9 +1142,19 @@ esp_err_t device_db_erase(void)
     for (int i = 0; i < CONFIG_ZBC_MAX_DEVICES; i++) {
         s_lqa[i] = ZBC_UNKNOWN;
     }
+    zbc_state_bump();
     nvs_handle_t nvs;
-    esp_err_t err = nvs_open(DB_NVS_NAMESPACE, NVS_READWRITE, &nvs);
+    esp_err_t    err = nvs_open(DB_REC_NAMESPACE, NVS_READWRITE, &nvs);
     if (err == ESP_OK) {
+        err = nvs_erase_all(nvs);
+        if (err == ESP_OK) {
+            err = nvs_commit(nvs);
+        }
+        nvs_close(nvs);
+    }
+    /* And a table under the old key not yet moved, or the next boot would bring
+     * it all back. */
+    if (err == ESP_OK && (err = nvs_open(DB_NVS_NAMESPACE, NVS_READWRITE, &nvs)) == ESP_OK) {
         err = nvs_erase_key(nvs, DB_NVS_KEY);
         if (err == ESP_ERR_NVS_NOT_FOUND) {
             err = ESP_OK;
@@ -750,6 +1165,31 @@ esp_err_t device_db_erase(void)
         nvs_close(nvs);
     }
     DB_UNLOCK();
+    return err;
+}
+
+esp_err_t device_db_export_table(uint8_t **out, size_t *len)
+{
+    *out = NULL;
+    *len = 0;
+    DB_LOCK();
+    int n = 0;
+    for (int i = 0; i < CONFIG_ZBC_MAX_DEVICES; i++) {
+        n += s_devices[i].in_use;
+    }
+    esp_err_t err = ESP_ERR_NOT_FOUND;
+    if (n) {
+        const size_t cap = DR_TABLE_MAX(n);
+        *out             = malloc(cap);
+        *len             = *out ? dr_table_pack(s_devices, CONFIG_ZBC_MAX_DEVICES, *out, cap) : 0;
+        err              = *len ? ESP_OK : ESP_ERR_NO_MEM;
+    }
+    DB_UNLOCK();
+    if (err != ESP_OK) {
+        free(*out);
+        *out = NULL;
+        *len = 0;
+    }
     return err;
 }
 

@@ -176,7 +176,7 @@ main/
   radio_ed.c         restarts an energy scan the 802.15.4 driver never finishes
   settings.c         global preferences, persisted in NVS
   crash_log.c        the last crash: registers, task and stack, kept for the next boot
-  device_db.c        device registry, keyed by IEEE address, persisted in NVS
+  device_db.c        device registry, keyed by IEEE address, a record per device in NVS
   group_db.c         named groups of (device, endpoint) members, persisted in NVS
   al_db.c            how each group exposes Adaptive Lighting, and which run it, in NVS
   button_db.c        buttons: their source, and all their rules in one pool, in NVS
