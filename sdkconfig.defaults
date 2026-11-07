@@ -108,12 +108,13 @@ CONFIG_MAX_GROUP_KEYS_PER_FABRIC=4
 CONFIG_MAX_EXCHANGE_CONTEXTS=16
 # Root + aggregator + two per group (CONFIG_ZBC_MAX_GROUPS, 8: the light and its
 # "<name> Adaptive" switch, when the group exposes Adaptive Lighting that way) + one
-# per device endpoint shown on its own (CONFIG_ZBC_MAX_MATTER_EXPOSED, 12) + two
-# spare. matter_bridge.cpp refuses to build if this falls behind those counts.
+# per device endpoint shown on its own (CONFIG_ZBC_MAX_MATTER_EXPOSED, 24) + two
+# spare = 44. matter_bridge.cpp refuses to build if this falls behind those counts.
 # Never lower it: esp_matter_bridge stores its endpoint list at this size, a shorter
 # buffer cannot read it back, and every room would come back on a new id - a new
-# light to every controller. Raising it is safe (see resume_bridged).
-CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_COUNT=32
+# light to every controller. Raising it is safe (see resume_bridged). 20 until
+# v0.3.0, 32 until 2026-11-07; each one more costs about 450 bytes of static RAM.
+CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_COUNT=44
 # One Mode Select per group's light, for groups exposing Adaptive Lighting as one.
 CONFIG_ESP_MATTER_MODE_SELECT_CLUSTER_ENDPOINT_COUNT=8
 # Everything Matter keeps goes in its own partition (see partitions.csv), so it

@@ -613,9 +613,9 @@ typedef struct {
     mb_map_entry_t e[CONFIG_ZBC_MAX_GROUPS];
 } mb_map_t;
 
-/* The same for the device endpoints. Its size follows CONFIG_ZBC_MAX_MATTER_EXPOSED,
- * so a build with another one starts the devices on new ids, and leaves the rooms
- * alone. */
+/* The same for the device endpoints. Stored as its header and `count` entries, so
+ * a build with another CONFIG_ZBC_MAX_MATTER_EXPOSED reads it and the devices keep
+ * their ids (load_dev_map). */
 typedef struct {
     uint8_t  ieee[ZBC_IEEE_LEN];
     uint8_t  ep;
@@ -826,12 +826,36 @@ static void save_map(const char *key, bool adaptive)
     save_blob(key, &map, sizeof(map));
 }
 
+#define MB_DEV_MAP_HEAD offsetof(mb_dev_map_t, e)
+
+/* Any length of header and whole entries. Earlier builds stored the full array,
+ * unused entries and all, which reads the same way. A map with more entries than
+ * this build has slots keeps the first MB_DEV_SLOTS, and the rest come back on
+ * new ids. */
 static void load_dev_map(mb_dev_map_t *map)
 {
-    if (!load_blob(MB_NVS_KEY_DEV, map, sizeof(*map)) || map->version != MB_DEV_MAP_VERSION ||
-        map->count > MB_DEV_SLOTS) {
-        memset(map, 0, sizeof(*map));
+    memset(map, 0, sizeof(*map));
+    nvs_handle_t h;
+    if (nvs_open_from_partition(MB_NVS_PART, MB_NVS_NS, NVS_READONLY, &h) != ESP_OK) {
+        return;
     }
+    size_t   len = 0;
+    uint8_t *buf = nullptr;
+    if (nvs_get_blob(h, MB_NVS_KEY_DEV, nullptr, &len) == ESP_OK && len >= MB_DEV_MAP_HEAD &&
+        (len - MB_DEV_MAP_HEAD) % sizeof(mb_dev_entry_t) == 0 &&
+        (buf = static_cast<uint8_t *>(malloc(len))) != nullptr &&
+        nvs_get_blob(h, MB_NVS_KEY_DEV, buf, &len) == ESP_OK) {
+        const size_t  stored  = (len - MB_DEV_MAP_HEAD) / sizeof(mb_dev_entry_t);
+        const uint8_t version = buf[offsetof(mb_dev_map_t, version)];
+        const uint8_t count   = buf[offsetof(mb_dev_map_t, count)];
+        if (version == MB_DEV_MAP_VERSION && count <= stored) {
+            map->version = version;
+            map->count   = (uint8_t)(count < MB_DEV_SLOTS ? count : MB_DEV_SLOTS);
+            memcpy(map->e, buf + MB_DEV_MAP_HEAD, map->count * sizeof(mb_dev_entry_t));
+        }
+    }
+    free(buf);
+    nvs_close(h);
 }
 
 /* The device endpoint a stored endpoint stands for, nullptr when the map does not
@@ -860,7 +884,7 @@ static void save_dev_map(void)
             e.endpoint_id = s.endpoint_id;
         }
     }
-    save_blob(MB_NVS_KEY_DEV, &map, sizeof(map));
+    save_blob(MB_NVS_KEY_DEV, &map, MB_DEV_MAP_HEAD + map.count * sizeof(mb_dev_entry_t));
 }
 
 static void save_maps(void)

@@ -79,7 +79,7 @@ menu "Elixcon Light Hub"
     config ZBC_MAX_MATTER_EXPOSED
         int "Maximum number of Matter endpoints for devices shown on their own"
         range 1 32
-        default 12
+        default 24
         help
             A Zigbee lamp or motion sensor shown in Matter on its own takes one, and
             a remote one for itself and one per button. Rooms have endpoints of
@@ -88,8 +88,10 @@ menu "Elixcon Light Hub"
             no new one while less than 48 KB is free (MB_DEV_HEAP_MIN), so the heap,
             not this count, is usually what runs out first.
             CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_COUNT has to grow with it, and
-            matter_bridge.cpp refuses to build if it falls behind. Changing it
-            changes nothing stored: the table is kept by count.
+            matter_bridge.cpp refuses to build if it falls behind; that one may
+            never be lowered again (sdkconfig.defaults). Changing this one changes
+            nothing stored: mexp_db and the bridge's device map are kept by count,
+            so shared devices keep their Matter ids.
 
     config ZBC_BUTTON_RULES
         int "Rules on one button, all its gestures together"
