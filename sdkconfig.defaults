@@ -45,6 +45,28 @@ CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=y
 CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=16
 
 #
+# Wi-Fi code in IRAM
+#
+# On the C6 IRAM is the same SRAM the heap comes from, and the Wi-Fi driver's
+# speed options kept 48 KB of it as code. The board moves little over Wi-Fi: a
+# page, polls of a few KB, Matter's small messages. Updates are written by the
+# updater, which keeps its own settings. Measured on the dev board (2026-11-07,
+# modem sleep on): 45 KB more heap free, the 118 KB page in 0.37-0.49 s instead
+# of 0.12-0.40. Streamed responses took 70-80 ms longer too, until json_stream
+# wrote each chunk in one piece and httpd's sockets went TCP_NODELAY; since then
+# an unchanged /api/state poll and a full one are as quick as before or quicker.
+# A flood of datagrams to a closed port made the board unreachable for its whole
+# length until icmp_limit.c capped the replies. SLP_IRAM_OPT only shortens the
+# wake for each beacon in modem sleep, which saves current on a board that runs
+# on mains power; it also selected the light-sleep functions into IRAM
+# (CONFIG_PM_SLEEP_FUNC_IN_IRAM, CONFIG_PM_SLP_IRAM_OPT), and light sleep is off
+# (CONFIG_PM_ENABLE).
+CONFIG_ESP_WIFI_IRAM_OPT=n
+CONFIG_ESP_WIFI_EXTRA_IRAM_OPT=n
+CONFIG_ESP_WIFI_RX_IRAM_OPT=n
+CONFIG_ESP_WIFI_SLP_IRAM_OPT=n
+
+#
 # HTTP server
 #
 CONFIG_HTTPD_MAX_URI_LEN=256

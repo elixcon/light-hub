@@ -43,6 +43,7 @@ idf_component_register(
         "matter_ctl.cpp"
         "radio_ed.c"
         "radio_coex.c"
+        "icmp_limit.c"
         "wled.c"
     INCLUDE_DIRS "."
 )
@@ -61,6 +62,16 @@ foreach(zbc_sym esp_ieee802154_energy_detect esp_ieee802154_energy_detect_done
 endforeach()
 
 zbc_wrap_radio_coex(radio_coex.c)
+
+# lwIP's ICMP errors - "port unreachable" for every datagram nobody listens for -
+# go out at a bounded rate (icmp_limit.c), so a flood cannot fill the Wi-Fi
+# transmit queue with replies. Nothing else calls into icmp_limit.c, and lwIP's
+# references come after libmain.a in the link, so the wrappers are named as
+# undefined up front to pull the file in.
+foreach(zbc_sym icmp_dest_unreach icmp6_dest_unreach)
+    target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=${zbc_sym}"
+                                                     "-Wl,--undefined=__wrap_${zbc_sym}")
+endforeach()
 
 # A crash leaves a record for the next boot (crash_log.c): esp_panic_handler is
 # wrapped so the registers, the task and the stack's code addresses are copied

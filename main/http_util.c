@@ -46,29 +46,98 @@ esp_err_t send_json(httpd_req_t *req, cJSON *root, const char *status)
  *
  * send_json holds the whole cJSON tree and then its printed text at once, and
  * cJSON costs five to six bytes of heap per byte of JSON: a full /api/state
- * would take about 58 KB of a heap with about 88 KB free. Here each device,
- * group or button is built, printed into one small buffer and freed before the
- * next, and the buffer goes out as a chunk whenever it fills.
+ * would take about 58 KB of a heap with about 88 KB free. Here each device's
+ * fields, each endpoint, group or button is built, printed into one small buffer
+ * and freed before the next, and the buffer goes out as a chunk whenever it
+ * fills. An item larger than the buffer is printed on its own and costs its
+ * whole tree and text at once, so keep items well under JSON_STREAM_BUF.
+ *
+ * Each chunk goes out as one write, the response head with the first and the
+ * closing zero chunk with the last. httpd_resp_send_chunk writes the head a few
+ * bytes at a time and each chunk in three pieces - about fifteen writes for an
+ * unchanged poll - and with the Wi-Fi driver's code in flash (sdkconfig.defaults)
+ * a response in more than one chunk took a further 70-80 ms on the dev board.
  *
  * Once the first chunk is out the status is sent, so a failure after that can
  * only end the response early; json_stream_end then answers ESP_FAIL and the
  * server drops the connection, which the page treats as a failed poll. */
+
+/* Room before the text for the head (the status line, three headers and one
+ * more, see json_stream_t) and a chunk's size, and after it for the chunk's
+ * CRLF and the closing "0\r\n\r\n". */
+#define JSON_STREAM_HEAD 320
+#define JSON_STREAM_TAIL 8
+
 bool json_stream_begin(json_stream_t *js, httpd_req_t *req)
 {
-    *js = (json_stream_t){ .req = req, .buf = malloc(JSON_STREAM_BUF) };
-    if (!js->buf) {
-        return false;
+    char *block = malloc(JSON_STREAM_HEAD + JSON_STREAM_BUF + JSON_STREAM_TAIL);
+    *js = (json_stream_t){
+        .req   = req,
+        .block = block,
+        .buf   = block ? block + JSON_STREAM_HEAD : NULL,
+        .type  = "application/json",
+    };
+    return block != NULL;
+}
+
+static bool send_all(httpd_req_t *req, const char *p, size_t n)
+{
+    while (n) {
+        const int sent = httpd_send(req, p, n);
+        if (sent <= 0) {
+            return false;
+        }
+        p += sent;
+        n -= (size_t)sent;
     }
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return true;
+}
+
+/* What the buffer holds as one chunk, framed in place and sent in one write;
+ * with `last`, followed by the zero chunk that ends the response. */
+static void stream_send(json_stream_t *js, bool last)
+{
+    if (js->failed || (js->len == 0 && !last)) {
+        return;
+    }
+    char *start = js->buf;
+    char *end   = js->buf + js->len;
+    if (js->len) {
+        char      size[8];
+        const int n = snprintf(size, sizeof(size), "%x\r\n", (unsigned)js->len);
+        start -= n;
+        memcpy(start, size, n);
+        memcpy(end, "\r\n", 2);
+        end += 2;
+    }
+    if (last) {
+        memcpy(end, "0\r\n\r\n", 5);
+        end += 5;
+    }
+    if (!js->head_sent) {
+        const bool more = js->hdr_name && js->hdr_value;
+        char       head[JSON_STREAM_HEAD];
+        const int  n = snprintf(head, sizeof(head),
+                                "HTTP/1.1 200 OK\r\nContent-Type: %s\r\nCache-Control: no-store\r\n"
+                                "Transfer-Encoding: chunked\r\n%s%s%s%s\r\n",
+                                js->type, more ? js->hdr_name : "", more ? ": " : "",
+                                more ? js->hdr_value : "", more ? "\r\n" : "");
+        if (n < 0 || n > start - js->block) {
+            js->failed = true;
+            return;
+        }
+        start -= n;
+        memcpy(start, head, n);
+        js->head_sent = true;
+    }
+    if (!send_all(js->req, start, (size_t)(end - start))) {
+        js->failed = true;
+    }
 }
 
 void json_stream_flush(json_stream_t *js)
 {
-    if (js->len && !js->failed && httpd_resp_send_chunk(js->req, js->buf, js->len) != ESP_OK) {
-        js->failed = true;
-    }
+    stream_send(js, false);
     js->total += js->len;
     js->len = 0;
 }
@@ -124,6 +193,20 @@ bool json_stream_item(json_stream_t *js, const char *sep, cJSON *item)
     return done;
 }
 
+/* Writes `sep` and the item and frees it, like json_stream_item, but leaves it
+ * open: its closing bracket is taken back, so the caller can stream more
+ * members or elements into it and then close it. There is always a bracket to
+ * take: after any write its last byte is still in the buffer, because
+ * json_stream_raw flushes only before it copies. */
+bool json_stream_open(json_stream_t *js, const char *sep, cJSON *item)
+{
+    if (!json_stream_item(js, sep, item)) {
+        return false;
+    }
+    js->len--;
+    return true;
+}
+
 /* An object member's value: null rather than nothing, so the JSON stays whole. */
 void json_stream_value(json_stream_t *js, cJSON *item)
 {
@@ -165,25 +248,22 @@ void json_stream_member(json_stream_t *js, bool *first, const char *name, cJSON 
  * showed and polls again - an empty list would read as every device gone. */
 esp_err_t json_stream_fail(json_stream_t *js)
 {
-    if (js->total == 0 && !js->failed) {
-        free(js->buf);
-        js->buf = NULL;
+    free(js->block);
+    js->block = js->buf = NULL;
+    if (!js->head_sent && !js->failed) {
         return send_error(js->req, "500 Internal Server Error", "out of memory");
     }
     js->failed = true;
-    free(js->buf);
-    js->buf = NULL;
     return ESP_FAIL;
 }
 
 esp_err_t json_stream_end(json_stream_t *js)
 {
-    json_stream_flush(js);
-    if (!js->failed && httpd_resp_send_chunk(js->req, NULL, 0) != ESP_OK) {
-        js->failed = true;
-    }
-    free(js->buf);
-    js->buf = NULL;
+    stream_send(js, true);
+    js->total += js->len;
+    js->len = 0;
+    free(js->block);
+    js->block = js->buf = NULL;
     heap_watch_note_body(js->total);
     return js->failed ? ESP_FAIL : ESP_OK;
 }

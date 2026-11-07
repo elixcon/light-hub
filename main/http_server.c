@@ -15,6 +15,7 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "lwip/sockets.h"
 #include "nvs.h"
 
 #include "al_db.h"
@@ -364,7 +365,8 @@ static esp_err_t status_get(httpd_req_t *req)
     return json_stream_end(&js);
 }
 
-/* One device as /api/devices and /api/state list it. */
+/* A device's own fields, as /api/devices and /api/state list it; its
+ * "endpoints" follow, written by stream_device. */
 static cJSON *device_to_json(const zbc_device_t *dev, int64_t now)
 {
     cJSON *d = cJSON_CreateObject();
@@ -481,152 +483,172 @@ static cJSON *device_to_json(const zbc_device_t *dev, int64_t now)
         zb_ota_add_device_json(d, dev->ieee);
     }
 
-    cJSON *eps = cJSON_AddArrayToObject(d, "endpoints");
-    for (int e = 0; e < dev->ep_count; e++) {
-        const zbc_endpoint_t *src = &dev->eps[e];
-        cJSON                *ep  = cJSON_CreateObject();
-
-        cJSON_AddNumberToObject(ep, "ep", src->ep);
-        cJSON_AddNumberToObject(ep, "device_id", src->device_id);
-
-        /* What the UI may show for this lamp. */
-        cJSON *feat = cJSON_AddArrayToObject(ep, "features");
-        if (src->features & ZBC_FEAT_ONOFF) {
-            cJSON_AddItemToArray(feat, cJSON_CreateString("onoff"));
-        }
-        if (src->features & ZBC_FEAT_LEVEL) {
-            cJSON_AddItemToArray(feat, cJSON_CreateString("brightness"));
-        }
-        if (src->features & ZBC_FEAT_COLOR_TEMP) {
-            cJSON_AddItemToArray(feat, cJSON_CreateString("color_temp"));
-        }
-        if (src->features & ZBC_FEAT_ANY_COLOR) {
-            cJSON_AddItemToArray(feat, cJSON_CreateString("color"));
-        }
-        /* A remote, not a lamp. It shares the endpoint list because it is a
-         * paired device like any other, and a client has to be able to tell
-         * the two apart - the older Aqara switch carries "onoff" as well,
-         * because it really does advertise the cluster. */
-        if (src->features & ZBC_FEAT_SWITCH) {
-            cJSON_AddItemToArray(feat, cJSON_CreateString("switch"));
-        }
-        /* A Light Node: the page offers to open its Wi-Fi. */
-        if (src->features & ZBC_FEAT_NODE) {
-            static const char *const WIFI[] = { "off", "joining", "station", "hotspot" };
-            uint8_t state = NODE_WIFI_OFF, ip[4];
-            zb_node_wifi_get(dev->ieee, &state, ip);
-            cJSON_AddItemToArray(feat, cJSON_CreateString("node"));
-            cJSON_AddStringToObject(ep, "node_wifi", state < 4 ? WIFI[state] : "off");
-            if (state == NODE_WIFI_STATION) {
-                char addr[16];
-                snprintf(addr, sizeof(addr), "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
-                cJSON_AddStringToObject(ep, "node_ip", addr);
-            } else {
-                cJSON_AddNullToObject(ep, "node_ip");
-            }
-        }
-        /* The page offers a Hue dimmer's holds and double presses only once
-         * they can arrive. */
-        if (src->features & ZBC_FEAT_HUE_BUTTONS) {
-            cJSON_AddItemToArray(feat, cJSON_CreateString("hue_buttons"));
-        }
-        /* A motion sensor; whether it says "unoccupied" itself decides what its
-         * no-motion time is counted from. */
-        if (src->features & ZBC_FEAT_MOTION) {
-            cJSON_AddItemToArray(feat, cJSON_CreateString("motion"));
-            cJSON_AddBoolToObject(ep, "reports_clear", (src->features & ZBC_FEAT_MOTION_CLEARS) != 0);
-        }
-        /* Shown in Matter on its own (mexp_db.h). Absent is off, the default. */
-        if (mexp_db_has(dev->ieee, src->ep)) {
-            cJSON_AddBoolToObject(ep, "matter", true);
-        }
-
-        if (src->on_off == ZBC_UNKNOWN) {
-            cJSON_AddNullToObject(ep, "on");
-        } else {
-            cJSON_AddBoolToObject(ep, "on", src->on_off == 1);
-        }
-
-        /* Brightness as a percentage: ZCL level 1-254 maps to 1-100 %. */
-        if (src->level == ZBC_UNKNOWN) {
-            cJSON_AddNullToObject(ep, "brightness_pct");
-        } else {
-            cJSON_AddNumberToObject(ep, "brightness_pct", zbc_level_to_pct(src->level));
-        }
-
-        add_kelvin(ep, "kelvin", src->ct_mireds);
-        /* Mireds run the other way round from kelvin, so the coolest limit is
-         * the largest kelvin value. */
-        add_kelvin(ep, "min_kelvin", src->ct_max_mireds);
-        add_kelvin(ep, "max_kelvin", src->ct_min_mireds);
-
-        if (src->hue == ZBC_UNKNOWN) {
-            cJSON_AddNullToObject(ep, "hue");
-        } else {
-            cJSON_AddNumberToObject(ep, "hue", (int)(src->hue * 360 / 254) % 360);
-        }
-        if (src->saturation == ZBC_UNKNOWN) {
-            cJSON_AddNullToObject(ep, "sat");
-        } else {
-            cJSON_AddNumberToObject(ep, "sat", (int)(src->saturation * 100 / 254));
-        }
-        if (src->color_mode == ZBC_UNKNOWN) {
-            cJSON_AddNullToObject(ep, "color_mode");
-        } else {
-            cJSON_AddStringToObject(ep, "color_mode",
-                                    src->color_mode == 2 ? "color_temp" : "color");
-        }
-
-        /* Which response curves this endpoint has, and the brightness that
-         * was last asked for. The UI slider binds to input_pct rather than
-         * brightness_pct whenever a level curve is in the way: the lamp
-         * reports its mapped output, which would never agree with the
-         * optimistic value and would leave the slider stuck. */
-        bool has_level = false, has_chroma = false;
-        curve_db_active(dev->ieee, src->ep, &has_level, &has_chroma);
-        cJSON *curves = cJSON_AddObjectToObject(ep, "curves");
-        cJSON_AddBoolToObject(curves, "level", has_level);
-        cJSON_AddBoolToObject(curves, "chroma", has_chroma);
-
-        int input_pct = curve_db_input_pct(dev->ieee, src->ep);
-        if (input_pct == ZBC_UNKNOWN) {
-            cJSON_AddNullToObject(ep, "input_pct");
-        } else {
-            cJSON_AddNumberToObject(ep, "input_pct", input_pct);
-        }
-
-        /* Whether this endpoint will ever volunteer its state - a different question
-         * from whether the link is good: a device reports only once a ZDO bind and
-         * a Configure Reporting have both been answered. `frames_heard` in the
-         * same row is the other half: it counts only frames the device sent of
-         * its own accord, so a lamp with every answer in and frames_heard stuck
-         * at 0 accepted the configuration and ignores it. Not revision-tracked (an
-         * answer bumps nothing), so a page sees it on its next full read. A wired
-         * light has no radio and no bindings, hence nothing here, and a Matter
-         * lamp reports through its subscription, which has no such halves. */
-        if (!light_id && !mlight_id) {
-            zb_report_state_t rs;
-            zb_report_state(dev->ieee, src->ep, src->features, &rs);
-            cJSON *reporting = cJSON_AddArrayToObject(ep, "reporting");
-            for (int r = 0; r < rs.count; r++) {
-                cJSON *c = cJSON_CreateObject();
-                cJSON_AddStringToObject(c, "cluster", rs.c[r].cluster);
-                cJSON_AddBoolToObject(c, "bound", rs.c[r].bound);
-                cJSON_AddBoolToObject(c, "bind_refused", rs.c[r].bind_refused);
-                if (rs.c[r].wants_config) {
-                    cJSON_AddBoolToObject(c, "configured", rs.c[r].configured);
-                    cJSON_AddBoolToObject(c, "config_refused", rs.c[r].config_refused);
-                } else {
-                    cJSON_AddNullToObject(c, "configured");
-                    cJSON_AddNullToObject(c, "config_refused");
-                }
-                cJSON_AddItemToArray(reporting, c);
-            }
-        }
-
-        cJSON_AddItemToArray(eps, ep);
-    }
     return d;
+}
+
+/* One endpoint of a device, built on its own: stream_device writes them one at
+ * a time, so a device with four costs the heap one endpoint's tree, not one
+ * tree of all four (2.5 KB of JSON for a Light Node, past the stream buffer). */
+static cJSON *endpoint_to_json(const zbc_device_t *dev, const zbc_endpoint_t *src)
+{
+    const bool radio = !zbc_light_id_from_ieee(dev->ieee) && !zbc_mlight_id_from_ieee(dev->ieee);
+    cJSON     *ep    = cJSON_CreateObject();
+
+    cJSON_AddNumberToObject(ep, "ep", src->ep);
+    cJSON_AddNumberToObject(ep, "device_id", src->device_id);
+
+    /* What the UI may show for this lamp. */
+    cJSON *feat = cJSON_AddArrayToObject(ep, "features");
+    if (src->features & ZBC_FEAT_ONOFF) {
+        cJSON_AddItemToArray(feat, cJSON_CreateString("onoff"));
+    }
+    if (src->features & ZBC_FEAT_LEVEL) {
+        cJSON_AddItemToArray(feat, cJSON_CreateString("brightness"));
+    }
+    if (src->features & ZBC_FEAT_COLOR_TEMP) {
+        cJSON_AddItemToArray(feat, cJSON_CreateString("color_temp"));
+    }
+    if (src->features & ZBC_FEAT_ANY_COLOR) {
+        cJSON_AddItemToArray(feat, cJSON_CreateString("color"));
+    }
+    /* A remote, not a lamp. It shares the endpoint list because it is a
+     * paired device like any other, and a client has to be able to tell
+     * the two apart - the older Aqara switch carries "onoff" as well,
+     * because it really does advertise the cluster. */
+    if (src->features & ZBC_FEAT_SWITCH) {
+        cJSON_AddItemToArray(feat, cJSON_CreateString("switch"));
+    }
+    /* A Light Node: the page offers to open its Wi-Fi. */
+    if (src->features & ZBC_FEAT_NODE) {
+        static const char *const WIFI[] = { "off", "joining", "station", "hotspot" };
+        uint8_t state = NODE_WIFI_OFF, ip[4];
+        zb_node_wifi_get(dev->ieee, &state, ip);
+        cJSON_AddItemToArray(feat, cJSON_CreateString("node"));
+        cJSON_AddStringToObject(ep, "node_wifi", state < 4 ? WIFI[state] : "off");
+        if (state == NODE_WIFI_STATION) {
+            char addr[16];
+            snprintf(addr, sizeof(addr), "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
+            cJSON_AddStringToObject(ep, "node_ip", addr);
+        } else {
+            cJSON_AddNullToObject(ep, "node_ip");
+        }
+    }
+    /* The page offers a Hue dimmer's holds and double presses only once
+     * they can arrive. */
+    if (src->features & ZBC_FEAT_HUE_BUTTONS) {
+        cJSON_AddItemToArray(feat, cJSON_CreateString("hue_buttons"));
+    }
+    /* A motion sensor; whether it says "unoccupied" itself decides what its
+     * no-motion time is counted from. */
+    if (src->features & ZBC_FEAT_MOTION) {
+        cJSON_AddItemToArray(feat, cJSON_CreateString("motion"));
+        cJSON_AddBoolToObject(ep, "reports_clear", (src->features & ZBC_FEAT_MOTION_CLEARS) != 0);
+    }
+    /* Shown in Matter on its own (mexp_db.h). Absent is off, the default. */
+    if (mexp_db_has(dev->ieee, src->ep)) {
+        cJSON_AddBoolToObject(ep, "matter", true);
+    }
+
+    if (src->on_off == ZBC_UNKNOWN) {
+        cJSON_AddNullToObject(ep, "on");
+    } else {
+        cJSON_AddBoolToObject(ep, "on", src->on_off == 1);
+    }
+
+    /* Brightness as a percentage: ZCL level 1-254 maps to 1-100 %. */
+    if (src->level == ZBC_UNKNOWN) {
+        cJSON_AddNullToObject(ep, "brightness_pct");
+    } else {
+        cJSON_AddNumberToObject(ep, "brightness_pct", zbc_level_to_pct(src->level));
+    }
+
+    add_kelvin(ep, "kelvin", src->ct_mireds);
+    /* Mireds run the other way round from kelvin, so the coolest limit is
+     * the largest kelvin value. */
+    add_kelvin(ep, "min_kelvin", src->ct_max_mireds);
+    add_kelvin(ep, "max_kelvin", src->ct_min_mireds);
+
+    if (src->hue == ZBC_UNKNOWN) {
+        cJSON_AddNullToObject(ep, "hue");
+    } else {
+        cJSON_AddNumberToObject(ep, "hue", (int)(src->hue * 360 / 254) % 360);
+    }
+    if (src->saturation == ZBC_UNKNOWN) {
+        cJSON_AddNullToObject(ep, "sat");
+    } else {
+        cJSON_AddNumberToObject(ep, "sat", (int)(src->saturation * 100 / 254));
+    }
+    if (src->color_mode == ZBC_UNKNOWN) {
+        cJSON_AddNullToObject(ep, "color_mode");
+    } else {
+        cJSON_AddStringToObject(ep, "color_mode",
+                                src->color_mode == 2 ? "color_temp" : "color");
+    }
+
+    /* Which response curves this endpoint has, and the brightness that
+     * was last asked for. The UI slider binds to input_pct rather than
+     * brightness_pct whenever a level curve is in the way: the lamp
+     * reports its mapped output, which would never agree with the
+     * optimistic value and would leave the slider stuck. */
+    bool has_level = false, has_chroma = false;
+    curve_db_active(dev->ieee, src->ep, &has_level, &has_chroma);
+    cJSON *curves = cJSON_AddObjectToObject(ep, "curves");
+    cJSON_AddBoolToObject(curves, "level", has_level);
+    cJSON_AddBoolToObject(curves, "chroma", has_chroma);
+
+    int input_pct = curve_db_input_pct(dev->ieee, src->ep);
+    if (input_pct == ZBC_UNKNOWN) {
+        cJSON_AddNullToObject(ep, "input_pct");
+    } else {
+        cJSON_AddNumberToObject(ep, "input_pct", input_pct);
+    }
+
+    /* Whether this endpoint will ever volunteer its state - a different question
+     * from whether the link is good: a device reports only once a ZDO bind and
+     * a Configure Reporting have both been answered. `frames_heard` in the
+     * same row is the other half: it counts only frames the device sent of
+     * its own accord, so a lamp with every answer in and frames_heard stuck
+     * at 0 accepted the configuration and ignores it. Not revision-tracked (an
+     * answer bumps nothing), so a page sees it on its next full read. A wired
+     * light has no radio and no bindings, hence nothing here, and a Matter
+     * lamp reports through its subscription, which has no such halves. */
+    if (radio) {
+        zb_report_state_t rs;
+        zb_report_state(dev->ieee, src->ep, src->features, &rs);
+        cJSON *reporting = cJSON_AddArrayToObject(ep, "reporting");
+        for (int r = 0; r < rs.count; r++) {
+            cJSON *c = cJSON_CreateObject();
+            cJSON_AddStringToObject(c, "cluster", rs.c[r].cluster);
+            cJSON_AddBoolToObject(c, "bound", rs.c[r].bound);
+            cJSON_AddBoolToObject(c, "bind_refused", rs.c[r].bind_refused);
+            if (rs.c[r].wants_config) {
+                cJSON_AddBoolToObject(c, "configured", rs.c[r].configured);
+                cJSON_AddBoolToObject(c, "config_refused", rs.c[r].config_refused);
+            } else {
+                cJSON_AddNullToObject(c, "configured");
+                cJSON_AddNullToObject(c, "config_refused");
+            }
+            cJSON_AddItemToArray(reporting, c);
+        }
+    }
+
+    return ep;
+}
+
+/* A device as an element of the list: its own fields, then its endpoints one at
+ * a time. Left out whole, like any element, when its fields cannot be built. */
+static void stream_device(json_stream_t *js, bool *first, const zbc_device_t *dev, int64_t now)
+{
+    if (!json_stream_open(js, *first ? "" : ",", device_to_json(dev, now))) {
+        return;
+    }
+    *first = false;
+    bool ep_first = true;
+    json_stream_raw(js, ",\"endpoints\":[");
+    for (int e = 0; e < dev->ep_count; e++) {
+        json_stream_element(js, &ep_first, endpoint_to_json(dev, &dev->eps[e]));
+    }
+    json_stream_raw(js, "]}");
 }
 
 /* The device list, one device's JSON at a time. Only the addresses are taken up
@@ -644,7 +666,7 @@ static void stream_devices(json_stream_t *js)
     json_stream_raw(js, "[");
     for (size_t i = 0; i < n; i++) {
         if (device_db_get(ieees[i], &dev)) {
-            json_stream_element(js, &first, device_to_json(&dev, now));
+            stream_device(js, &first, &dev, now);
         }
     }
     zbc_light_t  lights[CONFIG_ZBC_MAX_LIGHTS];
@@ -653,7 +675,7 @@ static void stream_devices(json_stream_t *js)
         uint8_t ieee[ZBC_IEEE_LEN];
         zbc_light_ieee(lights[i].id, ieee);
         if (lighting_get_device(ieee, &dev)) {
-            json_stream_element(js, &first, device_to_json(&dev, now));
+            stream_device(js, &first, &dev, now);
         }
     }
     /* Then the Matter lamps, the same way: only their ids up front, each row
@@ -664,7 +686,7 @@ static void stream_devices(json_stream_t *js)
         uint8_t ieee[ZBC_IEEE_LEN];
         zbc_mlight_ieee(mids[i], ieee);
         if (lighting_get_device(ieee, &dev)) {
-            json_stream_element(js, &first, device_to_json(&dev, now));
+            stream_device(js, &first, &dev, now);
         }
     }
     json_stream_raw(js, "]");
@@ -3560,11 +3582,12 @@ static esp_err_t backup_get(httpd_req_t *req)
     if (!json_stream_begin(&js, req)) {
         return send_error(req, "500 Internal Server Error", "out of memory");
     }
-    httpd_resp_set_type(req, "application/x-ndjson");
     /* Kept until the first chunk goes out, which is inside this function. */
     char disposition[80];
     snprintf(disposition, sizeof(disposition), "attachment; filename=\"%s-config.jsonl\"", settings_hostname());
-    httpd_resp_set_hdr(req, "Content-Disposition", disposition);
+    js.type      = "application/x-ndjson";
+    js.hdr_name  = "Content-Disposition";
+    js.hdr_value = disposition;
     if (config_backup_export(omit, backup_sink, &js) != ESP_OK) {
         /* Cut short, never ended cleanly: a file without its last line is
          * one the restore refuses, rather than one that restores half. */
@@ -4344,9 +4367,23 @@ static esp_err_t wled_ws_handler(httpd_req_t *req)
 #endif
 #endif /* CONFIG_ZBC_WLED */
 
+/* A write goes out when it is made, its last partial segment included, rather
+ * than waiting for the client to acknowledge what went before. The stream writes
+ * a chunk at a time (json_stream_t), so this costs no flurry of small segments.
+ * On the dev board (2026-11-07, Wi-Fi driver code in flash) a full /api/state
+ * took 0.18-0.30 s with it and 0.39-0.46 s without. */
+static esp_err_t socket_opened(httpd_handle_t hd, int sockfd)
+{
+    (void)hd;
+    const int one = 1;
+    setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    return ESP_OK;
+}
+
 esp_err_t http_server_start(void)
 {
     httpd_config_t config   = HTTPD_DEFAULT_CONFIG();
+    config.open_fn          = socket_opened;
     /* A hard cap, not a hint: a route past it simply fails to register. 49 in
      * the table below (two fewer without CONFIG_ZBC_CONFIG_BACKUP, three fewer
      * without CONFIG_ZBC_WLED), one more with CONFIG_ZBC_WLED_WS. */

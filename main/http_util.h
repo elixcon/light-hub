@@ -29,18 +29,28 @@ esp_err_t send_error(httpd_req_t *req, const char *status, const char *message);
 esp_err_t send_ok(httpd_req_t *req, const char *status);
 void      add_kelvin(cJSON *obj, const char *name, int32_t mireds);
 
+/* The stream writes the response head itself, so the content type and any one
+ * more header are set here, after json_stream_begin, not through httpd: what
+ * httpd_resp_set_hdr holds is never sent. Both strings must last until the
+ * first chunk goes out. */
 typedef struct {
     httpd_req_t *req;
-    char        *buf;
+    char        *block;        /* the allocation: room for the head, buf, room for a chunk's end */
+    char        *buf;          /* JSON_STREAM_BUF of text, inside block */
     size_t       len;
     size_t       total;
     bool         failed;
+    bool         head_sent;
+    const char  *type;         /* "application/json" unless set */
+    const char  *hdr_name;     /* one more header, or NULL */
+    const char  *hdr_value;
 } json_stream_t;
 
 bool      json_stream_begin(json_stream_t *js, httpd_req_t *req);
 void      json_stream_flush(json_stream_t *js);
 void      json_stream_raw(json_stream_t *js, const char *text);
 bool      json_stream_item(json_stream_t *js, const char *sep, cJSON *item);
+bool      json_stream_open(json_stream_t *js, const char *sep, cJSON *item);
 void      json_stream_value(json_stream_t *js, cJSON *item);
 void      json_stream_element(json_stream_t *js, bool *first, cJSON *item);
 void      json_stream_key(json_stream_t *js, bool *first, const char *name);

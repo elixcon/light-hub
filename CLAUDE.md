@@ -113,7 +113,9 @@ The updater compiles shared modules (`wifi_manager.c`, `settings.c`, `auth.c`, `
   `node/main` `node_mode.c`, `node_fallback.c`, `node_zcl.c`. Keep them that way.
 - `main/CMakeLists.txt` links several `-Wl,--wrap=` hooks: the 802.15.4 driver (`radio_ed.c`
   restarts energy scans the driver abandons, `radio_coex.c` counts frames and adjusts send
-  priority), `esp_panic_handler` (`crash_log.c`), and the heap per-task hooks (`heap_watch.c`).
+  priority), `esp_panic_handler` (`crash_log.c`), the heap per-task hooks (`heap_watch.c`), and
+  lwIP's ICMP errors (`icmp_limit.c` sends at most ten a second, so a flood of datagrams to a
+  closed port cannot fill the Wi-Fi transmit queue with replies).
 - `main.c` fixes the startup order: NVS, crash log, config restore, registries, Wi-Fi, HTTP, Zigbee,
   Matter.
 
