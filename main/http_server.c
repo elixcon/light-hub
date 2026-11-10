@@ -118,6 +118,7 @@ static cJSON *zb_radio_json(void)
     cJSON_AddNumberToObject(r, "read_undelivered", rs.read_undelivered);
     cJSON_AddNumberToObject(r, "cmd_slow", rs.cmd_slow);
     cJSON_AddNumberToObject(r, "cmd_slow_ms", rs.cmd_slow_ms);
+    cJSON_AddNumberToObject(r, "cmd_retried_later", rs.cmd_retried_later);
     cJSON_AddNumberToObject(r, "went_quiet", rs.went_quiet);
     cJSON_AddNumberToObject(r, "corrections", rs.corrections);
     cJSON_AddNumberToObject(r, "gate_timeouts", rs.gate_timeouts);

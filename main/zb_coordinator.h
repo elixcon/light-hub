@@ -55,6 +55,9 @@ typedef struct {
      * how slow as well as how many. */
     uint32_t cmd_slow;
     uint32_t cmd_slow_ms;
+    /* Commands sent again a while after the stack gave up on them and on their
+     * immediate re-sends: an outage longer than a few seconds. */
+    uint32_t cmd_retried_later;
     uint32_t went_quiet;        /* a lamp stopped answering; its state is unknown */
     uint32_t corrections;       /* a lamp was somewhere it had not been asked to be */
     uint32_t gate_timeouts;     /* a delivery confirmation never arrived at all */

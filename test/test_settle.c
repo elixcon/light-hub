@@ -49,7 +49,7 @@ static void esp_zigbee_lock_release(void) { s_lock_depth--; }
 static const char *TAG = "test";
 #define ESP_LOGW(tag, ...) ((void)(tag))
 
-static struct { uint32_t went_quiet, corrections, slots_short; } s_radio;
+static struct { uint32_t went_quiet, corrections, slots_short, cmd_retried_later; } s_radio;
 
 /* Calls the code under test makes outwards, recorded so a test can assert. */
 static int s_reads, s_resends, s_unknowns;
@@ -72,6 +72,11 @@ static bool gate_flush_stale(void) { return false; }
  * switch the tests can throw. */
 static bool s_gone;
 static bool reach_is_gone(uint16_t addr) { (void)addr; return s_gone; }
+/* ...and whether it went only lately, and when its next probe may go. */
+static bool    s_outage;
+static int64_t s_probe_free;
+static bool    reach_is_outage(uint16_t addr) { (void)addr; return s_gone && s_outage; }
+static int64_t reach_probe_free_at(uint16_t addr) { (void)addr; return s_probe_free; }
 
 #include "settle-body.inc"
 
@@ -110,6 +115,8 @@ static void reset(void)
     s_lamp_answers = false;
     s_lock_depth = s_lock_max = 0;
     s_gone = false;
+    s_outage = false;
+    s_probe_free = 0;
 }
 
 static int slot_of(uint16_t addr, uint8_t ep)
@@ -574,6 +581,183 @@ static void test_a_probe_records_no_colour_to_correct(void)
     s_gone = false;
 }
 
+/* ---- a command nothing delivered, said again later ---- */
+
+/* The stack gives up on the command and on both immediate re-sends, all within
+ * seconds: interference that lasts longer than that. The command is then said
+ * again after a pause, and twice more a probe interval apart. */
+static void test_an_undelivered_command_is_said_again_later(void)
+{
+    reset();
+    schedule_settle_read(0x3045, 11, 0, 8, 1, 200);
+    settle_undelivered_locked(0x3045, 11);
+    settle_undelivered_locked(0x3045, 11);
+    ok(s_resends == 2, "the two immediate re-sends come first");
+    settle_undelivered_locked(0x3045, 11);
+    const int s = slot_of(0x3045, 11);
+    ok(s_resends == 2 && s_settle[s].later, "the third failure puts the command down for later");
+    ok(s_armed && s_armed_delay == ZBC_LATER_FIRST_US, "and the timer is armed for it");
+
+    const int reads = s_reads;
+    advance(ZBC_LATER_FIRST_US);
+    ok(s_reads == reads, "nothing is read while it waits");
+    ok(s_resends == 3 && s_radio.cmd_retried_later == 1, "then it is sent again, and counted");
+    ok(s_settle[s].reads_left == 2 && !s_settle[s].delivered, "with its reads starting over");
+
+    settle_undelivered_locked(0x3045, 11);                   /* not delivered either */
+    ok(s_armed && s_armed_delay == ZBC_LATER_GAP_US, "the next try waits out the probe interval");
+    advance(ZBC_LATER_GAP_US);
+    ok(s_resends == 4, "and goes");
+    settle_undelivered_locked(0x3045, 11);
+    advance(ZBC_LATER_GAP_US);
+    ok(s_resends == 5 && s_radio.cmd_retried_later == 3, "three later tries in all");
+
+    settle_undelivered_locked(0x3045, 11);
+    advance(120 * 1000000LL);
+    ok(s_resends == 5, "and no more: a lamp that is gone stops being told");
+    ok(s_radio.went_quiet == 1 && s_unknowns == 1, "it is called quiet once, at the end");
+}
+
+/* The same when no confirmation says so: unconfirmed and unanswered through the
+ * whole window, the command goes down for later instead of the lamp being given
+ * up as quiet with the command untold. */
+static void test_an_unconfirmed_command_is_said_again_later(void)
+{
+    reset();
+    schedule_settle_read(0x3045, 11, 0, 8, 1, 200);          /* delivered stays false */
+    advance(20 * 1000000LL);
+    ok(s_resends == 2, "the immediate re-sends are spent on silence");
+    ok(s_radio.went_quiet == 0 && s_unknowns == 0, "and the lamp is not called quiet yet");
+    ok(s_settle[slot_of(0x3045, 11)].later, "its command is waiting to be said again");
+    advance(5 * 1000000LL);
+    ok(s_resends == 3, "and is");
+}
+
+/* A later try that gets there ends it: the lamp answers, and nothing follows. */
+static void test_a_later_try_that_is_delivered_settles(void)
+{
+    reset();
+    schedule_settle_read(0x3045, 11, 0, 8, 1, 200);
+    for (int i = 0; i < 3; i++) {
+        settle_undelivered_locked(0x3045, 11);
+    }
+    advance(ZBC_LATER_FIRST_US);
+    ok(s_resends == 3, "the later try went out");
+    s_settle[slot_of(0x3045, 11)].delivered = true;
+    s_lamp_answers = true;
+    advance(120 * 1000000LL);
+    ok(s_resends == 3, "delivered and answered, it is not sent again");
+    ok(s_radio.went_quiet == 0, "and the lamp did not go quiet");
+    ok(s_settle[slot_of(0x3045, 11)].reads_left == 0, "the slot is done");
+}
+
+/* A newer command is what the user wants now. The old one must not come back
+ * over it half a minute later. */
+static void test_a_new_command_ends_the_wait_for_the_old_one(void)
+{
+    reset();
+    schedule_settle_read(0x3045, 11, 0, 8, 1, 200);
+    for (int i = 0; i < 3; i++) {
+        settle_undelivered_locked(0x3045, 11);
+    }
+    const int s = slot_of(0x3045, 11);
+    ok(s_settle[s].later, "waiting");
+    schedule_settle_read(0x3045, 11, 0, 8, 0, 0);            /* off, now */
+    ok(!s_settle[s].later && s_settle[s].want_on == 0, "the new command has the slot");
+    ok(s_settle[s].later_left == ZBC_LATER_TRIES && s_settle[s].fixes_left == 2, "with budgets of its own");
+    s_settle[s].delivered = true;
+    s_lamp_answers = true;
+    advance(120 * 1000000LL);
+    ok(s_resends == 2, "and the old command is never sent again");
+}
+
+/* A lamp that announces itself was powered up or rejoined; what it was told
+ * before that is dropped. */
+static void test_an_announce_drops_the_command_waiting(void)
+{
+    reset();
+    schedule_settle_read(0x3045, 11, 0, 8, 0, 0);
+    schedule_settle_read(0x3046, 11, 0, 8, 0, 0);
+    for (int i = 0; i < 3; i++) {
+        settle_undelivered_locked(0x3045, 11);
+        settle_undelivered_locked(0x3046, 11);
+    }
+    ok(s_resends == 4, "two lamps, two immediate re-sends each");
+    settle_announced_locked(0x3045);
+    ok(!s_settle[slot_of(0x3045, 11)].later && s_settle[slot_of(0x3045, 11)].reads_left == 0,
+       "the one that announced is let go");
+    ok(s_settle[slot_of(0x3046, 11)].later, "the other still waits");
+    advance(ZBC_LATER_FIRST_US);
+    ok(s_resends == 5, "and only the other is told again");
+}
+
+/* A device gone only lately may be in an outage that passes. Its probe keeps
+ * what it asked for and is said again later - once reach lets a command out
+ * again, not before - but has no immediate re-sends, which would be turned
+ * away. */
+static void test_a_probe_in_an_outage_is_said_again_later(void)
+{
+    reset();
+    s_gone = s_outage = true;
+    s_probe_free = s_now + 30 * 1000000LL;                   /* the probe has just gone out */
+    schedule_settle_read(0x3045, 11, 0, 8, 1, 200);
+    const int s = slot_of(0x3045, 11);
+    ok(s_settle[s].want_on == 1 && s_settle[s].want_level == 200, "the intent is kept");
+    ok(s_settle[s].fixes_left == 0, "with no immediate re-sends");
+    ok(s_settle[s].later_left == ZBC_LATER_TRIES && s_settle[s].recover_left == 0, "and the later tries");
+
+    settle_undelivered_locked(0x3045, 11);
+    ok(s_resends == 0 && s_settle[s].later, "the failed probe goes down for later");
+    ok(s_settle[s].due_us == s_probe_free + ZBC_LATER_CLEAR_US, "for when a command may go again");
+    advance(31 * 1000000LL);
+    ok(s_resends == 1 && s_radio.cmd_retried_later == 1, "and is sent then");
+    ok(s_radio.went_quiet == 0 && s_unknowns == 0, "a device already gone is not called quiet");
+}
+
+/* A command to a device long gone is the probe, and has no later tries: an
+ * unplugged lamp in a room would otherwise get three more frames per command. */
+static void test_a_probe_is_not_said_again_later(void)
+{
+    reset();
+    s_gone = true;
+    schedule_settle_read(0x3045, 11, 0, 8, 1, 200);
+    ok(s_settle[slot_of(0x3045, 11)].later_left == 0, "no later tries");
+    settle_undelivered_locked(0x3045, 11);
+    advance(120 * 1000000LL);
+    ok(s_resends == 0 && s_radio.cmd_retried_later == 0, "and nothing is sent again");
+}
+
+/* A slot waiting for its later try is still taken. */
+static void test_a_waiting_slot_is_not_handed_out(void)
+{
+    reset();
+    schedule_settle_read(0x3045, 11, 0, 8, 1, 200);
+    for (int i = 0; i < 3; i++) {
+        settle_undelivered_locked(0x3045, 11);
+    }
+    const int s = slot_of(0x3045, 11);
+    schedule_settle_read(0x4000, 1, 0, 8, 1, 200);
+    ok(slot_of(0x4000, 1) != s && slot_of(0x3045, 11) == s, "another lamp gets another slot");
+    ok(s_settle[s].later, "and the wait goes on");
+}
+
+/* A colour command that follows the level command keeps the level's intent, and
+ * its later tries with it, rather than handing out new ones. */
+static void test_want_keep_keeps_the_later_tries(void)
+{
+    reset();
+    schedule_settle_read(0x3045, 11, 0, 8, 1, 200);
+    for (int i = 0; i < 3; i++) {
+        settle_undelivered_locked(0x3045, 11);
+    }
+    advance(ZBC_LATER_FIRST_US);
+    const int s = slot_of(0x3045, 11);
+    ok(s_settle[s].later_left == ZBC_LATER_TRIES - 1, "one later try spent");
+    schedule_settle_read(0x3045, 11, 0, 8, ZBC_WANT_KEEP, 0);
+    ok(s_settle[s].want_on == 1 && s_settle[s].later_left == ZBC_LATER_TRIES - 1,
+       "the intent and what is left of its tries are kept");
+}
+
 int main(void)
 {
     test_a_probe_is_read_but_never_corrected();
@@ -604,6 +788,15 @@ int main(void)
     test_only_the_part_the_command_set_is_judged();
     test_a_colour_intent_is_kept_apart_from_the_level_one();
     test_a_probe_records_no_colour_to_correct();
+    test_an_undelivered_command_is_said_again_later();
+    test_an_unconfirmed_command_is_said_again_later();
+    test_a_later_try_that_is_delivered_settles();
+    test_a_new_command_ends_the_wait_for_the_old_one();
+    test_an_announce_drops_the_command_waiting();
+    test_a_probe_in_an_outage_is_said_again_later();
+    test_a_probe_is_not_said_again_later();
+    test_a_waiting_slot_is_not_handed_out();
+    test_want_keep_keeps_the_later_tries();
     printf("all %d checks passed\n", s_checks);
     (void)TAG;
     return 0;

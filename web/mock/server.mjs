@@ -183,7 +183,7 @@ const surveyNow = () => {
       { channel: 20, pan_id: 21086, ext_pan_id: "0x98a316fffe717cfc", permit_join: false }] : [] };
 };
 const status = () => ({ name: "Living Room Hub", wifi: { mode: wifiMode, connected: true, ssid: "elixcon", ip: "192.168.1.42", hostname: "living-room-hub", rssi: -61, channel: 6, weak_uplink: false, temporary_hotspot: false },
-  zigbee: { network_up: true, pan_id: 0x5fb3, channel: (moveNow(), zbChannel), channel_move: moveNow(), permit_join_remaining_s: Math.max(0, Math.round((permit - Date.now()) / 1000)), ieee: "0x404ccafffe5a1b2c", radio: { cmd_undelivered: 0, read_undelivered: 1, went_quiet: 0, corrections: 0, gate_timeouts: 0 }, ota: zotaStatus() },
+  zigbee: { network_up: true, pan_id: 0x5fb3, channel: (moveNow(), zbChannel), channel_move: moveNow(), permit_join_remaining_s: Math.max(0, Math.round((permit - Date.now()) / 1000)), ieee: "0x404ccafffe5a1b2c", radio: { cmd_undelivered: 0, read_undelivered: 1, cmd_retried_later: 0, went_quiet: 0, corrections: 0, gate_timeouts: 0 }, ota: zotaStatus() },
   device_count: devices.length, uptime_s: Math.round((Date.now() - boot) / 1000) + 5000, version: "mock-1", build: "deadbeef", ota: { partition: "app", pending_verify: false, updater: "mock-updater-1", updater_valid: true, updater_problem: null, layout: zota.layout }, heap: { free: 120000, min_free: 84000, largest: 82000 },
   thermal: thermalCfg.gpio === null ? { state: "off", temp_c: null, max_c: null, trip_c: thermalCfg.trip_c, release_c: thermalCfg.trip_c - 5, trips: 0, mv: -1, held: false }
     : { state: 41.3 >= thermalCfg.trip_c ? "hot" : "ok", temp_c: 41.3, max_c: 52, trip_c: thermalCfg.trip_c, release_c: thermalCfg.trip_c - 5, trips: 0, mv: 1120, held: 41.3 >= thermalCfg.trip_c } });

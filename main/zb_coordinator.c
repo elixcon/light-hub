@@ -161,6 +161,11 @@ static struct {
     /* How many more times a lamp that has gone quiet is worth asking again.
      * Reads only - never a command; see the audit branch in settle_work. */
     uint8_t  recover_left;
+    /* A command the stack could not deliver, with its immediate re-sends spent:
+     * how many later tries it has left, and whether the slot is waiting for
+     * one (`due_us` is then when). See ZBC_LATER_TRIES. */
+    uint8_t  later_left;
+    bool     later;
     /* When this slot's next read is due. One timer serves every slot and is armed
      * for the earliest, so a command to one lamp cannot cut short another
      * lamp's settle window. */
@@ -177,6 +182,7 @@ static struct {
     uint32_t read_undelivered;  /* ...or on a read */
     uint32_t cmd_slow;          /* a command got there, but only after ZBC_SLOW_DELIVERY_US */
     uint32_t cmd_slow_ms;       /* ...and how long those took, added up */
+    uint32_t cmd_retried_later; /* an undelivered command said again later - ZBC_LATER_TRIES */
     uint32_t went_quiet;        /* a lamp stopped answering; state marked unknown */
     uint32_t corrections;       /* a lamp was somewhere it was not asked to be */
     uint32_t gate_timeouts;     /* a confirmation never arrived at all */
@@ -357,6 +363,9 @@ static esp_err_t gate_send(uint16_t short_addr, uint8_t ep, const zbc_cmd_t *cmd
 static void      reach_note(uint16_t short_addr, bool delivered);
 static bool      reach_admits(uint16_t short_addr, bool command);
 static bool      reach_is_gone(uint16_t short_addr);
+static bool      reach_is_outage(uint16_t short_addr);
+static int64_t   reach_probe_free_at(uint16_t short_addr);
+static void      settle_undelivered_locked(uint16_t short_addr, uint8_t ep);
 static void      gate_send_locked(uint16_t short_addr, uint8_t ep, const zbc_cmd_t *cmd, int ch);
 static bool      gate_advance(uint16_t short_addr, uint8_t ep);
 static bool      gate_confirms_preset(uint16_t short_addr, uint8_t ep);
@@ -1851,10 +1860,18 @@ static unsigned link_gap(uint8_t last_tsn, uint8_t tsn)
 #define ZBC_UNREACH_BURST_US  (500LL * 1000)
 #define ZBC_UNREACH_INTENT_US (100LL * 1000)
 
+/* How long a device that has gone may be a passing outage - interference, a
+ * router of its route restarting - rather than a lamp somebody unplugged. A
+ * command to it in that time is still a probe on air, but it keeps its intent
+ * and is said again later (ZBC_LATER_TRIES in the settle scheduler); after it,
+ * a probe is one frame and no more, as an unplugged lamp in a room needs. */
+#define ZBC_UNREACH_OUTAGE_US (5LL * 60 * 1000 * 1000)
+
 typedef struct {
     uint8_t fails;           /* consecutive frames undelivered */
     int64_t last_fail_us;    /* the last failure that counted */
     int64_t last_probe_us;   /* the last command let through while gone */
+    int64_t gone_since_us;   /* when the run of failures became a whole one */
 } zbc_reach_t;
 
 /* A frame the stack gave up on. `heard_us` is when the device was last heard:
@@ -1868,6 +1885,9 @@ static void reach_fail(zbc_reach_t *r, int64_t now_us, int64_t heard_us)
     }
     if (r->fails < 255) {
         r->fails++;
+    }
+    if (r->fails == ZBC_UNREACH_FAILS) {
+        r->gone_since_us = now_us;
     }
     r->last_fail_us = now_us;
 }
@@ -1896,6 +1916,23 @@ static bool reach_may_command(zbc_reach_t *r, int64_t now_us, int64_t heard_us)
     }
     r->last_probe_us = now_us;
     return true;
+}
+
+/* Gone, but only lately - see ZBC_UNREACH_OUTAGE_US. */
+static bool reach_outage(const zbc_reach_t *r, int64_t now_us, int64_t heard_us)
+{
+    return reach_gone(r, heard_us) && now_us - r->gone_since_us < ZBC_UNREACH_OUTAGE_US;
+}
+
+/* When the next command to a device that is gone may go on air, 0 for "now": a
+ * device that is there, or one not probed yet. For whoever plans a re-send, so
+ * that it is not one reach_may_command turns away. */
+static int64_t reach_probe_free_us(const zbc_reach_t *r, int64_t heard_us)
+{
+    if (!reach_gone(r, heard_us) || r->last_probe_us == 0) {
+        return 0;
+    }
+    return r->last_probe_us + ZBC_UNREACH_PROBE_US;
 }
 
 /* >>> end host-test region: reach <<< */
@@ -2053,6 +2090,28 @@ static bool reach_is_gone(uint16_t short_addr)
     const bool gone = i >= 0 && reach_gone(&s_reach[i].r, seen);
     portEXIT_CRITICAL(&s_reach_mux);
     return gone;
+}
+
+/* Whether it stopped answering only lately, which may be an outage that passes. */
+static bool reach_is_outage(uint16_t short_addr)
+{
+    const int64_t seen = reach_heard_us(short_addr);
+    portENTER_CRITICAL(&s_reach_mux);
+    const int  i      = reach_row_locked(short_addr, false);
+    const bool outage = i >= 0 && reach_outage(&s_reach[i].r, esp_timer_get_time(), seen);
+    portEXIT_CRITICAL(&s_reach_mux);
+    return outage;
+}
+
+/* When a command to it may next go on air; 0 when nothing holds one back. */
+static int64_t reach_probe_free_at(uint16_t short_addr)
+{
+    const int64_t seen = reach_heard_us(short_addr);
+    portENTER_CRITICAL(&s_reach_mux);
+    const int     i  = reach_row_locked(short_addr, false);
+    const int64_t at = i >= 0 ? reach_probe_free_us(&s_reach[i].r, seen) : 0;
+    portEXIT_CRITICAL(&s_reach_mux);
+    return at;
 }
 
 /* >>> host-test region: parent <<< */
@@ -4188,22 +4247,7 @@ static void data_confirm_cb(ezb_af_user_cnf_t *cnf, void *user_ctx)
         return;
     }
 
-    for (int i = 0; i < ZBC_SETTLE_SLOTS; i++) {
-        if (s_settle[i].short_addr != addr || s_settle[i].ep != ep) {
-            continue;
-        }
-        /* Same bound as the correction above: a confirm that arrives after the
-         * command has finished settling is reporting on something the user has
-         * moved on from. */
-        if (s_settle[i].reads_left == 0 || s_settle[i].want_on < 0 ||
-            s_settle[i].fixes_left == 0) {
-            break;
-        }
-        s_settle[i].fixes_left--;
-        ESP_LOGW(TAG, "Sending it again straight away");
-        resend_intent_locked(addr, ep, s_settle[i].want_on, s_settle[i].want_level);
-        break;
-    }
+    settle_undelivered_locked(addr, ep);
 }
 
 /* How long a lamp is given to answer a read before the next pass. Lamps are free
@@ -4280,6 +4324,52 @@ static bool color_off_target(uint8_t kind, uint16_t want_a, uint16_t want_b,
     return false;
 }
 
+/* A command the stack gave up on is sent again at once, twice (`fixes_left`):
+ * a single frame lost, or a route that had to be found first. Those are spent
+ * within seconds of each other, so radio interference that lasts longer than
+ * that - a Wi-Fi transfer on an overlapping channel, a microwave oven - fails
+ * all three, the device counts as gone (ZBC_UNREACH_FAILS), and the lamp would
+ * be left where it was until somebody commanded it again.
+ *
+ * So the command is said again later, this many times: first after a pause
+ * long enough for a burst to pass, then at a gap just over the probe interval
+ * (ZBC_UNREACH_PROBE_US), because by then the device is gone and takes one
+ * command per interval - and never before reach_may_command would let it out.
+ * A little over a minute in all.
+ *
+ * A command to a device that is already gone is a probe. One gone only lately
+ * (reach_is_outage) may be in the same outage, so its probe keeps its intent and
+ * these tries, though not the immediate re-sends, which would be turned away.
+ * One gone for longer is taken for unplugged, and its probe is one frame: a
+ * dead lamp in a room must not cost three more frames at every press.
+ *
+ * Any newer command for the endpoint replaces the intent and its budget, and a
+ * device that announces itself has been powered up or has rejoined: what it was
+ * told before that is no longer what anybody is waiting for
+ * (settle_announced_locked). */
+#define ZBC_LATER_TRIES    3
+#define ZBC_LATER_FIRST_US 5000000LL
+#define ZBC_LATER_GAP_US   31000000LL
+#define ZBC_LATER_CLEAR_US 1000000LL     /* past the moment a probe is allowed again */
+
+/* Puts the slot's command down to be sent again later. Nothing is read while it
+ * waits: the device is not answering, and the slot stays taken (`reads_left`)
+ * so it is not handed to another lamp. Caller holds the stack lock and re-arms
+ * the timer. */
+static void settle_later_locked(int i, int64_t now)
+{
+    s_settle[i].later      = true;
+    s_settle[i].reads_left = 1;
+    s_settle[i].judge      = false;
+    s_settle[i].audit      = false;
+    s_settle[i].due_us     = now + (s_settle[i].later_left == ZBC_LATER_TRIES ? ZBC_LATER_FIRST_US
+                                                                              : ZBC_LATER_GAP_US);
+    const int64_t free_at = reach_probe_free_at(s_settle[i].short_addr);
+    if (free_at && free_at + ZBC_LATER_CLEAR_US > s_settle[i].due_us) {
+        s_settle[i].due_us = free_at + ZBC_LATER_CLEAR_US;
+    }
+}
+
 /* Arms the one settle timer for the earliest slot that still has a read due.
  * Caller holds the stack lock.
  *
@@ -4341,6 +4431,29 @@ static void settle_work(void)
             continue;
         }
 
+        /* The later try of a command that was never delivered. Its reads start
+         * over, as after any re-send; if this one is not delivered either, its
+         * confirmation or its audit puts the next one down. */
+        if (s_settle[i].later) {
+            s_settle[i].later = false;
+            if (s_settle[i].want_on < 0 || s_settle[i].later_left == 0) {
+                s_settle[i].reads_left = 0;
+                continue;
+            }
+            s_settle[i].later_left--;
+            s_radio.cmd_retried_later++;
+            ESP_LOGW(TAG, "Device 0x%04x ep %d never got its command; sending it again (%d more to come)",
+                     s_settle[i].short_addr, s_settle[i].ep, s_settle[i].later_left);
+            resend_intent_locked(s_settle[i].short_addr, s_settle[i].ep,
+                                 s_settle[i].want_on, s_settle[i].want_level);
+            s_settle[i].reads_left = 2;
+            s_settle[i].answered   = false;
+            s_settle[i].delivered  = false;
+            s_settle[i].due_us     = now + ZBC_SETTLE_GAP_US;
+            sent++;
+            continue;
+        }
+
         /* The audit pass reads nothing; it exists to notice that the last read
          * was never answered. */
         if (s_settle[i].audit) {
@@ -4348,6 +4461,14 @@ static void settle_work(void)
             s_settle[i].reads_left = 0;
             s_settle[i].judge      = false;   /* the command is done settling */
             if (s_settle[i].answered) {
+                continue;
+            }
+            /* Never confirmed delivered and never answered, with the immediate
+             * re-sends spent: the confirmation that would have put the command
+             * down for later has not come, or came for a frame before this one.
+             * Not quiet yet, then - it has still to be told. */
+            if (!s_settle[i].delivered && s_settle[i].want_on >= 0 && s_settle[i].later_left > 0) {
+                settle_later_locked(i, now);
                 continue;
             }
             /* Once per episode, not per attempt: the recovery reads below come back
@@ -4475,9 +4596,12 @@ static void schedule_settle_read_ex(uint16_t short_addr, uint8_t ep, uint16_t fe
      * would only be more of what it has stopped taking, so it gets neither. It
      * does get its two reads: read_attributes skips them while the device is
      * still gone, and once the probe is delivered they find out what the lamp did
-     * with it - nothing else re-reads a lamp that does not report. */
+     * with it - nothing else re-reads a lamp that does not report.
+     *
+     * The probe of a device gone only lately keeps its intent, for the later
+     * tries - see ZBC_LATER_TRIES. */
     const bool probe = reach_is_gone(short_addr);
-    if (probe) {
+    if (probe && !reach_is_outage(short_addr)) {
         want_on = -1;
     }
 
@@ -4510,13 +4634,14 @@ static void schedule_settle_read_ex(uint16_t short_addr, uint8_t ep, uint16_t fe
     /* Keeping the intent only makes sense while the command that set it is still
      * settling; once its reads are done the state it asked for is old news, and
      * reviving it would correct against a command the user has moved on from. */
-    uint8_t fixes = 2;
+    uint8_t fixes = probe ? 0 : 2, later = ZBC_LATER_TRIES;
     if (want_on == ZBC_WANT_KEEP) {
         const bool live = reused && s_settle[slot].reads_left > 0;
         want_on    = live ? s_settle[slot].want_on : -1;
         want_level = live ? s_settle[slot].want_level : 0;
         /* One user action, one budget: do not hand the pair a second helping. */
         fixes      = live ? s_settle[slot].fixes_left : 0;
+        later      = live ? s_settle[slot].later_left : 0;
     }
 
     s_settle[slot].short_addr = short_addr;
@@ -4531,6 +4656,10 @@ static void schedule_settle_read_ex(uint16_t short_addr, uint8_t ep, uint16_t fe
      * gone when its reads fall due is not news, and must not count as a lamp
      * that went quiet. */
     s_settle[slot].recover_left = probe ? 0 : ZBC_RECOVER_TRIES;
+    /* The later tries are the command's as well, and a new command ends any wait
+     * for the old one's. */
+    s_settle[slot].later_left = want_on < 0 ? 0 : later;
+    s_settle[slot].later      = false;
     /* A command that is not a colour command clears the colour intent, so the
      * next colour read is judged against the colour last actually asked for and
      * never against the one before it. A curve sends its level command first and
@@ -4580,6 +4709,57 @@ static void settle_sent_locked(uint16_t short_addr, uint8_t ep, uint16_t transit
         settle_arm_locked(i, transition_ds);
         return;
     }
+}
+
+/* The stack gave up on the command to this endpoint, and nothing newer went out
+ * in its place. Sent again at once while that budget lasts, and put down for
+ * later after that - see ZBC_LATER_TRIES.
+ *
+ * Caller holds the stack lock - this runs from the confirmation callback. */
+static void settle_undelivered_locked(uint16_t short_addr, uint8_t ep)
+{
+    for (int i = 0; i < ZBC_SETTLE_SLOTS; i++) {
+        if (s_settle[i].short_addr != short_addr || s_settle[i].ep != ep) {
+            continue;
+        }
+        /* A confirm that arrives after the command has finished settling is
+         * reporting on something the user has moved on from. */
+        if (s_settle[i].reads_left == 0 || s_settle[i].want_on < 0) {
+            return;
+        }
+        if (s_settle[i].fixes_left > 0) {
+            s_settle[i].fixes_left--;
+            ESP_LOGW(TAG, "Sending it again straight away");
+            resend_intent_locked(short_addr, ep, s_settle[i].want_on, s_settle[i].want_level);
+            return;
+        }
+        if (s_settle[i].later_left > 0 && !s_settle[i].later) {
+            settle_later_locked(i, esp_timer_get_time());
+            settle_rearm_locked(false);
+        }
+        return;
+    }
+}
+
+/* The device has announced itself: it was powered up, or it rejoined. A command
+ * still waiting to be said again was for the lamp as it was before that - an
+ * Off from a minute ago, say, for a lamp somebody has just switched on at the
+ * wall - so it is dropped. Interrogation reads the lamp's state afresh.
+ *
+ * Caller holds the stack lock. */
+static void settle_announced_locked(uint16_t short_addr)
+{
+    for (int i = 0; i < ZBC_SETTLE_SLOTS; i++) {
+        if (s_settle[i].short_addr != short_addr) {
+            continue;
+        }
+        s_settle[i].later_left = 0;
+        if (s_settle[i].later) {
+            s_settle[i].later      = false;
+            s_settle[i].reads_left = 0;
+        }
+    }
+    settle_rearm_locked(false);
 }
 /* >>> end host-test region: settle-body <<< */
 
@@ -5711,6 +5891,7 @@ static bool app_signal_handler(const ezb_app_signal_t *app_signal)
         ESP_LOGI(TAG, "%s device 0x%04x announced itself (capability 0x%02x)",
                  created ? "New" : "Known", params->short_addr, params->capability);
         heap_watch_mark("device_announce", params->short_addr);
+        settle_announced_locked(params->short_addr);
         interrogate_device(params->short_addr);
         if (zb_ota_wake_heard(params->short_addr)) {
             ota_wake_post();
@@ -7036,6 +7217,7 @@ void zb_get_radio_stats(zb_radio_stats_t *out)
     out->read_undelivered = s_radio.read_undelivered;
     out->cmd_slow         = s_radio.cmd_slow;
     out->cmd_slow_ms      = s_radio.cmd_slow_ms;
+    out->cmd_retried_later = s_radio.cmd_retried_later;
     out->went_quiet       = s_radio.went_quiet;
     out->corrections      = s_radio.corrections;
     out->gate_timeouts    = s_radio.gate_timeouts;
