@@ -127,6 +127,7 @@ static void data_confirm_cb(ezb_af_user_cnf_t *cnf, void *user_ctx);
 /* Which colour attribute came back. Our own names, not the ZCL ids, so the
  * decision that uses them (color_off_target) can be driven from a host test. */
 enum { ZBC_COLOR_PART_CT, ZBC_COLOR_PART_HUE, ZBC_COLOR_PART_SAT };
+enum { ZBC_LATER_LEVEL = 1, ZBC_LATER_COLOR = 2 };
 
 static struct {
     uint16_t short_addr;
@@ -166,6 +167,10 @@ static struct {
      * one (`due_us` is then when). See ZBC_LATER_TRIES. */
     uint8_t  later_left;
     bool     later;
+    /* Which of the slot's two intents the wait is for (ZBC_LATER_LEVEL,
+     * ZBC_LATER_COLOR): the frames that are known to have failed. 0 while
+     * waiting says neither is known to have arrived, so both go. */
+    uint8_t  later_what;
     /* When this slot's next read is due. One timer serves every slot and is armed
      * for the earliest, so a command to one lamp cannot cut short another
      * lamp's settle window. */
@@ -365,7 +370,9 @@ static bool      reach_admits(uint16_t short_addr, bool command);
 static bool      reach_is_gone(uint16_t short_addr);
 static bool      reach_is_outage(uint16_t short_addr);
 static int64_t   reach_probe_free_at(uint16_t short_addr);
-static void      settle_undelivered_locked(uint16_t short_addr, uint8_t ep);
+static void      settle_undelivered_locked(uint16_t short_addr, uint8_t ep, bool color);
+static bool      level_off_target(uint8_t want_level, uint8_t got);
+static bool      gate_inflight_is_color(uint16_t short_addr, uint8_t ep);
 static void      gate_send_locked(uint16_t short_addr, uint8_t ep, const zbc_cmd_t *cmd, int ch);
 static bool      gate_advance(uint16_t short_addr, uint8_t ep);
 static bool      gate_confirms_preset(uint16_t short_addr, uint8_t ep);
@@ -373,6 +380,7 @@ static int64_t   gate_inflight_age_us(uint16_t short_addr, uint8_t ep);
 static bool      gate_flush_stale(void);
 static void      resend_intent_locked(uint16_t short_addr, uint8_t ep, int8_t want_on,
                                       uint8_t want_level);
+static void      resend_color_locked(uint16_t short_addr, uint8_t ep, uint8_t kind, uint16_t a, uint16_t b);
 static void      color_correct_locked(uint16_t short_addr, uint8_t ep, int part, uint16_t got);
 static void      settle_rearm_locked(bool want_gate_tick);
 
@@ -3295,18 +3303,16 @@ static void handle_attribute(uint16_t src_addr, uint8_t src_ep, uint16_t cluster
         ESP_LOGD(TAG, "Device 0x%04x ep %d level %d", src_addr, src_ep, level);
         note_answered(src_addr, src_ep);
 
-        /* A fade in is two commands - preset to the bottom, ramp up - and a late
-         * duplicate of the first leaves the lamp at the bottom after the ramp: on,
-         * as asked, but nearly dark. Only a lamp at the very bottom when told to
-         * be much brighter counts; a general "level differs from what was sent"
-         * test would fight the lamp's rounding, clamping and curves. */
+        /* A lamp that is on, as asked, but not at the level it was told: it never
+         * took the command, or a late duplicate of an older one landed after it.
+         * level_off_target says how far off counts. */
         for (int i = 0; i < ZBC_SETTLE_SLOTS; i++) {
             if (s_settle[i].short_addr != src_addr || s_settle[i].ep != src_ep) {
                 continue;
             }
             if (s_settle[i].reads_left == 0 || !s_settle[i].judge ||
                 s_settle[i].want_on != 1 || s_settle[i].fixes_left == 0 ||
-                level > ZBC_FADE_FLOOR_LEVEL || s_settle[i].want_level <= ZBC_FADE_FLOOR_LEVEL * 8) {
+                !level_off_target(s_settle[i].want_level, level)) {
                 break;
             }
             s_settle[i].fixes_left--;
@@ -4202,6 +4208,10 @@ static void data_confirm_cb(ezb_af_user_cnf_t *cnf, void *user_ctx)
         s_radio.cmd_slow_ms += (uint32_t)(took_us / 1000);
     }
 
+    /* Which of the endpoint's two intents this frame carried, asked before
+     * gate_advance below puts the next frame in its place. */
+    const bool was_color = gate_inflight_is_color(addr, ep);
+
     reach_note(addr, cnf->status == 0);
     if (cnf->status != 0) {
         s_radio.cmd_undelivered++;
@@ -4247,7 +4257,7 @@ static void data_confirm_cb(ezb_af_user_cnf_t *cnf, void *user_ctx)
         return;
     }
 
-    settle_undelivered_locked(addr, ep);
+    settle_undelivered_locked(addr, ep, was_color);
 }
 
 /* How long a lamp is given to answer a read before the next pass. Lamps are free
@@ -4343,6 +4353,11 @@ static bool color_off_target(uint8_t kind, uint16_t want_a, uint16_t want_b,
  * One gone for longer is taken for unplugged, and its probe is one frame: a
  * dead lamp in a room must not cost three more frames at every press.
  *
+ * The slot holds two intents - on/off and level, and the colour - and each
+ * frame's confirmation says which it carried (`later_what`). A colour command
+ * that was not delivered is sent again like the other: nothing else would, since
+ * the read that judges a colour is never answered by a lamp that is not there.
+ *
  * Any newer command for the endpoint replaces the intent and its budget, and a
  * device that announces itself has been powered up or has rejoined: what it was
  * told before that is no longer what anybody is waiting for
@@ -4368,6 +4383,33 @@ static void settle_later_locked(int i, int64_t now)
     if (free_at && free_at + ZBC_LATER_CLEAR_US > s_settle[i].due_us) {
         s_settle[i].due_us = free_at + ZBC_LATER_CLEAR_US;
     }
+}
+
+/* How far a lamp that is on may sit from the level it was told before the read
+ * that follows counts it as not having taken it. Wide for the same reason the
+ * colour tolerances are: a lamp's rounding, or its clamping to the dimmest it
+ * can do, must not be corrected - only a command it ignored, or an older one
+ * that reached it last, which leave it a whole step of somebody's dimming away.
+ * 12 of 254 is under 5 %. The correction is bounded by `fixes_left` whatever
+ * the lamp does, so one that clamps further than this costs two frames. */
+#define ZBC_LEVEL_TOLERANCE 12
+
+/* Whether `got` says a lamp told to be on at `want_level` is somewhere else.
+ * A plain On records level 0 and asks for no level, so nothing is judged. */
+static bool level_off_target(uint8_t want_level, uint8_t got)
+{
+    if (want_level == 0) {
+        return false;
+    }
+    /* A fade in is two commands - preset to the bottom, ramp up - and a late
+     * duplicate of the first leaves the lamp at the bottom after the ramp: on,
+     * as asked, but nearly dark. Caught closer in than the tolerance, because
+     * the bottom is never where a lamp told more than a few levels rounds to. */
+    if (got <= ZBC_FADE_FLOOR_LEVEL && want_level > ZBC_FADE_FLOOR_LEVEL * 8) {
+        return true;
+    }
+    const int d = (int)got - (int)want_level;
+    return (d < 0 ? -d : d) > ZBC_LEVEL_TOLERANCE;
 }
 
 /* Arms the one settle timer for the earliest slot that still has a read due.
@@ -4435,17 +4477,32 @@ static void settle_work(void)
          * over, as after any re-send; if this one is not delivered either, its
          * confirmation or its audit puts the next one down. */
         if (s_settle[i].later) {
-            s_settle[i].later = false;
-            if (s_settle[i].want_on < 0 || s_settle[i].later_left == 0) {
+            const uint8_t what  = s_settle[i].later_what ? s_settle[i].later_what
+                                                         : (ZBC_LATER_LEVEL | ZBC_LATER_COLOR);
+            const bool    level = (what & ZBC_LATER_LEVEL) && s_settle[i].want_on >= 0;
+            const bool    color = (what & ZBC_LATER_COLOR) && s_settle[i].want_color != ZBC_CMD_NONE;
+            s_settle[i].later      = false;
+            s_settle[i].later_what = 0;
+            if ((!level && !color) || s_settle[i].later_left == 0) {
                 s_settle[i].reads_left = 0;
                 continue;
             }
             s_settle[i].later_left--;
             s_radio.cmd_retried_later++;
-            ESP_LOGW(TAG, "Device 0x%04x ep %d never got its command; sending it again (%d more to come)",
-                     s_settle[i].short_addr, s_settle[i].ep, s_settle[i].later_left);
-            resend_intent_locked(s_settle[i].short_addr, s_settle[i].ep,
-                                 s_settle[i].want_on, s_settle[i].want_level);
+            ESP_LOGW(TAG, "Device 0x%04x ep %d never got its %s; sending it again (%d more to come)",
+                     s_settle[i].short_addr, s_settle[i].ep,
+                     level && color ? "command and colour" : (level ? "command" : "colour"),
+                     s_settle[i].later_left);
+            /* The level first, as a curve sends them: the gate holds the colour
+             * until that frame is confirmed. */
+            if (level) {
+                resend_intent_locked(s_settle[i].short_addr, s_settle[i].ep,
+                                     s_settle[i].want_on, s_settle[i].want_level);
+            }
+            if (color) {
+                resend_color_locked(s_settle[i].short_addr, s_settle[i].ep, s_settle[i].want_color,
+                                    s_settle[i].want_color_a, s_settle[i].want_color_b);
+            }
             s_settle[i].reads_left = 2;
             s_settle[i].answered   = false;
             s_settle[i].delivered  = false;
@@ -4467,7 +4524,9 @@ static void settle_work(void)
              * re-sends spent: the confirmation that would have put the command
              * down for later has not come, or came for a frame before this one.
              * Not quiet yet, then - it has still to be told. */
-            if (!s_settle[i].delivered && s_settle[i].want_on >= 0 && s_settle[i].later_left > 0) {
+            if (!s_settle[i].delivered && s_settle[i].later_left > 0 &&
+                (s_settle[i].want_on >= 0 || s_settle[i].want_color != ZBC_CMD_NONE)) {
+                s_settle[i].later_what = 0;       /* neither is known to have arrived */
                 settle_later_locked(i, now);
                 continue;
             }
@@ -4601,7 +4660,8 @@ static void schedule_settle_read_ex(uint16_t short_addr, uint8_t ep, uint16_t fe
      * The probe of a device gone only lately keeps its intent, for the later
      * tries - see ZBC_LATER_TRIES. */
     const bool probe = reach_is_gone(short_addr);
-    if (probe && !reach_is_outage(short_addr)) {
+    const bool dead  = probe && !reach_is_outage(short_addr);
+    if (dead) {
         want_on = -1;
     }
 
@@ -4635,13 +4695,19 @@ static void schedule_settle_read_ex(uint16_t short_addr, uint8_t ep, uint16_t fe
      * settling; once its reads are done the state it asked for is old news, and
      * reviving it would correct against a command the user has moved on from. */
     uint8_t fixes = probe ? 0 : 2, later = ZBC_LATER_TRIES;
+    bool    waiting = false;
     if (want_on == ZBC_WANT_KEEP) {
         const bool live = reused && s_settle[slot].reads_left > 0;
         want_on    = live ? s_settle[slot].want_on : -1;
         want_level = live ? s_settle[slot].want_level : 0;
         /* One user action, one budget: do not hand the pair a second helping. */
         fixes      = live ? s_settle[slot].fixes_left : 0;
-        later      = live ? s_settle[slot].later_left : 0;
+        /* A colour command on its own has tries of its own. */
+        later      = live ? s_settle[slot].later_left : ZBC_LATER_TRIES;
+        /* The level command it follows is waiting to be said again: it goes on
+         * waiting, with what it is waiting for, and this colour beside it. If
+         * this frame fails too, its confirmation adds the colour to the wait. */
+        waiting    = live && s_settle[slot].later;
     }
 
     s_settle[slot].short_addr = short_addr;
@@ -4658,8 +4724,7 @@ static void schedule_settle_read_ex(uint16_t short_addr, uint8_t ep, uint16_t fe
     s_settle[slot].recover_left = probe ? 0 : ZBC_RECOVER_TRIES;
     /* The later tries are the command's as well, and a new command ends any wait
      * for the old one's. */
-    s_settle[slot].later_left = want_on < 0 ? 0 : later;
-    s_settle[slot].later      = false;
+    s_settle[slot].later_left = (dead || (want_on < 0 && !color)) ? 0 : later;
     /* A command that is not a colour command clears the colour intent, so the
      * next colour read is judged against the colour last actually asked for and
      * never against the one before it. A curve sends its level command first and
@@ -4668,7 +4733,11 @@ static void schedule_settle_read_ex(uint16_t short_addr, uint8_t ep, uint16_t fe
     s_settle[slot].want_color_a     = color ? color->a : 0;
     s_settle[slot].want_color_b     = color ? color->b : 0;
     s_settle[slot].color_fixes_left = (color && !probe) ? 2 : 0;
-    settle_arm_locked(slot, transition_ds);
+    if (!waiting) {
+        s_settle[slot].later      = false;
+        s_settle[slot].later_what = 0;
+        settle_arm_locked(slot, transition_ds);
+    }
 
     esp_zigbee_lock_release();
 }
@@ -4711,12 +4780,14 @@ static void settle_sent_locked(uint16_t short_addr, uint8_t ep, uint16_t transit
     }
 }
 
-/* The stack gave up on the command to this endpoint, and nothing newer went out
- * in its place. Sent again at once while that budget lasts, and put down for
- * later after that - see ZBC_LATER_TRIES.
+/* The stack gave up on a frame to this endpoint, and nothing newer went out in
+ * its place. `color` says which of the slot's two intents it carried. Sent again
+ * at once while that intent's budget lasts, and put down for later after that -
+ * see ZBC_LATER_TRIES. Once the slot is waiting, nothing more is sent at once:
+ * the device has shown it is not taking frames now.
  *
  * Caller holds the stack lock - this runs from the confirmation callback. */
-static void settle_undelivered_locked(uint16_t short_addr, uint8_t ep)
+static void settle_undelivered_locked(uint16_t short_addr, uint8_t ep, bool color)
 {
     for (int i = 0; i < ZBC_SETTLE_SLOTS; i++) {
         if (s_settle[i].short_addr != short_addr || s_settle[i].ep != ep) {
@@ -4724,19 +4795,40 @@ static void settle_undelivered_locked(uint16_t short_addr, uint8_t ep)
         }
         /* A confirm that arrives after the command has finished settling is
          * reporting on something the user has moved on from. */
-        if (s_settle[i].reads_left == 0 || s_settle[i].want_on < 0) {
+        if (s_settle[i].reads_left == 0) {
             return;
         }
-        if (s_settle[i].fixes_left > 0) {
-            s_settle[i].fixes_left--;
-            ESP_LOGW(TAG, "Sending it again straight away");
-            resend_intent_locked(short_addr, ep, s_settle[i].want_on, s_settle[i].want_level);
+        if (color) {
+            if (s_settle[i].want_color == ZBC_CMD_NONE) {
+                return;
+            }
+            if (!s_settle[i].later && s_settle[i].color_fixes_left > 0) {
+                s_settle[i].color_fixes_left--;
+                ESP_LOGW(TAG, "Sending the colour again straight away");
+                resend_color_locked(short_addr, ep, s_settle[i].want_color,
+                                    s_settle[i].want_color_a, s_settle[i].want_color_b);
+                return;
+            }
+        } else {
+            if (s_settle[i].want_on < 0) {
+                return;
+            }
+            if (!s_settle[i].later && s_settle[i].fixes_left > 0) {
+                s_settle[i].fixes_left--;
+                ESP_LOGW(TAG, "Sending it again straight away");
+                resend_intent_locked(short_addr, ep, s_settle[i].want_on, s_settle[i].want_level);
+                return;
+            }
+        }
+        if (s_settle[i].later_left == 0) {
             return;
         }
-        if (s_settle[i].later_left > 0 && !s_settle[i].later) {
+        if (!s_settle[i].later) {
+            s_settle[i].later_what = 0;
             settle_later_locked(i, esp_timer_get_time());
             settle_rearm_locked(false);
         }
+        s_settle[i].later_what |= color ? ZBC_LATER_COLOR : ZBC_LATER_LEVEL;
         return;
     }
 }
@@ -4756,6 +4848,7 @@ static void settle_announced_locked(uint16_t short_addr)
         s_settle[i].later_left = 0;
         if (s_settle[i].later) {
             s_settle[i].later      = false;
+            s_settle[i].later_what = 0;
             s_settle[i].reads_left = 0;
         }
     }
@@ -5232,6 +5325,22 @@ static int64_t gate_inflight_age_us(uint16_t short_addr, uint8_t ep)
     return age;
 }
 
+/* Whether the frame in flight to this endpoint is a colour command, as opposed
+ * to on/off or level. False for one sent unsequenced, which the gate knows
+ * nothing of. */
+static bool gate_inflight_is_color(uint16_t short_addr, uint8_t ep)
+{
+    bool color = false;
+    portENTER_CRITICAL(&s_gate_mux);
+    const int i = gate_find(short_addr, ep);
+    if (i >= 0 && s_gate[i].busy) {
+        const uint8_t k = s_gate[i].inflight.kind;
+        color = k == ZBC_CMD_CT || k == ZBC_CMD_HS || k == ZBC_CMD_XY;
+    }
+    portEXIT_CRITICAL(&s_gate_mux);
+    return color;
+}
+
 /* Says again what the settle slot last asked for, after a lamp reported
  * something else or answered nothing at all.
  *
@@ -5254,6 +5363,15 @@ static void resend_intent_locked(uint16_t short_addr, uint8_t ep, int8_t want_on
                          .transition_ds = settings_transition_ds() };
     }
     gate_send_locked(short_addr, ep, &c, ZBC_CH_LEVEL);
+}
+
+/* Says again the colour the settle slot last asked for. Transition 0: the lamp
+ * is where it should not be, and a ramp would only put off the read that checks
+ * this took. */
+static void resend_color_locked(uint16_t short_addr, uint8_t ep, uint8_t kind, uint16_t a, uint16_t b)
+{
+    const zbc_cmd_t c = { .kind = kind, .a = a, .b = b };
+    gate_send_locked(short_addr, ep, &c, ZBC_CH_COLOR);
 }
 
 /* A colour read that disagrees with the colour the lamp was told: send it again.
@@ -5293,12 +5411,8 @@ static void color_correct_locked(uint16_t short_addr, uint8_t ep, int part, uint
                  part == ZBC_COLOR_PART_CT ? "mireds" : (part == ZBC_COLOR_PART_HUE ? "hue" : "sat"),
                  got, part == ZBC_COLOR_PART_SAT ? s_settle[i].want_color_b : s_settle[i].want_color_a);
 
-        /* Transition 0: the lamp is where it should not be, and a ramp would only
-         * put off the read that checks this took. */
-        const zbc_cmd_t c = { .kind = s_settle[i].want_color,
-                              .a    = s_settle[i].want_color_a,
-                              .b    = s_settle[i].want_color_b };
-        gate_send_locked(short_addr, ep, &c, ZBC_CH_COLOR);
+        resend_color_locked(short_addr, ep, s_settle[i].want_color, s_settle[i].want_color_a,
+                            s_settle[i].want_color_b);
 
         /* Same re-arm as the on/off and level corrections, for the same reasons. */
         s_settle[i].reads_left = 1;
