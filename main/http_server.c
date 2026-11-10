@@ -409,8 +409,7 @@ static cJSON *device_to_json(const zbc_device_t *dev, int64_t now)
         wired_light_to_json(d, light_id, &light);
     }
 
-    bool fresh = dev->last_seen_us > 0 && (now - dev->last_seen_us) < ZBC_OFFLINE_AFTER_US;
-    cJSON_AddBoolToObject(d, "online", dev->online && fresh);
+    cJSON_AddBoolToObject(d, "online", device_db_is_fresh(dev, ZBC_OFFLINE_AFTER_US));
     cJSON_AddNumberToObject(d, "last_seen_s_ago",
                             dev->last_seen_us ? (double)((now - dev->last_seen_us) / 1000000) : -1);
 
@@ -1289,7 +1288,7 @@ static const char *const TURN_ON_NAMES[] = { "last", "adaptive", "full" };
 _Static_assert(sizeof(TURN_ON_NAMES) / sizeof(TURN_ON_NAMES[0]) == ZBC_TURN_ON_COUNT,
                "a name for every zbc_turn_on_t");
 
-static cJSON *group_to_json(const zbc_group_t *g, int64_t now)
+static cJSON *group_to_json(const zbc_group_t *g)
 {
     cJSON *jg = cJSON_CreateObject();
     cJSON_AddNumberToObject(jg, "id", g->id);
@@ -1309,9 +1308,8 @@ static cJSON *group_to_json(const zbc_group_t *g, int64_t now)
         const zbc_endpoint_t *e = NULL;
         if (lighting_get_device(g->members[m].ieee, &dev)) {
             e = lighting_find_endpoint(&dev, g->members[m].ep);
-            bool fresh = dev.last_seen_us > 0 && (now - dev.last_seen_us) < ZBC_OFFLINE_AFTER_US;
             cJSON_AddStringToObject(jm, "name", dev.name);
-            cJSON_AddBoolToObject(jm, "online", dev.online && fresh);
+            cJSON_AddBoolToObject(jm, "online", device_db_is_fresh(&dev, ZBC_OFFLINE_AFTER_US));
         } else {
             /* Unpairing drops members, so this only happens in a race. */
             cJSON_AddStringToObject(jm, "name", ieee);
@@ -1390,12 +1388,11 @@ static bool stream_groups(json_stream_t *js)
     if (!groups) {
         return false;
     }
-    const size_t  n     = group_db_snapshot(groups, CONFIG_ZBC_MAX_GROUPS);
-    const int64_t now   = esp_timer_get_time();
-    bool          first = true;
+    const size_t n     = group_db_snapshot(groups, CONFIG_ZBC_MAX_GROUPS);
+    bool         first = true;
     json_stream_raw(js, "[");
     for (size_t i = 0; i < n; i++) {
-        json_stream_element(js, &first, group_to_json(&groups[i], now));
+        json_stream_element(js, &first, group_to_json(&groups[i]));
     }
     json_stream_raw(js, "]");
     free(groups);
@@ -2311,7 +2308,7 @@ static esp_err_t groups_post(httpd_req_t *req)
     if (!group_db_get(id, &g)) {
         return send_error(req, "500 Internal Server Error", "room vanished");
     }
-    return send_json(req, group_to_json(&g, esp_timer_get_time()), "201 Created");
+    return send_json(req, group_to_json(&g), "201 Created");
 }
 
 /* PATCH /api/groups/{id}  {"name": "Kitchen", "adaptive": "off"|"mode_select"|"endpoint",
@@ -3680,13 +3677,15 @@ static esp_err_t restore_post(httpd_req_t *req)
 
 /* The Matter lamps' side of /api/matter: our fabric, each device with its
  * subscription, and the pairing in progress. */
-static void add_controller_json(cJSON *root, uint32_t now_ms)
+static cJSON *controller_json(void)
 {
     static mctl_status_t cs;       /* static for the same reason as matter_get's */
     mctl_get_status(&cs);
-    const int64_t now_us = (int64_t)now_ms * 1000;
+    /* The clock the nodes' times were taken from, whole: milliseconds in 32 bits
+     * wrap after 49.7 days, and every age below came out negative from then on. */
+    const int64_t now_us = esp_timer_get_time();
     char hex[19];
-    cJSON *c = cJSON_AddObjectToObject(root, "controller");
+    cJSON *c = cJSON_CreateObject();
     cJSON_AddBoolToObject(c, "running", cs.running);
     cJSON_AddNumberToObject(c, "fabric_index", cs.fabric_index);
     cJSON_AddStringToObject(c, "fabric_error", cs.fabric_error);
@@ -3732,22 +3731,45 @@ static void add_controller_json(cJSON *root, uint32_t now_ms)
             cJSON_AddNumberToObject(hl, cs.pair_step_names[i], cs.pair_heap_low[i]);
         }
     }
+    return c;
+}
+
+/* A list as a member of the object being streamed: its elements follow, one at a
+ * time through json_stream_element with `el`, and then its "]". */
+static void stream_list_begin(json_stream_t *js, bool *first, const char *name, bool *el)
+{
+    json_stream_key(js, first, name);
+    json_stream_raw(js, "[");
+    *el = true;
 }
 
 /* GET /api/matter - what a controller needs to add the bridge, and whether one
  * has. `running` is false in the setup portal and on a board whose partition
- * table predates Matter. */
+ * table predates Matter.
+ *
+ * Streamed, a fabric, a room, a device endpoint or a command at a time (see
+ * json_stream_t in http_util.c). As one tree it held every device endpoint
+ * shown on its own beside the rest, at cJSON's five to six bytes of heap for
+ * each byte of JSON and with the printed text on top - most with the table
+ * full, which is when the heap is at its lowest, the endpoints being what fills
+ * it - and the pairing dialog asks for it every second while a pairing runs. */
 static esp_err_t matter_get(httpd_req_t *req)
 {
     /* Static: close to 1 KB, and httpd serves one request at a time. */
     static matter_status_t st;
     matter_bridge_get_status(&st);
-    cJSON *root = cJSON_CreateObject();
-    cJSON_AddBoolToObject(root, "running", st.running);
-    cJSON_AddNumberToObject(root, "fabrics", st.fabric_count);
+    json_stream_t js;
+    if (!json_stream_begin(&js, req)) {
+        return send_error(req, "500 Internal Server Error", "out of memory");
+    }
+    bool first = true;
+    bool el    = true;
+    json_stream_raw(&js, "{");
+    json_stream_member(&js, &first, "running", cJSON_CreateBool(st.running));
+    json_stream_member(&js, &first, "fabrics", cJSON_CreateNumber(st.fabric_count));
     /* Who they are. A controller can add more than one fabric, so "2" on its own
      * does not say whether that is two ecosystems or one that took two. */
-    cJSON *list = cJSON_AddArrayToObject(root, "fabric_list");
+    stream_list_begin(&js, &first, "fabric_list", &el);
     for (int i = 0; i < st.fabric_listed; i++) {
         cJSON *f = cJSON_CreateObject();
         char   vid[7];
@@ -3774,13 +3796,14 @@ static esp_err_t matter_get(httpd_req_t *req)
         } else {
             cJSON_AddNullToObject(subs, "live_after_s");
         }
-        cJSON_AddItemToArray(list, f);
+        json_stream_element(&js, &el, f);
     }
-    cJSON_AddBoolToObject(root, "window_open", st.window_open);
-    cJSON_AddNumberToObject(root, "groups", st.groups);
+    json_stream_raw(&js, "]");
+    json_stream_member(&js, &first, "window_open", cJSON_CreateBool(st.window_open));
+    json_stream_member(&js, &first, "groups", cJSON_CreateNumber(st.groups));
     /* Per group: the group's state, Matter's copy of it, and the write between
      * them - so "the controller does not follow" says which of the three is off. */
-    cJSON *gl = cJSON_AddArrayToObject(root, "group_list");
+    stream_list_begin(&js, &first, "group_list", &el);
     for (int i = 0; i < st.groups; i++) {
         const matter_group_t *d = &st.group_list[i];
         cJSON *g = cJSON_CreateObject();
@@ -3802,15 +3825,16 @@ static esp_err_t matter_get(httpd_req_t *req)
         cJSON_AddNumberToObject(g, "al_active", d->al_active);
         cJSON_AddNumberToObject(g, "al_matter_on", d->al_matter_on);
         cJSON_AddNumberToObject(g, "matter_mode", d->matter_mode);
-        cJSON_AddItemToArray(gl, g);
+        json_stream_element(&js, &el, g);
     }
+    json_stream_raw(&js, "]");
     /* The device endpoints shown on their own (mexp_db.h), as the bridge has them,
      * and how many asked for have none: a sensor not set up yet, or no room. */
-    cJSON_AddNumberToObject(root, "devices", st.devices);
-    cJSON_AddNumberToObject(root, "devices_skipped", st.devices_skipped);
-    cJSON_AddBoolToObject(root, "devices_low_memory", st.devices_heap_short);
+    json_stream_member(&js, &first, "devices", cJSON_CreateNumber(st.devices));
+    json_stream_member(&js, &first, "devices_skipped", cJSON_CreateNumber(st.devices_skipped));
+    json_stream_member(&js, &first, "devices_low_memory", cJSON_CreateBool(st.devices_heap_short));
     static const char *const DEV_KINDS[] = { "", "light", "switch", "occupancy", "remote" };
-    cJSON *dl = cJSON_AddArrayToObject(root, "device_list");
+    stream_list_begin(&js, &first, "device_list", &el);
     for (int i = 0; i < st.devices; i++) {
         const matter_device_t *d = &st.device_list[i];
         cJSON *o = cJSON_CreateObject();
@@ -3838,16 +3862,17 @@ static esp_err_t matter_get(httpd_req_t *req)
         }
         cJSON_AddNumberToObject(o, "writes", d->writes);
         cJSON_AddStringToObject(o, "last_err", d->last_err ? esp_err_to_name(d->last_err) : "");
-        cJSON_AddItemToArray(dl, o);
+        json_stream_element(&js, &el, o);
     }
-    cJSON_AddStringToObject(root, "manual_code", st.manual_code);
-    cJSON_AddStringToObject(root, "qr_code", st.qr_code);
+    json_stream_raw(&js, "]");
+    json_stream_member(&js, &first, "manual_code", cJSON_CreateString(st.manual_code));
+    json_stream_member(&js, &first, "qr_code", cJSON_CreateString(st.qr_code));
     /* The last commands controllers sent, oldest first, as they arrived - which
      * two controllers disagreeing about the same light comes down to. */
     const uint32_t now  = (uint32_t)(esp_timer_get_time() / 1000);
     const uint32_t seen = st.commands_seen;
     const uint32_t kept = seen < MATTER_RECENT_COMMANDS ? seen : MATTER_RECENT_COMMANDS;
-    cJSON *cl = cJSON_AddArrayToObject(root, "commands");
+    stream_list_begin(&js, &first, "commands", &el);
     for (uint32_t i = seen - kept; i != seen; i++) {
         const matter_command_t *c = &st.commands[i % MATTER_RECENT_COMMANDS];
         cJSON *o = cJSON_CreateObject();
@@ -3866,10 +3891,12 @@ static esp_err_t matter_get(httpd_req_t *req)
         } else {
             cJSON_AddNullToObject(o, "transition_ds");
         }
-        cJSON_AddItemToArray(cl, o);
+        json_stream_element(&js, &el, o);
     }
-    add_controller_json(root, now);
-    return send_json(req, root, "200 OK");
+    json_stream_raw(&js, "]");
+    json_stream_member(&js, &first, "controller", controller_json());
+    json_stream_raw(&js, "}");
+    return json_stream_end(&js);
 }
 
 /* POST /api/matter/lamps/pair  {"code": "3497-011-2332" | "MT:..."}

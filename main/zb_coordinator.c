@@ -424,6 +424,31 @@ static bool ep_presses_only(uint16_t features)
     return (features & ZBC_FEAT_SWITCH) && !(features & ZBC_FEAT_ONOFF);
 }
 
+/* Rooms, curves and what Matter shows are not this file's business, so whoever
+ * keeps them is told. */
+static zb_endpoint_gone_cb_t s_endpoint_gone_cb;
+
+void zb_set_endpoint_gone_handler(zb_endpoint_gone_cb_t cb)
+{
+    s_endpoint_gone_cb = cb;
+}
+
+/* Takes an endpoint that is nothing of ours out of the device's record, with
+ * what names it: shown in Matter on its own, its entry would otherwise sit in
+ * that table with no switch left on the page to clear it, and apply again to
+ * whatever came back on that endpoint. A lamp's record is kept
+ * (device_db_remove_endpoint), and so is what names it. Zigbee task. */
+static void remove_endpoint(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep)
+{
+    if (device_db_remove_endpoint(ieee, ep) == ESP_ERR_INVALID_STATE) {
+        return;
+    }
+    /* Endpoint 0 is no application's, and to the handler it means every one. */
+    if (ep != 0 && s_endpoint_gone_cb) {
+        s_endpoint_gone_cb(ieee, ep);
+    }
+}
+
 static bool senses_motion(const zbc_device_t *dev)
 {
     for (int i = 0; i < dev->ep_count; i++) {
@@ -446,7 +471,7 @@ static void drop_presses_beside_motion(const uint8_t ieee[ZBC_IEEE_LEN], const z
     for (int i = 0; i < dev->ep_count; i++) {
         if (ep_presses_only(dev->eps[i].features)) {
             ESP_LOGI(TAG, "Endpoint %d of a motion sensor is not a remote", dev->eps[i].ep);
-            device_db_remove_endpoint(ieee, dev->eps[i].ep);
+            remove_endpoint(ieee, dev->eps[i].ep);
         }
     }
 }
@@ -541,8 +566,8 @@ static void simple_desc_result(const ezb_zdo_simple_desc_req_result_t *result, v
     const bool is_switch = (features & ZBC_FEAT_SWITCH) != 0;
     if (!is_light && !is_switch && !is_sensor) {
         /* The simple descriptor is the authority, so any record of it goes (lamps
-         * excepted - see device_db_remove_endpoint). */
-        device_db_remove_endpoint(ieee, desc->ep_id);
+         * excepted - see remove_endpoint). */
+        remove_endpoint(ieee, desc->ep_id);
         return;
     }
 
@@ -574,7 +599,7 @@ static void simple_desc_result(const ezb_zdo_simple_desc_req_result_t *result, v
     if (have_known && ep_presses_only(features) && senses_motion(&known)) {
         /* See drop_presses_beside_motion; a record of it from before goes. */
         ESP_LOGI(TAG, "Device 0x%04x endpoint %d: a motion sensor's, not a remote", saddr, desc->ep_id);
-        device_db_remove_endpoint(ieee, desc->ep_id);
+        remove_endpoint(ieee, desc->ep_id);
         return;
     }
 
@@ -662,14 +687,6 @@ static void simple_desc_result(const ezb_zdo_simple_desc_req_result_t *result, v
     if (has_ota) {
         read_ota_client_info(saddr, desc->ep_id);
     }
-}
-
-/* Rooms and curves are not this file's business, so whoever keeps them is told. */
-static zb_endpoint_gone_cb_t s_endpoint_gone_cb;
-
-void zb_set_endpoint_gone_handler(zb_endpoint_gone_cb_t cb)
-{
-    s_endpoint_gone_cb = cb;
 }
 
 /* A Light Node's lights are edited on the node, so one can go, which no other lamp does.
@@ -3503,9 +3520,12 @@ static void zcl_core_action_handler(ezb_zcl_core_action_callback_id_t callback_i
          * with a Configure Reporting Response: a Hue LCT010 answers 0x82 on On/Off
          * and Level. It is an answer all the same, and asking again every scan
          * gets the same one. 0x06 is also Level's StepWithOnOff, which nothing
-         * sends to a lamp. */
+         * sends to a lamp, and Colour Control's MoveToHueAndSaturation, which the
+         * colour picker and Matter do send: so only on a cluster reporting is
+         * configured for, the ones an answer is kept for (done_bit). On any other
+         * it could never be recorded, and would be said again at every refusal. */
         if (rsp->in.rsp_to_cmd == EZB_ZCL_CMD_CONFIGURE_REPORTING && daddr != 0xFFFF &&
-            !config_done(daddr, dep, rsp->info.cluster_id)) {
+            done_bit(rsp->info.cluster_id) >= 0 && !config_done(daddr, dep, rsp->info.cluster_id)) {
             ESP_LOGW(TAG, "Device 0x%04x ep %d has no reporting for cluster 0x%04x - its state"
                           " will only be known when we ask", daddr, dep, rsp->info.cluster_id);
             mark_configured(daddr, dep, rsp->info.cluster_id, true);

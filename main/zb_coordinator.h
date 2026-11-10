@@ -214,8 +214,9 @@ typedef void (*zb_remote_cb_t)(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, uin
                                zb_remote_ev_t ev);
 void zb_set_remote_handler(zb_remote_cb_t cb);
 
-/* A Light Node has stopped listing this endpoint: a light deleted on the node. Called
- * in the Zigbee task, before the endpoint goes from device_db. */
+/* An endpoint has gone from a device's record: a Light Node has stopped listing it (a
+ * light deleted on the node), or interrogation found it to be no light, remote or
+ * sensor. Called in the Zigbee task, with the stack lock held. */
 typedef void (*zb_endpoint_gone_cb_t)(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep);
 void zb_set_endpoint_gone_handler(zb_endpoint_gone_cb_t cb);
 
