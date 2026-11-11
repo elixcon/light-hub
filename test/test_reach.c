@@ -153,8 +153,45 @@ static void test_a_fresh_row_is_there(void)
     ok(reach_may_command(&r, 5 * S, 0), "and it is commanded");
 }
 
+/* A device gone a moment ago may be an outage; one gone for longer is taken
+ * for unplugged. The clock runs from when the run of failures was complete,
+ * and a probe that fails does not restart it. */
+static void test_an_outage_is_only_lately(void)
+{
+    zbc_reach_t r = { 0 };
+    int64_t t = 100 * S;
+    fail_n(&r, ZBC_UNREACH_FAILS - 1, &t, 50 * S);
+    ok(!reach_outage(&r, t, 50 * S), "not gone, no outage");
+    fail_n(&r, 1, &t, 50 * S);
+    const int64_t gone_at = t;
+    ok(reach_outage(&r, t, 50 * S), "just gone: an outage");
+    t += 60 * S;
+    ok(reach_may_command(&r, t, 50 * S), "a probe goes");
+    reach_fail(&r, t + 5 * S, 50 * S);
+    ok(reach_outage(&r, gone_at + ZBC_UNREACH_OUTAGE_US - 1, 50 * S), "still one just inside the time");
+    ok(!reach_outage(&r, gone_at + ZBC_UNREACH_OUTAGE_US, 50 * S), "and unplugged after it, failed probes or not");
+    ok(!reach_outage(&r, t + 10 * S, t + 9 * S), "heard again, it is neither");
+}
+
+/* A planned re-send must know when it will be let out. */
+static void test_the_next_probe_has_a_time(void)
+{
+    zbc_reach_t r = { 0 };
+    int64_t t = 100 * S;
+    ok(reach_probe_free_us(&r, 0) == 0, "a device that is there takes a command now");
+    fail_n(&r, ZBC_UNREACH_FAILS, &t, 50 * S);
+    ok(reach_probe_free_us(&r, 50 * S) == 0, "gone and never probed: now");
+    ok(reach_may_command(&r, t, 50 * S), "the probe");
+    ok(reach_probe_free_us(&r, 50 * S) == t + ZBC_UNREACH_PROBE_US, "then one interval on");
+    ok(!reach_may_command(&r, t + ZBC_UNREACH_PROBE_US - 1, 50 * S), "which is when the next is refused until");
+    ok(reach_may_command(&r, t + ZBC_UNREACH_PROBE_US, 50 * S), "and let out from");
+    ok(reach_probe_free_us(&r, t + S) == 0, "heard again, nothing holds a command back");
+}
+
 int main(void)
 {
+    test_an_outage_is_only_lately();
+    test_the_next_probe_has_a_time();
     test_it_takes_a_run_of_failures();
     test_hearing_it_breaks_the_run();
     test_a_delivered_frame_breaks_the_run();

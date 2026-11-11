@@ -67,6 +67,9 @@ read_undelivered   ...or a read
 cmd_slow           a command did get there, but took over half a second: it
 cmd_slow_ms        needed retries, and that lamp's next frame waited it out;
                    cmd_slow_ms is their time added up
+cmd_retried_later  a command nothing had delivered was sent again a while later
+                   (up to three times, half a minute apart), unless the lamp
+                   had already been gone for five minutes
 went_quiet         a lamp stopped answering, so its state is unknown
 corrections        a lamp was somewhere it had not been asked to be
 gate_timeouts      a delivery confirmation never arrived at all

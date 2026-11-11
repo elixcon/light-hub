@@ -912,9 +912,10 @@ void config_backup_apply(void)
     }
     /* Every staged key stays until the end, so a power cut anywhere in here
      * repeats the whole thing at the next boot and comes to the same result. */
-    int copied = 0;
-    int erased = 0;
-    int failed = 0;
+    int  copied     = 0;
+    int  erased     = 0;
+    int  failed     = 0;
+    bool devices_in = true;     /* the file's device table is in place, or it had none and none is */
     for (size_t i = 0; i < CB_ENTRY_COUNT; i++) {
         const cb_entry_t *e      = &CB_ENTRIES[i];
         const bool        staged = nvs_find_key(stage, e->key, NULL) == ESP_OK;
@@ -938,13 +939,23 @@ void config_backup_apply(void)
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "Restore: \"%s\" failed: %s", e->key, esp_err_to_name(err));
             failed++;
+            if (strcmp(e->key, "devices") == 0) {
+                devices_in = false;
+            }
         }
     }
     if (replaced & CB_SECT_TABLES) {
         forget_runtime_keys(live);
         /* The file's devices, copied above, are the table now; a file without any
-         * is a box without any. The boot takes the table in (device_db_init). */
-        device_db_drop_records();
+         * is a box without any. The boot takes the table in (device_db_init). Not
+         * when the table could not be written, for want of room say: the records
+         * are then all there is of the devices, and the box keeps the ones it had,
+         * as a table that could not be replaced was kept before there were records. */
+        if (devices_in) {
+            device_db_drop_records();
+        } else {
+            ESP_LOGE(TAG, "Restore: the file's devices are not in place; keeping the ones this box had");
+        }
     }
     nvs_commit(live);
     nvs_close(live);

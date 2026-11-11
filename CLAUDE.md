@@ -163,9 +163,15 @@ from `main/` by path, so keep those files free of rules, rooms and Matter: `loca
 Every command answers `202`. The lamp's report or read-back decides the state, never the fact that a
 command was sent. After a command, settle reads (keyed per short address and endpoint, re-armed from
 the transition time) check where the lamp ended up and correct it a bounded number of times
-(`corrections` in `/api/status`). A device that stops answering is marked gone, gets `503`, and a
-command to it is treated as a probe. The UI mirrors this in `web/src/lib/state.svelte.ts`: an
-optimistic `pending` value clears on exact agreement or after `PENDING_TTL_MS`.
+(`corrections` in `/api/status`): on/off, a level more than `ZBC_LEVEL_TOLERANCE` from the one
+sent, and a colour temperature or hue/saturation outside its tolerance (xy is not read back). A
+command the stack could not deliver, level or colour, is re-sent twice at once,
+then up to three times later (`ZBC_LATER_TRIES`: after 5 s, then a probe interval apart), unless a
+newer command or the device's announce ends that. A device that stops answering is marked gone, gets
+`503`, and a command to it is treated as a probe. A probe keeps the later tries only while the
+device has been gone for less than `ZBC_UNREACH_OUTAGE_US`; after that it is one frame. The UI
+mirrors this in `web/src/lib/state.svelte.ts`: an optimistic `pending` value clears on exact
+agreement or after `PENDING_TTL_MS`.
 
 ### Commands go through a per-endpoint gate
 

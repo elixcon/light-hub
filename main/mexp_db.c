@@ -147,6 +147,9 @@ esp_err_t mexp_db_set(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, bool expose)
     if (!ieee || ep == 0) {
         return ESP_ERR_INVALID_ARG;
     }
+    /* A change that could not be stored is taken back: the caller is told it
+     * failed, and an endpoint the bridge made on the strength of it would be gone
+     * again, with whatever a controller had set up on it, at the next restart. */
     esp_err_t err = ESP_OK;
     xSemaphoreTake(s_lock, portMAX_DELAY);
     const int i = index_of(ieee, ep);
@@ -158,10 +161,18 @@ esp_err_t mexp_db_set(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, bool expose)
             s_blob.e[s_blob.hdr.count].ep = ep;
             s_blob.hdr.count++;
             err = save_locked();
+            if (err != ESP_OK) {
+                s_blob.hdr.count--;
+            }
         }
     } else if (!expose && i >= 0) {
+        const mexp_entry_t was = s_blob.e[i];
         remove_at_locked(i);
         err = save_locked();
+        if (err != ESP_OK) {
+            /* Back at the end, where an entry's place means nothing. */
+            s_blob.e[s_blob.hdr.count++] = was;
+        }
     }
     xSemaphoreGive(s_lock);
     return err;

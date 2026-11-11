@@ -55,6 +55,9 @@ typedef struct {
      * how slow as well as how many. */
     uint32_t cmd_slow;
     uint32_t cmd_slow_ms;
+    /* Commands sent again a while after the stack gave up on them and on their
+     * immediate re-sends: an outage longer than a few seconds. */
+    uint32_t cmd_retried_later;
     uint32_t went_quiet;        /* a lamp stopped answering; its state is unknown */
     uint32_t corrections;       /* a lamp was somewhere it had not been asked to be */
     uint32_t gate_timeouts;     /* a delivery confirmation never arrived at all */
@@ -214,8 +217,9 @@ typedef void (*zb_remote_cb_t)(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, uin
                                zb_remote_ev_t ev);
 void zb_set_remote_handler(zb_remote_cb_t cb);
 
-/* A Light Node has stopped listing this endpoint: a light deleted on the node. Called
- * in the Zigbee task, before the endpoint goes from device_db. */
+/* An endpoint has gone from a device's record: a Light Node has stopped listing it (a
+ * light deleted on the node), or interrogation found it to be no light, remote or
+ * sensor. Called in the Zigbee task, with the stack lock held. */
 typedef void (*zb_endpoint_gone_cb_t)(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep);
 void zb_set_endpoint_gone_handler(zb_endpoint_gone_cb_t cb);
 
