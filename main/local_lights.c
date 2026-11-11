@@ -1785,6 +1785,9 @@ esp_err_t local_light_set(uint16_t id, zb_onoff_cmd_t cmd)
         xSemaphoreGive(s_lock);
         if (on != was) {
             ESP_LOGI(TAG, "Wired light %u (GPIO %d) %s", (unsigned)id, pin, on ? "on" : "off");
+            /* As unlock_changed does for a light that dims: the page shows it, and on
+             * a node this is what makes the Zigbee attributes follow. */
+            zbc_state_bump();
         }
         if (remember) {
             light_db_save_state(id, &(zbc_light_state_t){ .on = on });
