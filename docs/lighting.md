@@ -124,7 +124,7 @@ whatever warmth or colour it has: the room's brightness does not change it.
 
 ### Editing a curve
 
-Curves are edited at the top of a light's page.
+Curves are edited in the *Response* card of a light's page, below its device details.
 
 <p>
   <img src="images/curve-brightness.jpg" width="300" alt="A brightness curve, with another room member's curve drawn faintly behind it">

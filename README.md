@@ -119,15 +119,16 @@ source layout are in [docs/development.md](docs/development.md).
 3. The coordinator restarts, joins your network and is then at http://zigbee.local. Forming the
    Zigbee network takes a few seconds, and until it is done `/api/status` shows `network_up` as
    false.
-4. On the *Lights* page, press *Pair a light*, which opens the network for pairing for as long as
-   you choose, and put the lamp into pairing mode. Most bulbs have to be factory reset first, by a
+4. On the *Lights* page, press *+* and choose *Pair a light*, which opens the network for pairing
+   for as long as you choose, and put the lamp into pairing mode. Most bulbs have to be factory reset first, by a
    power-cycle sequence or from the remote that came with them.
 5. On the *Rooms* page, make a room with the *+* button and choose its lights.
 6. Pair remotes on the *Remotes* page. For IKEA, Hue and Aqara remotes, *Set up* creates their
    buttons for a room in one step ([Buttons and remotes](docs/buttons-and-remotes.md)).
 
 The page opens on *Rooms*, where every room has a switch and a brightness slider. *Lights*,
-*Remotes* and *Settings* are in the menu.
+*Remotes*, *Sensors* and *Settings* are in the tab bar, at the foot of a phone's screen and at the
+top of a wider one. The *+* beside the coordinator's name adds to the list that is showing.
 
 If you run more than one coordinator, give each a name under *Settings*. The address follows the
 name: a coordinator named "Living Room Hub" is at `living-room-hub.local`, and it restarts to take
