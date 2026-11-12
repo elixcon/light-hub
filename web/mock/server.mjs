@@ -3,13 +3,8 @@
 import http from "node:http";
 import { parseHhmm, sampleAt, usedDay } from "../src/lib/adaptive.ts";
 
+/* The first four are referred to by index below: add devices after them. */
 const devices = [
-  /* A Light Node: three lamps would be the same, and a control endpoint is what makes it one. */
-  { ieee: "0x404ccafffe42c504", short_addr: 0xc5a2, name: "Porch node", manufacturer: "Elixcon", model: "LightNode", source: "zigbee", online: true, last_seen_s_ago: 4, lqa: 140, rssi: -52, parent: null, child: false,
-    endpoints: [
-      { ep: 1, device_id: 0x0102, features: ["onoff", "brightness", "color_temp"], on: false, brightness_pct: 40, kelvin: 3000, min_kelvin: 2700, max_kelvin: 6500, hue: null, sat: null, color_mode: "color_temp", curves: { level: false, chroma: false }, input_pct: null },
-      { ep: 200, device_id: 0x0005, features: ["switch", "node"], on: null, brightness_pct: null, kelvin: null, min_kelvin: null, max_kelvin: null, hue: null, sat: null, color_mode: null, curves: { level: false, chroma: false }, input_pct: null, node_wifi: "off", node_ip: null },
-    ] },
   { ieee: "0x001788010bd6f2a1", short_addr: 0x046b, name: "Sofa strip", manufacturer: "Signify Netherlands B.V.", model: "LST002", online: true, last_seen_s_ago: 4, lqa: 114,
     endpoints: [{ ep: 11, device_id: 0x0210, features: ["onoff", "brightness", "color_temp", "color"], on: true, brightness_pct: 61, kelvin: 2700, min_kelvin: 2000, max_kelvin: 6500, hue: 30, sat: 60, color_mode: "color_temp", curves: { level: true, chroma: true }, input_pct: 40 }] },
   { ieee: "0x7cb03eaa0a0c5e12", short_addr: 0xa2b4, name: "Desk spot", manufacturer: "OSRAM", model: "PAR16 50 TW", online: true, last_seen_s_ago: 9, lqa: 98,
@@ -100,6 +95,12 @@ devices.push(Object.assign(wired(3, "Shelf strip", 20), { kind: "dim", pwm_hz: 4
 refreshWired(devices[devices.length - 1]);
 devices.push(Object.assign(wired(4, "Ceiling panel", 21), { kind: "cwnwww", gpio_neutral: 22, gpio_warm: 23, pwm_hz: 4882, pwm_phase: 0 }));
 refreshWired(devices[devices.length - 1]);
+/* A Light Node: three lamps would be the same, and a control endpoint is what makes it one. */
+devices.push({ ieee: "0x404ccafffe42c504", short_addr: 0xc5a2, name: "Porch node", manufacturer: "Elixcon", model: "LightNode", source: "zigbee", online: true, last_seen_s_ago: 4, lqa: 140, rssi: -52, parent: null, child: false,
+  endpoints: [
+    { ep: 1, device_id: 0x0102, features: ["onoff", "brightness", "color_temp"], on: false, brightness_pct: 40, kelvin: 3000, min_kelvin: 2700, max_kelvin: 6500, hue: null, sat: null, color_mode: "color_temp", curves: { level: false, chroma: false }, input_pct: null },
+    { ep: 200, device_id: 0x0005, features: ["switch", "node"], on: null, brightness_pct: null, kelvin: null, min_kelvin: null, max_kelvin: null, hue: null, sat: null, color_mode: null, curves: { level: false, chroma: false }, input_pct: null, node_wifi: "off", node_ip: null },
+  ] });
 /* How a room offers Adaptive Lighting, and whether it runs; pct and offset_k are filled in by syncGroup. */
 const alOff = () => ({ expose: "off", active: false, reason: "off", pct: null, offset_k: null });
 const groups = [
