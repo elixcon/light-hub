@@ -291,7 +291,7 @@
 					<div class="text-muted-foreground text-xs">This light cannot dim. It is on while its room is at or above this brightness and off below it. Remove it to have the light follow only the room's on/off.</div>
 				{:else}
 					{#if tabs.length > 1}
-						<div class="bg-muted inline-flex self-start rounded-lg p-0.5" role="tablist">
+						<div class="bg-muted inline-flex self-start rounded-full p-0.5" role="tablist">
 							{#each tabs as [id, label] (id)}
 								<button class="tab" role="tab" aria-selected={c.tab === id} onclick={() => { c.tab = id; c.sel = 0; }}>{label}</button>
 							{/each}
@@ -544,10 +544,3 @@
 		</Card.Content>
 	</Card.Root>
 {/if}
-
-<style>
-	.sel { height: 2.5rem; border-radius: var(--radius-md); border: 1px solid var(--input); background: var(--card);
-		color: var(--foreground); padding: 0 .6rem; font-size: .875rem; }
-	.tab { padding: .4rem .9rem; border-radius: 6px; font-size: .85rem; font-weight: 500; color: var(--muted-foreground); }
-	.tab[aria-selected="true"] { background: var(--card); color: var(--foreground); box-shadow: var(--elev-1); }
-</style>

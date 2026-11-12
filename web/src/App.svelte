@@ -1,13 +1,13 @@
 <script lang="ts">
 	import { onMount } from "svelte";
 	import TopBar from "$lib/components/TopBar.svelte";
-	import StaggeredMenu from "$lib/components/StaggeredMenu.svelte";
+	import NavBar from "$lib/components/NavBar.svelte";
 	import Banners from "$lib/components/Banners.svelte";
 	import Toast from "$lib/components/Toast.svelte";
 	import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
 	import KeyDialog from "$lib/components/KeyDialog.svelte";
 	import LockScreen from "$lib/components/LockScreen.svelte";
-	import Aurora from "$lib/components/Aurora.svelte";
+	import Backdrop from "$lib/components/Backdrop.svelte";
 	import GroupsView from "./views/GroupsView.svelte";
 	import GroupView from "./views/GroupView.svelte";
 	import LightsView from "./views/LightsView.svelte";
@@ -35,12 +35,18 @@
 	$effect(() => { if (setupOnly && route.name !== "setup") navigate("/setup", true); });
 </script>
 
-<Aurora />
+<Backdrop />
 {#if auth.locked}
 	<LockScreen />
 {:else}
-	<StaggeredMenu />
-	<main class="mx-auto max-w-[640px] px-4 pb-16 pt-4 md:max-w-[900px]">
+	{#if !setupOnly}
+		<NavBar items={[
+			["Rooms", "/groups", "groups group"], ["Lights", "/lights", "lights light"],
+			["Remotes", "/remotes", "remotes remote remote-button"], ["Sensors", "/sensors", "sensors sensor"],
+			["Settings", "/settings", "settings access matter wifi"],
+		]} />
+	{/if}
+	<main class="mx-auto max-w-[640px] px-4 pb-28 pt-4 md:max-w-[900px] md:pb-16 md:pt-20">
 		<TopBar />
 		<Banners />
 		{#if route.name === "setup" || setupOnly}

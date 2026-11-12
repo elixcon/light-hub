@@ -122,7 +122,7 @@ source layout are in [docs/development.md](docs/development.md).
 4. On the *Lights* page, press *Pair a light*, which opens the network for pairing for as long as
    you choose, and put the lamp into pairing mode. Most bulbs have to be factory reset first, by a
    power-cycle sequence or from the remote that came with them.
-5. On the *Rooms* page, make a room with *New room* and choose its lights.
+5. On the *Rooms* page, make a room with the *+* button and choose its lights.
 6. Pair remotes on the *Remotes* page. For IKEA, Hue and Aqara remotes, *Set up* creates their
    buttons for a room in one step ([Buttons and remotes](docs/buttons-and-remotes.md)).
 

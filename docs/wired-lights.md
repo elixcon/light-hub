@@ -6,7 +6,7 @@ bridge with its room.
 
 ## Adding one
 
-On the *Lights* page, choose *Add a wired light* and set its wiring:
+On the *Lights* page, press *+*, choose *Add a wired light* and set its wiring:
 
 - the pin it is on, and whether that pin is active low;
 - what it does at power-on: off, on, or as it was;

@@ -6,8 +6,7 @@
 	import * as Card from "$lib/components/ui/card";
 	import { Button } from "$lib/components/ui/button";
 	import Pencil from "@lucide/svelte/icons/pencil";
-	import Plus from "@lucide/svelte/icons/plus";
-	import CreateByName from "$lib/components/CreateByName.svelte";
+	import ListHeading from "$lib/components/ListHeading.svelte";
 	import ButtonRow from "$lib/components/ButtonRow.svelte";
 	import { app, data, openPairing } from "$lib/state.svelte.ts";
 	import { navigate } from "$lib/router.svelte.ts";
@@ -23,22 +22,22 @@
 		: `GPIO ${b.gpio} · ${b.pull === "none" ? "no pull" : "pull-" + b.pull} · active ${b.inverted ? "low" : "high"}`;
 </script>
 
-<div class="mt-5 flex items-center justify-between gap-3">
-	<h2 class="text-lg font-semibold">Remotes</h2>
-	<Button variant="outline" size="sm" disabled={app.pairing} onclick={openPairing}><Plus /> Pair a remote</Button>
-</div>
+<ListHeading title="Remotes" items={[
+	{ title: "Pair a remote", text: "A Zigbee remote or wall switch, put into pairing mode.", disabled: app.pairing, run: openPairing },
+	{ title: "Add a wired button", text: "A push button wired to a pin of this board.", placeholder: "Name this button", path: "/api/buttons", route: "/remotes" },
+]} />
 
 {#if !cards.length}
 	<div class="text-muted-foreground mt-6 text-center text-sm">
 		<p class="text-foreground text-base font-medium">No remotes yet</p>
-		<p class="mt-2">Press <b>Pair a remote</b> and put the remote into pairing mode. It appears here, and a remote this coordinator knows gets its buttons filled in for you.</p>
+		<p class="mt-2">Press <b>+</b> and <b>Pair a remote</b>, and put the remote into pairing mode. It appears here, and a remote this coordinator knows gets its buttons filled in for you.</p>
 	</div>
 {:else}
 	<div class="mt-4 grid gap-3 md:grid-cols-2">
 		{#each cards as c (c.ieee)}
 			{@const h = remoteHeard(c)}
 			{@const stray = strayParent(c, data.devices)}
-			<Card.Root class="lift">
+			<Card.Root>
 				<Card.Content class="flex flex-col gap-3">
 					<div class="flex items-start gap-2">
 						<div class="min-w-0 flex-1">
@@ -77,13 +76,13 @@
 	</Card.Root>
 {/if}
 
-<CreateByName title="Wired buttons" addLabel="Add a wired button" placeholder="Name this button" path="/api/buttons" route="/remotes" />
+<ListHeading title="Wired buttons" />
 {#if !wired.length}
 	<p class="text-muted-foreground mt-2 text-sm">A push button between a GPIO pin and GND works the same way as a remote button. The board's own BOOT button is on GPIO 9, with nothing to solder.</p>
 {:else}
 	<div class="mt-3 grid gap-3 md:grid-cols-2">
 		{#each wired as b (b.id)}
-			<Card.Root class="glow lift" data-lit={b.pressed || undefined}>
+			<Card.Root class="glow" data-lit={b.pressed || undefined}>
 				<Card.Content class="flex flex-col gap-1">
 					<ButtonRow button={b} />
 					<div class="text-muted-foreground flex items-center gap-1.5 text-xs">

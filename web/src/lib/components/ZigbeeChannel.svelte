@@ -207,8 +207,6 @@
 </div>
 
 <style>
-	.sel { height: 2.5rem; border-radius: var(--radius-md); border: 1px solid var(--input); background: var(--card);
-		color: var(--foreground); padding: 0 .6rem; font-size: .875rem; }
 	/* Sixteen columns on one baseline. The gray is the theme's own muted ink
 	 * mixed into the card, so dark mode gets its own step rather than a flip. */
 	.plot { position: relative; display: flex; align-items: flex-end; gap: 2px; height: 8rem;

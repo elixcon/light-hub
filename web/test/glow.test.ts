@@ -82,7 +82,7 @@ test("warmth runs amber, white, blue, and the everyday whites are told apart", (
 });
 
 test("the card and the stylesheet agree on the inks and the amber of lit", () => {
-  const css = readFileSync(new URL("../src/app.css", import.meta.url), "utf8");
+  const css = ["app.css", "lib/lamp.css"].map((f) => readFileSync(new URL(`../src/${f}`, import.meta.url), "utf8")).join("\n");
   const hex = (h: string) => [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16));
   const on = css.match(/--on: #([0-9a-f]{6});/)?.[1];
   assert.deepEqual(on && hex(on), [...LIT], "--on");

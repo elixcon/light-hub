@@ -64,6 +64,14 @@
 </script>
 
 <Card.Root class="mt-4">
+	<Card.Header><Card.Title>Name</Card.Title></Card.Header>
+	<Card.Content class="flex flex-col gap-2">
+		<Label for="nname">What this node is called on your network</Label>
+		<Input id="nname" bind:value={name} maxlength={31} onchange={rename} />
+	</Card.Content>
+</Card.Root>
+
+<Card.Root class="mt-4">
 	<Card.Header><Card.Title>Zigbee</Card.Title></Card.Header>
 	<Card.Content class="flex flex-col gap-3">
 		<dl class="text-muted-foreground grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
@@ -75,18 +83,7 @@
 			{/if}
 			{#if s?.node?.hub_down}<dt>Hub</dt><dd class="text-destructive">could not be reached by the last press</dd>{/if}
 		</dl>
-		<div class="flex flex-wrap gap-2">
-			<Button variant="outline" onclick={close}>Close Wi-Fi now</Button>
-			{#if s?.node?.paired}<Button variant="destructive" onclick={leave}>Leave network</Button>{/if}
-		</div>
-	</Card.Content>
-</Card.Root>
-
-<Card.Root class="mt-4">
-	<Card.Header><Card.Title>Name</Card.Title></Card.Header>
-	<Card.Content class="flex flex-col gap-2">
-		<Label for="nname">What this node is called on your network</Label>
-		<Input id="nname" bind:value={name} maxlength={31} onchange={rename} />
+		{#if s?.node?.paired}<div><Button variant="destructive" onclick={leave}>Leave network</Button></div>{/if}
 	</Card.Content>
 </Card.Root>
 
@@ -101,6 +98,7 @@
 				<Button variant="outline" onclick={forgetWifi}>Forget this network</Button>
 			</div>
 		{/if}
+		<div><Button variant="outline" onclick={close}>Close Wi-Fi now</Button></div>
 	</Card.Content>
 </Card.Root>
 

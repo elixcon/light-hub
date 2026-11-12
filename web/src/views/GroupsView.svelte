@@ -6,19 +6,19 @@
 	import SunMedium from "@lucide/svelte/icons/sun-medium";
 	import PowerSwitch from "$lib/components/PowerSwitch.svelte";
 	import LevelSlider from "$lib/components/LevelSlider.svelte";
-	import CreateByName from "$lib/components/CreateByName.svelte";
+	import ListHeading from "$lib/components/ListHeading.svelte";
 	import { data, pending, gkey, gvalue, findEp, setGroupOnOff, setGroupLevel, startAdaptive } from "$lib/state.svelte.ts";
 	import { navigate } from "$lib/router.svelte.ts";
 	import { plural, stateLabel } from "$lib/format.ts";
 	import { roomColour, lampAttrs } from "$lib/glow.ts";
 </script>
 
-<CreateByName title="Rooms" addLabel="New room" placeholder="Name this room" path="/api/groups" route="/groups" />
+<ListHeading title="Rooms" items={[{ title: "New room", placeholder: "Name this room", path: "/api/groups", route: "/groups" }]} />
 
 {#if !data.groups.length}
 	<div class="text-muted-foreground mt-8 text-center text-sm">
 		<p class="text-foreground text-base font-medium">No rooms yet</p>
-		<p class="mt-2">A room is a set of lights with one brightness slider — a whole room, or just a shelf or a desk. Press <b>New room</b>, name it, then tick the lights it should control.</p>
+		<p class="mt-2">A room is a set of lights with one brightness slider — a whole room, or just a shelf or a desk. Press <b>+</b>, name it, then tick the lights it should control.</p>
 	</div>
 {:else}
 	<div class="mt-4 grid gap-3 md:grid-cols-2">
@@ -28,7 +28,7 @@
 			{@const dimmable = g.members.some((m) => m.brightness)}
 			{@const adaptive = gvalue(g.id, "adaptive", g.adaptive?.active ?? false)}
 			{@const offline = g.members.filter((m) => !m.online).length}
-			<Card.Root class="lamp lift" data-lit={on === true || undefined}
+			<Card.Root class="lamp" data-lit={on === true || undefined}
 				{...lampAttrs(roomColour(g.members, (m) => findEp(m.ieee, m.ep)?.endpoint))}>
 				<Card.Content class="flex flex-col gap-3">
 					<div class="flex items-start gap-2">

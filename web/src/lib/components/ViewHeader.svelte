@@ -4,8 +4,8 @@
 	let { title, back, children }: { title: string; back: string; children?: Snippet } = $props();
 </script>
 
-<div class="mt-4 flex items-center gap-1">
-	<a href="#{back}" class="hover:bg-muted -ml-2 inline-flex size-9 items-center justify-center rounded-full" aria-label="Back"><ChevronLeft class="size-5" /></a>
-	<h2 class="min-w-0 flex-1 truncate text-lg font-semibold">{title}</h2>
+<div class="mt-6 flex items-center gap-2.5">
+	<a href="#{back}" class="bg-card hover:bg-secondary inline-flex size-9 shrink-0 items-center justify-center rounded-full" aria-label="Back"><ChevronLeft class="size-5" /></a>
+	<h2 class="min-w-0 flex-1 truncate text-xl font-semibold tracking-tight">{title}</h2>
 	{@render children?.()}
 </div>

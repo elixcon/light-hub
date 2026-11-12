@@ -44,7 +44,7 @@
 	aria-labelledby={dialog.titleId}
 	aria-describedby={dialog.descriptionId}
 	class={cn(
-		"bg-popover text-popover-foreground ring-edge m-auto w-full max-w-[calc(100%_-_2rem)] gap-4 rounded-xl p-4 text-sm shadow-lg ring-1 outline-none open:grid sm:max-w-sm",
+		"bg-popover text-popover-foreground m-auto w-full max-w-[calc(100%_-_2rem)] gap-4 rounded-xl p-5 text-sm shadow-lg outline-none open:grid sm:max-w-sm",
 		className
 	)}
 	oncancel={(e) => { e.preventDefault(); dialog.close(); }}
@@ -54,7 +54,7 @@
 >
 	{@render children?.()}
 	{#if showCloseButton}
-		<Button variant="ghost" class="absolute top-2 right-2" size="icon-sm" onclick={() => dialog.close()}>
+		<Button variant="ghost" class="absolute top-3 right-3" size="icon-sm" onclick={() => dialog.close()}>
 			<XIcon />
 			<span class="sr-only">Close</span>
 		</Button>
@@ -74,7 +74,7 @@
 		background-color: rgb(0 0 0 / 0);
 		transition: background-color .1s, overlay .1s allow-discrete, display .1s allow-discrete;
 	}
-	dialog[open]::backdrop { background-color: rgb(0 0 0 / .1); backdrop-filter: blur(4px); }
+	dialog[open]::backdrop { background-color: rgb(0 0 0 / .35); }
 	@starting-style { dialog[open]::backdrop { background-color: rgb(0 0 0 / 0); } }
 	:global(html:has(dialog[open])) { overflow: hidden; }
 </style>

@@ -4,7 +4,7 @@
 	import * as Card from "$lib/components/ui/card";
 	import { Button } from "$lib/components/ui/button";
 	import Pencil from "@lucide/svelte/icons/pencil";
-	import Plus from "@lucide/svelte/icons/plus";
+	import ListHeading from "$lib/components/ListHeading.svelte";
 	import SensorState from "$lib/components/SensorState.svelte";
 	import { app, data, openPairing, refresh } from "$lib/state.svelte.ts";
 	import { del } from "$lib/api.ts";
@@ -26,20 +26,19 @@
 		: "no longer paired";
 </script>
 
-<div class="mt-5 flex items-center justify-between gap-3">
-	<h2 class="text-lg font-semibold">Sensors</h2>
-	<Button variant="outline" size="sm" disabled={app.pairing} onclick={openPairing}><Plus /> Pair a sensor</Button>
-</div>
+<ListHeading title="Sensors" items={[
+	{ title: "Pair a sensor", text: "A Zigbee motion sensor, put into pairing mode.", disabled: app.pairing, run: openPairing },
+]} />
 
 {#if !cards.length}
 	<div class="text-muted-foreground mt-6 text-center text-sm">
 		<p class="text-foreground text-base font-medium">No motion sensors yet</p>
-		<p class="mt-2">Press <b>Pair a sensor</b> and put the sensor into pairing mode — on most, a long press of its reset button. It appears here once the coordinator has heard it; a Xiaomi or Aqara sensor may need a wave in front of it first.</p>
+		<p class="mt-2">Press <b>+</b> and <b>Pair a sensor</b>, and put the sensor into pairing mode — on most, a long press of its reset button. It appears here once the coordinator has heard it; a Xiaomi or Aqara sensor may need a wave in front of it first.</p>
 	</div>
 {:else}
 	<div class="mt-4 grid gap-3 md:grid-cols-2">
 		{#each cards as c (`${c.ieee}/${c.ep}`)}
-			<Card.Root class="lift">
+			<Card.Root>
 				<Card.Content class="flex flex-col gap-3">
 					<div class="flex items-start gap-2">
 						<div class="min-w-0 flex-1">

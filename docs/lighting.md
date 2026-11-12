@@ -24,7 +24,7 @@ each lamp the ordinary per-lamp command; the ZCL Groups cluster is not used. Not
 the lamps, so a lamp that is factory reset and joins again is still in its room. The cost is that
 the lamps in a room change a few tens of milliseconds apart instead of in lockstep.
 
-Make a room with *New room* on the *Rooms* page, then open it to choose its lights. A light can be
+Make a room with the *+* button on the *Rooms* page, then open it to choose its lights. A light can be
 in more than one room.
 
 <img src="images/room-edit.jpg" width="320" alt="A room's page: its name, its lights, and how it offers Adaptive Lighting">

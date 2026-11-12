@@ -75,5 +75,11 @@ then edited. Re-running `add` over them would undo this:
   against vectors generated with Python `segno`.
 - `src/lib/router.svelte.ts` - hash routes (`#/groups`, `#/lights/{ieee}/{ep}`, ...).
   The coordinator serves one HTML route; the fragment never reaches it.
-- `src/lib/components/StaggeredMenu.svelte` - the menu, CSS transitions only.
+- `src/lib/components/NavBar.svelte` - the tab bar: at the foot of a phone's screen, at the
+  top of a wide one.
+- `src/lib/components/Backdrop.svelte` - the page's background, a blurred living room drawn
+  as an SVG of flat shapes; its veil keeps the text on it at 4.5:1
+  (`test/backdrop.test.ts`).
+- `src/app.css` - the theme (Hemma's Minimal: flat, solid, pills, ink as the accent);
+  `src/lib/lamp.css` - the lit cards, imported only by the hub's `main.ts`.
 - `src/views/*` - one file per page.

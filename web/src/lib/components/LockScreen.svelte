@@ -8,9 +8,9 @@
 	$effect(() => { if (!auth.locked) key = ""; });
 </script>
 
-<div class="bg-background fixed inset-0 z-50 flex items-center justify-center p-4">
-	<div class="surface w-full max-w-sm rounded-xl p-6 shadow-lg ring-1 ring-edge">
-		<h2 class="text-lg font-semibold">This coordinator is locked</h2>
+<div class="fixed inset-0 z-50 flex items-center justify-center p-4">
+	<div class="bg-card w-full max-w-sm rounded-xl p-6">
+		<h2 class="text-xl font-semibold tracking-tight">This coordinator is locked</h2>
 		<p class="text-muted-foreground mt-2 text-sm">Press one of its buttons <b>5 times, about once a second</b> — the BOOT button on the board, a wired switch or a paired remote. This page unlocks by itself.</p>
 		<Label for="lockKey" class="mt-5 mb-2 block">Or enter a key</Label>
 		<Input id="lockKey" bind:value={key} autocomplete="off" autocapitalize="characters" spellcheck={false}

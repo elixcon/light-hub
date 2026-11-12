@@ -25,7 +25,7 @@ export type LightColour = { rgb: Rgb } | { mired: number };
 const WARMTH = { neutral: 222, warm: 500, cool: 154, warmHue: 78, coolHue: 250, curve: 0.5 } as const;
 
 /* The text colours of a lit card and the grey of its secondary text - ink at
- * this opacity - and the amber of a lamp that has said no colour. app.css sets
+ * this opacity - and the amber of a lamp that has said no colour. lamp.css sets
  * the same values (`.lamp[data-ink]`, `--on`); the test holds them together. */
 export const INK = { dark: [28, 27, 23], light: [255, 255, 255] } as const;
 export const MUTED = { dark: 0.72, light: 0.8 } as const;

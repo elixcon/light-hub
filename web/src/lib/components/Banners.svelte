@@ -60,16 +60,11 @@
 	.banner {
 		display: flex; flex-wrap: wrap; align-items: center; gap: .6rem .9rem;
 		margin: .9rem 0 0; padding: .7rem .9rem; border-radius: var(--radius);
-		background: color-mix(in srgb, var(--primary) 14%, var(--card));
-		border: 1px solid color-mix(in srgb, var(--primary) 35%, transparent);
-		font-size: .875rem;
+		background: var(--card); font-size: .875rem;
 	}
-	.banner.hot {
-		background: color-mix(in srgb, var(--destructive) 14%, var(--card));
-		border-color: color-mix(in srgb, var(--destructive) 45%, transparent);
-	}
+	.banner.hot { background: color-mix(in srgb, var(--destructive) 16%, var(--card)); }
 	.grow { flex: 1 1 14rem; }
-	.pulse { width: 10px; height: 10px; border-radius: 9999px; background: var(--primary);
+	.pulse { width: 10px; height: 10px; border-radius: 9999px; background: var(--on);
 		animation: pulse 1.2s ease-in-out infinite; }
 	@keyframes pulse { 0%, 100% { transform: scale(.7); opacity: .5 } 50% { transform: scale(1); opacity: 1 } }
 	@media (prefers-reduced-motion: reduce) { .pulse { animation: none } }

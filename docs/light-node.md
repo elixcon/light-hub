@@ -61,7 +61,7 @@ A new node has no Zigbee network, so it does two things at once:
    captive portal.
 2. It tries to join a network about every 30 seconds.
 
-Add your lights and buttons on its page. Then on the hub press **Add a light** and **Pair a light**. It joins
+Add your lights and buttons on its page. Then on the hub's *Lights* page press **+** and **Pair a light**. It joins
 within half a minute, and Wi-Fi closes two minutes after the page was last used.
 
 A node joins **any** Zigbee network that is open for pairing, so do not leave yours open near a neighbour's.
