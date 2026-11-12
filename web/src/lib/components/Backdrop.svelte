@@ -38,7 +38,6 @@
 		<rect x="38" y="24" width="18" height="17" rx="3" />
 		<path d="M73 39h12l4 12H69z" />
 	</g>
-	<circle style:fill="var(--linen)" cx="93" cy="54" r="3.5" />
 	<!-- A plant. -->
 	<g style:fill="var(--leaf)">
 		<circle cx="63" cy="30" r="7" /><circle cx="60" cy="43" r="7" /><circle cx="64" cy="56" r="5" />
