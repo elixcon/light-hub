@@ -73,6 +73,17 @@ CONFIG_HTTPD_MAX_URI_LEN=256
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
 
 #
+# Hardware stack guard
+#
+# Off: it goes off with sp inside the stack, right after an instruction that
+# loads sp from memory (esp-idf#14456, open, cause unknown). The Zigbee library
+# has one in its link status, sent every 15 s, and Wi-Fi's interrupts make it
+# likelier: boxes in use restarted from it after hours to days. FreeRTOS's
+# canary (on by default) still stops a task that overran its stack, at its next
+# context switch. See "After a crash" in docs/development.md.
+CONFIG_ESP_SYSTEM_HW_STACK_GUARD=n
+
+#
 # Code size
 #
 # -Os rather than the -Og debug default: the image needs it to fit its

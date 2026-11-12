@@ -264,6 +264,7 @@ counters (`cmd_undelivered`, `cmd_slow`, `corrections`, ...; read them as rates)
 from `crash_log.c`. Decode crash addresses against the matching `build/elixcon_light_hub.elf`,
 subtracting one from `ra` and each `stack` entry (see `docs/development.md`). A `Stack protection
 fault` with `guard.sp_in_bounds` true is the stack guard's false alarm (esp-idf#14456), not an
-overflow: do not grow a stack for it.
+overflow: do not grow a stack for it. `sdkconfig.defaults` turns the guard off for that, so only
+older builds record one, and FreeRTOS's canary reports a real overflow as an abort.
 `CONFIG_ZBC_CRASH_TEST` enables a test crash via `POST /api/restart`, and `CONFIG_ZBC_HEAP_WATCH`
 records per-request heap lows.
