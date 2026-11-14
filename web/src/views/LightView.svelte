@@ -14,6 +14,7 @@
 	import ChromaPath from "$lib/components/ChromaPath.svelte";
 	import SwitchPointEditor from "$lib/components/SwitchPointEditor.svelte";
 	import MixCurves from "$lib/components/MixCurves.svelte";
+	import GradientCard from "$lib/components/GradientCard.svelte";
 	import FirmwareRow from "$lib/components/FirmwareRow.svelte";
 	import NodeWifiCard from "$lib/components/NodeWifiCard.svelte";
 	import MatterExposeRow from "$lib/components/MatterExposeRow.svelte";
@@ -36,7 +37,7 @@
 		return parts.length ? parts.join(" · ") : "not measured yet";
 	};
 	import { PINS, PIN_NOTE } from "$lib/buttons.ts";
-	import type { Device, LightKind, LightMix, PowerOn } from "$lib/types.ts";
+	import type { Device, LightKind, LightMix, PowerOn, StripOrder } from "$lib/types.ts";
 	import { curveAt, PRESETS, chromaPresetsFor, clonePoints, clonePath, defaultLevel, defaultPath,
 		switchPoints, switchPointOf, DEFAULT_MIN_K, DEFAULT_MAX_K, type Point, type Stop } from "$lib/curves.ts";
 	import { pathAt, colourOf, rgbCss, isKelvinStop } from "$lib/colorspace.ts";
@@ -193,9 +194,14 @@
 	const tunable = $derived(d?.kind === "cwww" || three);
 	/* Driven by PWM, so it dims: tunable white, or one colour on one pin. */
 	const pwm = $derived(tunable || d?.kind === "dim");
+	/* Addressable LEDs on a data pin: they dim themselves. */
+	const strip = $derived(d?.kind === "strip");
+	const ORDERS: [StripOrder, string][] = [["grb", "GRB — WS2812B, SK6812"], ["rgb", "RGB — WS2811"], ["brg", "BRG"],
+		["rbg", "RBG"], ["gbr", "GBR"], ["bgr", "BGR"]];
 	type Wiring = Partial<{ kind: LightKind; gpio: number | null; gpio_warm: number | null; gpio_neutral: number | null;
 		active_low: boolean; power_on: PowerOn; pwm_hz: number; cold_kelvin: number; warm_kelvin: number;
-		neutral_kelvin: number; mix: LightMix; mix_curves: MixCurvesJson }>;
+		neutral_kelvin: number; mix: LightMix; mix_curves: MixCurvesJson; pixels: number; order: StripOrder;
+		rgbw: boolean; reversed: boolean }>;
 	async function saveWiring(body: Wiring, revert?: () => void) {
 		if (!d || d.id == null) return;
 		try { await patch(`/api/lights/${d.id}`, body); }
@@ -321,6 +327,9 @@
 				<LevelSlider {pct} {on} label="Test brightness" onsend={(v) => setLevel(ieee, ep, v)} />
 			</Card.Content></Card.Root>
 		{/if}
+		{#if f.includes("gradient")}
+			<GradientCard {ieee} {ep} {e} />
+		{/if}
 	{:else if f.includes("onoff")}
 		<!-- Response -->
 		<Card.Root class="mt-4">
@@ -415,6 +424,10 @@
 		</Card.Root>
 	{/if}
 
+	{#if !node && !remote && f.includes("gradient")}
+		<GradientCard {ieee} {ep} {e} />
+	{/if}
+
 	{#if wired}
 		{#snippet pinSelect(id: string, label: string, current: number | null | undefined, save: (pin: number | null) => Wiring)}
 			<div>
@@ -447,7 +460,7 @@
 		<Card.Root class="mt-4">
 			<Card.Header>
 				<Card.Title>Wiring</Card.Title>
-				<Card.Description>{three ? "The three pins of the board the cold, neutral and warm white LEDs are driven from." : tunable ? "The two pins of the board the cold and warm white LEDs are driven from." : pwm ? "The pin of the board the LEDs are dimmed from." : "The pin of the board this light is switched from."}</Card.Description>
+				<Card.Description>{strip ? "The pin of the board the strip's data line is on." : three ? "The three pins of the board the cold, neutral and warm white LEDs are driven from." : tunable ? "The two pins of the board the cold and warm white LEDs are driven from." : pwm ? "The pin of the board the LEDs are dimmed from." : "The pin of the board this light is switched from."}</Card.Description>
 			</Card.Header>
 			<Card.Content class="flex flex-col gap-4">
 				<div>
@@ -461,6 +474,7 @@
 						<option value="dim">Dimmable — single-colour LEDs on one PWM pin</option>
 						<option value="cwww">Tunable white — cold and warm white LEDs on two PWM pins</option>
 						<option value="cwnwww">Tunable white, three channels — cold, neutral and warm white LEDs on three PWM pins</option>
+						<option value="strip">LED strip — addressable RGB or RGBW LEDs (WS2812B, SK6812) on one data pin</option>
 					</select>
 				</div>
 
@@ -480,7 +494,35 @@
 						{@render kelvinInput("lwarm", "Warm white, kelvin", d.warm_kelvin ?? 2700, (k) => ({ warm_kelvin: k }))}
 					</div>
 				{:else}
-					{@render pinSelect("lpin", "Pin", d.gpio, (pin) => ({ gpio: pin }))}
+					{@render pinSelect("lpin", strip ? "Data pin" : "Pin", d.gpio, (pin) => ({ gpio: pin }))}
+				{/if}
+
+				{#if strip}
+					<div class="grid gap-4 sm:grid-cols-2">
+						<div>
+							<Label for="lpixels" class="mb-2 block">LEDs on the strip</Label>
+							<Input id="lpixels" type="number" min={1} max={300} step={1} value={d.pixels ?? 30}
+								onchange={(ev) => {
+									const el = ev.currentTarget as HTMLInputElement, was = String(d.pixels ?? 30);
+									saveWiring({ pixels: Number(el.value) }, () => { el.value = was; });
+								}} />
+						</div>
+						<div>
+							<Label for="lorder" class="mb-2 block">Colour order</Label>
+							<select id="lorder" class="sel w-full" value={d.order ?? "grb"}
+								onchange={(ev) => {
+									const el = ev.currentTarget, was = d.order ?? "grb";
+									saveWiring({ order: el.value as StripOrder }, () => { el.value = was; });
+								}}>
+								{#each ORDERS as [v, label] (v)}<option value={v}>{label}</option>{/each}
+							</select>
+						</div>
+					</div>
+					<div class="flex flex-col gap-2 text-sm">
+						<label class="flex items-center gap-2"><input type="checkbox" class="accent-primary" checked={!!d.rgbw} onchange={(ev) => saveWiring({ rgbw: ev.currentTarget.checked })} /> RGBW — each pixel has a white LED as well (SK6812 RGBW)</label>
+						<label class="flex items-center gap-2"><input type="checkbox" class="accent-primary" checked={!!d.reversed} onchange={(ev) => saveWiring({ reversed: ev.currentTarget.checked })} /> A gradient's first colour is at the far end of the strip</label>
+					</div>
+					<div class="text-muted-foreground text-xs">1–300 LEDs; for a strip whose chips each drive three LEDs, count the chips. If red and green are swapped, the order is wrong. The strip needs a supply of its own, and most want a 5 V data signal: a level shifter between the pin and the strip. The chip drives two strips.</div>
 				{/if}
 
 				{#if pwm}
@@ -523,9 +565,9 @@
 				{/if}
 
 				<div class="flex flex-col gap-2 text-sm">
-					<span class="font-medium">{pwm ? "The LEDs are lit when their pin is" : "The light is on when the pin is"}</span>
-					<label class="flex items-center gap-2"><input type="radio" name="lpolarity" class="accent-primary" checked={!d.active_low} onchange={() => saveWiring({ active_low: false })} /> HIGH (3V3) — {pwm ? "most MOSFET and LED driver boards" : "most LEDs and relay modules"}</label>
-					<label class="flex items-center gap-2"><input type="radio" name="lpolarity" class="accent-primary" checked={!!d.active_low} onchange={() => saveWiring({ active_low: true })} /> LOW (GND) — {pwm ? "drivers with an inverting input" : "\"low-level trigger\" relay modules"}</label>
+					<span class="font-medium">{strip ? "The data line is" : pwm ? "The LEDs are lit when their pin is" : "The light is on when the pin is"}</span>
+					<label class="flex items-center gap-2"><input type="radio" name="lpolarity" class="accent-primary" checked={!d.active_low} onchange={() => saveWiring({ active_low: false })} /> {strip ? "As it is — wired straight, or through a level shifter that does not invert" : `HIGH (3V3) — ${pwm ? "most MOSFET and LED driver boards" : "most LEDs and relay modules"}`}</label>
+					<label class="flex items-center gap-2"><input type="radio" name="lpolarity" class="accent-primary" checked={!!d.active_low} onchange={() => saveWiring({ active_low: true })} /> {strip ? "Inverted — through a single transistor or an inverting gate" : `LOW (GND) — ${pwm ? "drivers with an inverting input" : "\"low-level trigger\" relay modules"}`}</label>
 				</div>
 				<div class="flex flex-col gap-2 text-sm">
 					<span class="font-medium">{node ? "When it starts" : "When the coordinator starts"}</span>
@@ -535,8 +577,8 @@
 						{/each}
 					</div>
 					<div class="text-muted-foreground text-xs">
-						{pwm
-							? `That includes after a power cut and after a firmware update. "On" comes back at the last ${tunable ? "brightness and temperature" : "brightness"}, and "As it was" also remembers whether it was on. Changes are stored 10 s after the last one.`
+						{pwm || strip
+							? `That includes after a power cut and after a firmware update. "On" comes back at the last ${strip ? "brightness and colours" : tunable ? "brightness and temperature" : "brightness"}, and "As it was" also remembers whether it was on. Changes are stored 10 s after the last one.`
 							: "That includes after a power cut and after a firmware update. \"As it was\" remembers every switch."}
 					</div>
 				</div>

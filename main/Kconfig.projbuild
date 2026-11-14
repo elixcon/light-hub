@@ -33,6 +33,15 @@ menu "Elixcon Light Hub"
         range 1 64
         default 16
 
+    config ZBC_MAX_GRADIENTS
+        int "Maximum number of Zigbee lamps showing a gradient at once"
+        range 1 16
+        default 4
+        help
+            A Hue gradient strip, or a Light Node's LED strip, that has been
+            given a gradient holds a slot (about 70 bytes each) until it is
+            given a plain colour again.
+
     config ZBC_MAX_CURVES
         int "Maximum number of lights with a stored response curve"
         range 1 64
@@ -223,6 +232,16 @@ menu "Elixcon Light Hub"
             crash_log.c recorded as `last_crash` in /api/status. Refused while
             the image is on trial, which a crash would roll back. For a test
             build only.
+
+    config ZBC_LED_STRIP
+        bool "Wired LED strips: addressable RGB and RGBW LEDs"
+        default y
+        help
+            Lets a wired light be a strip of addressable LEDs (WS2812B, SK6812)
+            on one data pin, driven by the RMT peripheral: up to two strips. A
+            strip takes a colour, a colour temperature and a gradient. Off, the
+            RMT driver is not built and a light of that kind stays dark; its
+            settings are kept. Gradients on Zigbee lamps do not depend on it.
 
     config ZBC_WLED
         bool "WLED interface: stream to Hue colour lamps"

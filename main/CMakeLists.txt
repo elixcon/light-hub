@@ -19,6 +19,8 @@ idf_component_register(
         "ntc.c"
         "thermal.c"
         "colorspace.c"
+        "gradient.c"
+        "led_strip_out.c"
         "remote.c"
         "pchip.c"
         "curve_db.c"

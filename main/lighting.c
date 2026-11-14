@@ -12,6 +12,7 @@
 #include "esp_timer.h"
 
 #include "al_db.h"
+#include "colorspace.h"
 #include "curve_db.h"
 #include "heap_watch.h"
 #include "light_db.h"
@@ -709,12 +710,15 @@ bool lighting_get_device(const uint8_t ieee[ZBC_IEEE_LEN], zbc_device_t *out)
     out->in_use = true;
     memcpy(out->ieee, ieee, ZBC_IEEE_LEN);
     strlcpy(out->name, l.name, sizeof(out->name));
-    const bool tunable = zbc_light_tunable(l.kind);
+    const bool strip   = l.kind == ZBC_LIGHT_STRIP;
+    const bool tunable = zbc_light_tunable(l.kind) || strip;
     const bool dims    = tunable || l.kind == ZBC_LIGHT_DIM;
     if (l.kind == ZBC_LIGHT_CNW && l.gpio >= 0 && l.gpio_neutral >= 0 && l.gpio_warm >= 0) {
         snprintf(out->model, sizeof(out->model), "GPIO %d + %d + %d", l.gpio, l.gpio_neutral, l.gpio_warm);
     } else if (l.kind == ZBC_LIGHT_CWWW && l.gpio >= 0 && l.gpio_warm >= 0) {
         snprintf(out->model, sizeof(out->model), "GPIO %d + %d", l.gpio, l.gpio_warm);
+    } else if (strip && l.gpio >= 0) {
+        snprintf(out->model, sizeof(out->model), "GPIO %d, %u LEDs", l.gpio, (unsigned)l.strip_pixels);
     } else if (!tunable && l.gpio >= 0) {
         snprintf(out->model, sizeof(out->model), "GPIO %d", l.gpio);
     }
@@ -734,12 +738,25 @@ bool lighting_get_device(const uint8_t ieee[ZBC_IEEE_LEN], zbc_device_t *out)
                                : ZBC_FEAT_ONOFF;
     e->on_off        = live ? st.on : ZBC_UNKNOWN;
     e->level         = live && dims ? st.level : ZBC_UNKNOWN;
-    e->ct_mireds     = live && tunable ? st.mireds : ZBC_UNKNOWN;
-    e->ct_min_mireds = tunable ? (int32_t)(1000000 / l.cold_k) : ZBC_UNKNOWN;
-    e->ct_max_mireds = tunable ? (int32_t)(1000000 / l.warm_k) : ZBC_UNKNOWN;
+    e->ct_mireds     = live && tunable && st.mireds > 0 ? st.mireds : ZBC_UNKNOWN;
+    e->ct_min_mireds = strip ? 1000000 / ZBC_STRIP_COLD_K : tunable ? (int32_t)(1000000 / l.cold_k) : ZBC_UNKNOWN;
+    e->ct_max_mireds = strip ? 1000000 / ZBC_STRIP_WARM_K : tunable ? (int32_t)(1000000 / l.warm_k) : ZBC_UNKNOWN;
     e->hue           = ZBC_UNKNOWN;
     e->saturation    = ZBC_UNKNOWN;
     e->color_mode    = tunable ? 2 : ZBC_UNKNOWN;
+    if (strip) {
+        /* A colour lamp's row: any colour, a colour temperature, and a gradient.
+         * While it shows a colour, that is the first of its gradient's. */
+        zbc_gradient_t g;
+        e->features |= ZBC_FEAT_COLOR_HS | ZBC_FEAT_COLOR_XY | ZBC_FEAT_GRADIENT;
+        if (live && local_light_gradient(id, &g)) {
+            float h, sat;
+            zbc_xy_to_hs((float)g.x[0] / 65536.0f, (float)g.y[0] / 65536.0f, &h, &sat);
+            e->hue        = (int16_t)lroundf(h * 254.0f / 360.0f);
+            e->saturation = (int16_t)lroundf(sat * 254.0f / 100.0f);
+            e->color_mode = 0;
+        }
+    }
     return true;
 }
 
@@ -1030,6 +1047,8 @@ static esp_err_t out_fade_off(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, uint
  * mirror, so anything else is refused - glides() keeps it from being asked. */
 #define GLIDE_STEPS LOCAL_LIGHT_GLIDE_POINTS
 
+static bool gradient_holds(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep);
+
 static esp_err_t out_glide(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, const uint8_t *level,
                            const uint16_t *mireds, uint16_t ds, bool off)
 {
@@ -1040,6 +1059,9 @@ static esp_err_t out_glide(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, const u
     if (light_kind(ieee, &id) != LIGHT_WIRED) {
         return ESP_ERR_NOT_SUPPORTED;
     }
+    if (mireds && gradient_holds(ieee, ep)) {
+        mireds = NULL;                /* the brightness glides; the gradient stays */
+    }
     const esp_err_t err = local_light_glide(id, level, mireds, GLIDE_STEPS, ds, off);
     if (err == ESP_OK) {
         note_sent(ieee, ep, !off);
@@ -1047,10 +1069,35 @@ static esp_err_t out_glide(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, const u
     return err;
 }
 
-static esp_err_t out_set_ct(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, uint16_t mireds, uint16_t ds)
+/* Whether the light is showing a gradient - several colours along a strip
+ * (gradient.h) - or has been sent one and not yet said. While it does, colour is
+ * the hand's alone: a warmth curve, Adaptive Lighting's shift and Warm while off
+ * would each put the whole strip in one colour, and they run without anybody
+ * asking. Brightness is not colour and goes on as ever. A lamp that took none
+ * holds nothing. */
+static bool gradient_holds(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep)
+{
+    uint16_t           id = 0;
+    const light_kind_t k  = light_kind(ieee, &id);
+    zbc_gradient_t     g;
+    if (k == LIGHT_WIRED) {
+        return local_light_gradient(id, &g) && g.n >= 2;
+    }
+    zb_gradient_state_t st = ZB_GRADIENT_NONE;
+    return k == LIGHT_ZIGBEE && zb_gradient_get(ieee, ep, NULL, &st) &&
+           (st == ZB_GRADIENT_PENDING || st == ZB_GRADIENT_SHOWN);
+}
+
+/* The three colour commands. `hand` is a colour somebody chose, which a
+ * gradient gives way to; without it the colour is policy's, and a light showing
+ * a gradient keeps it (LIGHTING_ERR_GRADIENT, quiet like the stream's). */
+static esp_err_t out_set_ct(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, uint16_t mireds, uint16_t ds, bool hand)
 {
     if (stream_holds(ieee, ep)) {
         return LIGHTING_ERR_STREAMING;
+    }
+    if (!hand && gradient_holds(ieee, ep)) {
+        return LIGHTING_ERR_GRADIENT;
     }
     uint16_t           id = 0;
     const light_kind_t k  = light_kind(ieee, &id);
@@ -1059,28 +1106,41 @@ static esp_err_t out_set_ct(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, uint16
                              : zb_set_color_temp(ieee, ep, mireds, ds);
 }
 
-static esp_err_t out_set_hs(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, uint8_t hue, uint8_t sat, uint16_t ds)
+static esp_err_t out_set_xy(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, uint16_t x, uint16_t y, uint16_t ds,
+                            bool hand)
 {
     if (stream_holds(ieee, ep)) {
         return LIGHTING_ERR_STREAMING;
     }
-    uint16_t           id = 0;
-    const light_kind_t k  = light_kind(ieee, &id);
-    return k == LIGHT_WIRED  ? ESP_ERR_NOT_SUPPORTED          /* white LEDs only */
-         : k == LIGHT_MATTER ? mctl_set_hs(id, hue, sat, ds)
-                             : zb_set_color_hs(ieee, ep, hue, sat, ds);
-}
-
-static esp_err_t out_set_xy(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, uint16_t x, uint16_t y, uint16_t ds)
-{
-    if (stream_holds(ieee, ep)) {
-        return LIGHTING_ERR_STREAMING;
+    if (!hand && gradient_holds(ieee, ep)) {
+        return LIGHTING_ERR_GRADIENT;
     }
     uint16_t           id = 0;
     const light_kind_t k  = light_kind(ieee, &id);
-    return k == LIGHT_WIRED  ? ESP_ERR_NOT_SUPPORTED
+    /* Wired: an LED strip takes it; white LEDs answer ESP_ERR_NOT_SUPPORTED. */
+    return k == LIGHT_WIRED  ? local_light_set_xy(id, x, y, ds)
          : k == LIGHT_MATTER ? mctl_set_xy(id, x, y, ds)
                              : zb_set_color_xy(ieee, ep, x, y, ds);
+}
+
+static esp_err_t out_set_hs(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, uint8_t hue, uint8_t sat, uint16_t ds,
+                            bool hand)
+{
+    if (stream_holds(ieee, ep)) {
+        return LIGHTING_ERR_STREAMING;
+    }
+    if (!hand && gradient_holds(ieee, ep)) {
+        return LIGHTING_ERR_GRADIENT;
+    }
+    uint16_t           id = 0;
+    const light_kind_t k  = light_kind(ieee, &id);
+    if (k == LIGHT_WIRED) {
+        /* A strip's colour is xy; ZCL's hue and saturation are 0-254. */
+        float x, y;
+        zbc_hs_to_xy((int)lroundf((float)hue * 360.0f / 254.0f), (int)lroundf((float)sat * 100.0f / 254.0f), &x, &y);
+        return local_light_set_xy(id, (uint16_t)(x * 65535.0f), (uint16_t)(y * 65535.0f), ds);
+    }
+    return k == LIGHT_MATTER ? mctl_set_hs(id, hue, sat, ds) : zb_set_color_hs(ieee, ep, hue, sat, ds);
 }
 
 /* The colour and the off as one gated command - see off_endpoint. A wired light
@@ -1298,7 +1358,8 @@ static esp_err_t off_endpoint(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep,
 {
     /* Asked before anything below records this off, which would make every lamp
      * read as dark. */
-    const uint16_t mireds = e ? prewarm_mireds(settings_warm_off(), endpoint_lit(ieee, ep, e) == 1, e)
+    const uint16_t mireds = e ? prewarm_mireds(settings_warm_off() && !gradient_holds(ieee, ep),
+                                               endpoint_lit(ieee, ep, e) == 1, e)
                               : 0;
     const bool     fade   = transition_ds > 0;
     const bool     glide  = fade && e && glides(ieee, ep, e);
@@ -1324,7 +1385,7 @@ static esp_err_t off_endpoint(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep,
         err = glide  ? glide_off(ieee, ep, e, transition_ds)
             : fade   ? out_fade_off(ieee, ep, transition_ds)
                      : switch_endpoint(ieee, ep, ZB_ONOFF_OFF);
-        out_set_ct(ieee, ep, mireds, transition_ds);
+        out_set_ct(ieee, ep, mireds, transition_ds, false);
     } else {
         /* Down to the bottom first - not to hide the colour change: the gate sends
          * the colour when this frame is confirmed, one round trip in, so it lands
@@ -1424,7 +1485,8 @@ static void remember_reported_level(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep
  * a lamp that is not answering, which the coordinator has already said once. */
 static bool colour_sent(esp_err_t err, const char *what, uint8_t ep)
 {
-    if (err != ESP_OK && err != ZB_ERR_UNREACHABLE && err != LIGHTING_ERR_STREAMING) {
+    if (err != ESP_OK && err != ZB_ERR_UNREACHABLE && err != LIGHTING_ERR_STREAMING &&
+        err != LIGHTING_ERR_GRADIENT) {
         ESP_LOGW(TAG, "%s for ep %d refused (0x%x)", what, ep, err);
     }
     return err == ESP_OK;
@@ -1457,7 +1519,7 @@ static bool send_curve_color(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep,
             int kelvin = clamp_kelvin(e, t->kelvin);
             if (mode_changed || cs->sent_kelvin == ZBC_UNKNOWN ||
                 abs(kelvin - (int)cs->sent_kelvin) >= (coarse ? CT_DEADBAND_RAMP_K : CT_DEADBAND_K)) {
-                if (colour_sent(out_set_ct(ieee, ep, (uint16_t)(1000000 / kelvin), transition_ds),
+                if (colour_sent(out_set_ct(ieee, ep, (uint16_t)(1000000 / kelvin), transition_ds, false),
                                 "Colour temperature", ep)) {
                     t->kelvin   = kelvin;              /* what actually went out */
                     sent_color = true;
@@ -1483,7 +1545,7 @@ static bool send_curve_color(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep,
                 ds_ >= (coarse ? SAT_DEADBAND_RAMP_PCT : SAT_DEADBAND_PCT)) {
                 uint8_t zcl_hue = (uint8_t)((t->hue % 360) * 254 / 360);
                 uint8_t zcl_sat = (uint8_t)(t->sat * 254 / 100);
-                if (colour_sent(out_set_hs(ieee, ep, zcl_hue, zcl_sat, transition_ds), "Colour", ep)) {
+                if (colour_sent(out_set_hs(ieee, ep, zcl_hue, zcl_sat, transition_ds, false), "Colour", ep)) {
                     sent_color = true;
                 }
             }
@@ -1499,7 +1561,7 @@ static bool send_curve_color(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep,
             const int64_t lim = coarse ? XY_DEADBAND_RAMP : XY_DEADBAND;
             if (mode_changed || cs->sent_x == ZBC_UNKNOWN || cs->sent_y == ZBC_UNKNOWN ||
                 dx * dx + dy * dy >= lim * lim) {
-                if (colour_sent(out_set_xy(ieee, ep, t->cie_x, t->cie_y, transition_ds),
+                if (colour_sent(out_set_xy(ieee, ep, t->cie_x, t->cie_y, transition_ds, false),
                                 "Blended colour", ep)) {
                     sent_color = true;
                 }
@@ -2221,29 +2283,55 @@ esp_err_t lighting_set_color_temp(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, 
             mireds = (uint16_t)(1000000 / clamp_kelvin(e, 1000000 / mireds));
         }
     }
-    return out_set_ct(ieee, ep, mireds, transition_ds);
+    return out_set_ct(ieee, ep, mireds, transition_ds, true);
 }
 
 esp_err_t lighting_set_color_hs(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, uint8_t hue,
                                 uint8_t saturation, uint16_t transition_ds)
 {
-    if (zbc_light_id_from_ieee(ieee)) {
-        return ESP_ERR_NOT_SUPPORTED;   /* white LEDs only */
-    }
     al_note_manual_endpoint(ieee, ep, "colour changed");
     stream_hand_endpoint(ieee, ep);
-    return out_set_hs(ieee, ep, hue, saturation, transition_ds);
+    return out_set_hs(ieee, ep, hue, saturation, transition_ds, true);
 }
 
 esp_err_t lighting_set_color_xy(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, uint16_t x, uint16_t y,
                                 uint16_t transition_ds)
 {
-    if (zbc_light_id_from_ieee(ieee)) {
-        return ESP_ERR_NOT_SUPPORTED;   /* white LEDs only */
-    }
     al_note_manual_endpoint(ieee, ep, "colour changed");
     stream_hand_endpoint(ieee, ep);
-    return out_set_xy(ieee, ep, x, y, transition_ds);
+    return out_set_xy(ieee, ep, x, y, transition_ds, true);
+}
+
+esp_err_t lighting_set_gradient(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, const zbc_gradient_t *g,
+                                uint16_t transition_ds)
+{
+    if (!zbc_gradient_valid(g)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (g->n == 1) {
+        /* One colour is a colour, and every colour lamp takes one. */
+        return lighting_set_color_xy(ieee, ep, g->x[0], g->y[0], transition_ds);
+    }
+    al_note_manual_endpoint(ieee, ep, "gradient set");
+    stream_hand_endpoint(ieee, ep);
+    uint16_t           id = 0;
+    const light_kind_t k  = light_kind(ieee, &id);
+    return k == LIGHT_WIRED  ? local_light_set_gradient(id, g, transition_ds)
+         : k == LIGHT_MATTER ? ESP_ERR_NOT_SUPPORTED
+                             : zb_set_gradient(ieee, ep, g, transition_ds);
+}
+
+bool lighting_get_gradient(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, zbc_gradient_t *out,
+                           zb_gradient_state_t *state)
+{
+    uint16_t           id = 0;
+    const light_kind_t k  = light_kind(ieee, &id);
+    if (k == LIGHT_WIRED) {
+        /* A pin does as it is told: what it was given is what it shows. */
+        *state = ZB_GRADIENT_SHOWN;
+        return local_light_gradient(id, out) && out->n >= 2;
+    }
+    return k == LIGHT_ZIGBEE && zb_gradient_get(ieee, ep, out, state);
 }
 
 #if CONFIG_ZBC_WLED
@@ -2356,11 +2444,17 @@ static void stream_restore_lamp(const stream_lamp_t *l, int al_pct, al_shift_t a
     }
     zbc_curveset_t cs;
     const bool path = curve_db_get(l->ieee, l->ep, &cs) && cs.chroma.n > 0;
-    if (!path) {
+    zbc_gradient_t      g;
+    zb_gradient_state_t gs = ZB_GRADIENT_NONE;
+    if (lighting_get_gradient(l->ieee, l->ep, &g, &gs) && gs != ZB_GRADIENT_NOT_TAKEN) {
+        /* A gradient lamp was one pixel of the stream and holds its last frame
+         * along its whole length: it is given its gradient again. */
+        zb_set_gradient(l->ieee, l->ep, &g, ds);
+    } else if (!path) {
         if (l->color_mode == 2 && l->ct_mireds > 0) {
-            out_set_ct(l->ieee, l->ep, (uint16_t)l->ct_mireds, ds);
+            out_set_ct(l->ieee, l->ep, (uint16_t)l->ct_mireds, ds, false);
         } else if (l->hue >= 0 && l->sat >= 0) {
-            out_set_hs(l->ieee, l->ep, (uint8_t)l->hue, (uint8_t)l->sat, ds);
+            out_set_hs(l->ieee, l->ep, (uint8_t)l->hue, (uint8_t)l->sat, ds, false);
         }
     }
     if (al_pct > 0) {

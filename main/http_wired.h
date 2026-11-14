@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "cJSON.h"
+#include "gradient.h"
 #include "esp_err.h"
 #include "esp_http_server.h"
 
@@ -19,6 +20,13 @@ extern "C" {
 
 /* What the editor edits, added to a light's device object. */
 void wired_light_to_json(cJSON *d, uint16_t light_id, const zbc_light_t *light);
+
+/* A gradient as the API spells it: {"colors": [{"hue": 0-360, "sat": 0-100} |
+ * {"kelvin": 1000-10000}, ...]}, one to five colours from a strip's start to its
+ * end. Returns NULL, or why not. */
+const char *gradient_from_json(const cJSON *json, zbc_gradient_t *out);
+/* Adds "gradient": {"colors": [{"hue", "sat"}, ...], "state"} to an endpoint. */
+void gradient_to_json(cJSON *ep, const zbc_gradient_t *g, const char *state);
 
 /* {"points":[[x,y],...]} or null (empty). Only the shape is checked. */
 bool curve_from_json(const cJSON *obj, zbc_curve_t *out);

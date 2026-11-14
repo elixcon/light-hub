@@ -94,12 +94,11 @@ void zbc_hs_to_xy(int hue_deg, int sat_pct, float *out_x, float *out_y)
     *out_y = big_y / sum;
 }
 
-void zbc_xy_to_hs(float x, float y, float *out_hue, float *out_sat)
+bool zbc_xy_to_rgb(float x, float y, float rgb[3])
 {
     if (y < 1e-4f) {          /* not a chromaticity anything can be made of */
-        *out_hue = 0.0f;
-        *out_sat = 0.0f;
-        return;
+        rgb[0] = rgb[1] = rgb[2] = 0.0f;
+        return false;
     }
 
     /* Y = 1, the same convention zbc_hs_to_xy uses going the other way. */
@@ -127,13 +126,24 @@ void zbc_xy_to_hs(float x, float y, float *out_hue, float *out_sat)
      * after the gamma step instead would not. */
     const float top = fmaxf(fmaxf(r, g), b);
     if (top <= 0.0f) {
+        rgb[0] = rgb[1] = rgb[2] = 0.0f;
+        return false;
+    }
+    rgb[0] = r / top;
+    rgb[1] = g / top;
+    rgb[2] = b / top;
+    return true;
+}
+
+void zbc_xy_to_hs(float x, float y, float *out_hue, float *out_sat)
+{
+    float rgb[3];
+    if (!zbc_xy_to_rgb(x, y, rgb)) {
         *out_hue = 0.0f;
         *out_sat = 0.0f;
         return;
     }
-    r /= top;
-    g /= top;
-    b /= top;
+    float r = rgb[0], g = rgb[1], b = rgb[2];
 
     r = srgb_compress(r);
     g = srgb_compress(g);

@@ -55,6 +55,30 @@ typedef enum {
     ZBC_MIX_COUNT,
 } zbc_light_mix_t;
 
+/* A strip of addressable LEDs (WS2812B, SK6812 and their like): each pixel its
+ * own colour, which is what lets it show a gradient (gradient.h). It dims and
+ * takes a colour or a colour temperature like a colour lamp, through no PWM
+ * channel of the chip's - the pixels do their own. */
+typedef enum {
+    ZBC_STRIP_GRB = 0,                /* WS2812B and SK6812, as nearly all are wired */
+    ZBC_STRIP_RGB,
+    ZBC_STRIP_BRG,
+    ZBC_STRIP_RBG,
+    ZBC_STRIP_GBR,
+    ZBC_STRIP_BGR,
+    ZBC_STRIP_ORDER_COUNT,
+} zbc_strip_order_t;
+
+#define ZBC_STRIP_F_RGBW      0x01    /* four bytes a pixel, the white LED last */
+#define ZBC_STRIP_F_REVERSED  0x02    /* the gradient's first colour at the far end */
+#define ZBC_STRIP_F_KNOWN     0x03
+
+#define ZBC_STRIP_PIXELS_DEFAULT 30
+#define ZBC_STRIP_PIXELS_MAX     300  /* 9 ms a frame, which is one fade tick */
+/* The colour temperatures a strip is given: its LEDs mix any of them. */
+#define ZBC_STRIP_COLD_K  6500
+#define ZBC_STRIP_WARM_K  2000
+
 /* Fritsch-Carlson monotone cubic through (xs, ys), evaluated at t; xs strictly
  * ascending, n >= 2. In curve_db.c (region `pchip`), and the one interpolation
  * the brightness curve, the colour path and a light's mixing curves all use. */

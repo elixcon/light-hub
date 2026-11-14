@@ -10,7 +10,8 @@ On the *Lights* page, press *+*, choose *Add a wired light* and set its wiring:
 
 - the pin it is on, and whether that pin is active low;
 - what it does at power-on: off, on, or as it was;
-- its kind: a relay (on/off), dimmable, tunable white, or tunable white with three channels.
+- its kind: a relay (on/off), dimmable, tunable white, tunable white with three channels, or an
+  [LED strip](#led-strips) of addressable LEDs.
 
 <img src="images/wired-light.jpg" width="320" alt="A tunable-white strip's wiring: its two pins, the kelvin of each white, and the PWM frequency">
 
@@ -89,6 +90,41 @@ like any lamp, with `source` `gpio`. Its address is made up: `0x025a42434c00` fo
 four hex digits, endpoint 1.
 
 While the board runs its Wi-Fi setup hotspot, buttons do not switch wired lights.
+
+## LED strips
+
+A strip of addressable LEDs (WS2812B, SK6812, and WS2811 pixels) hangs on one data pin. Each pixel
+has its own colour, so the strip is a colour lamp: it dims, takes any colour or a colour temperature
+between 2000 and 6500 K, and shows a [gradient](lighting.md#gradients). You set:
+
+- the data pin;
+- how many LEDs it has, 1 to 300. For a 12 V strip whose chips each drive three LEDs, count the chips;
+- the colour order, GRB for nearly every WS2812B and SK6812. If red and green are swapped, pick
+  another;
+- *RGBW*, for SK6812 RGBW. The white LED then carries the white in a colour and the three colours
+  the rest;
+- whether a gradient's first colour is at the far end of the strip;
+- whether the data line is inverted, for a level shifter made of one transistor.
+
+The strip needs its own supply, sized for its LEDs. Most strips want a 5 V data signal, and the pin
+gives 3.3 V, so put a level shifter between them (a 74AHCT125, or one gate of a 74HCT14 twice).
+
+What to know about them:
+
+- **Two strips per board.** The chip's RMT peripheral has two transmit channels. A third strip is
+  refused when you save it.
+- **Eight bits per LED.** The pixels dim themselves in 256 steps, so the bottom of the range is
+  coarser than a PWM light's: below about 10 % the steps show in a slow fade. At 1 % each pixel has
+  one LED at its lowest step.
+- **A lit strip is sent its frame again every second.** A frame goes out as pulses the chip's
+  interrupt keeps supplying, with Wi-Fi and Zigbee wanting interrupts too. One served late cuts a
+  frame short and leaves wrong pixels, which the next frame puts right.
+- **A frame of 300 RGB pixels takes 9 ms**, one step of a fade. Longer RGBW strips fade at half the
+  rate.
+- **Not tested on a strip.** The frames and the pulse timing are checked against the WS2812B and
+  SK6812 datasheets in the host tests (`test/test_strip.c`). No strip has been wired to a board yet.
+
+The driver is a build option, `CONFIG_ZBC_LED_STRIP`, on by default.
 
 ## Mixing
 
