@@ -1,5 +1,6 @@
 #include "node_zb.h"
 
+#include <math.h>
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
@@ -10,12 +11,15 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_zigbee.h"
+#include "ezbee/aps.h"
 #include "ezbee/zcl/cluster/custom.h"
 #include "ezbee/zha.h"
 #include "ezbee/zdo.h"
 #include "nvs.h"
 
+#include "colorspace.h"
 #include "frame_dup.h"
+#include "gradient.h"
 #include "light_db.h"
 #include "local_lights.h"
 #include "node_buttons.h"
@@ -60,6 +64,7 @@ typedef enum {
     EV_LEFT,          /* left the network for good */
     EV_ANNOUNCE,      /* the endpoints changed since the hub last looked */
     EV_WIFI_OFF,      /* back on Zigbee alone: the hub should stop offering a link */
+    EV_STATE_READ,    /* the hub asked what a strip shows: Philips' state attribute */
 } ev_type_t;
 
 typedef struct {
@@ -161,6 +166,27 @@ static void sync_attrs(void)
             set_attr(ep, EZB_ZCL_CLUSTER_ID_COLOR_CONTROL,
                      EZB_ZCL_ATTR_COLOR_CONTROL_COLOR_TEMPERATURE_MIREDS_ID, &mireds);
         }
+        if (lights[i].kind == ZBC_LIGHT_STRIP) {
+            /* A strip is a colour lamp: which of the two it shows, and the colour -
+             * the first of a gradient's - as hue and saturation and as xy, which
+             * is what the hub's settle read compares with what it sent. */
+            zbc_gradient_t g;
+            uint8_t        mode = EZB_ZCL_COLOR_CONTROL_COLOR_MODE_COLOR_TEMPERATURE_MIREDS;
+            if (local_light_gradient(lights[i].id, &g)) {
+                float    h, sat;
+                uint16_t x = g.x[0], y = g.y[0];
+                zbc_xy_to_hs((float)x / 65536.0f, (float)y / 65536.0f, &h, &sat);
+                uint8_t hue = (uint8_t)lroundf(h * 254.0f / 360.0f);
+                uint8_t s8  = (uint8_t)lroundf(sat * 254.0f / 100.0f);
+                mode = EZB_ZCL_COLOR_CONTROL_COLOR_MODE_CURRENT_HUE_AND_CURRENT_SATURATION;
+                set_attr(ep, EZB_ZCL_CLUSTER_ID_COLOR_CONTROL, EZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_HUE_ID, &hue);
+                set_attr(ep, EZB_ZCL_CLUSTER_ID_COLOR_CONTROL, EZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_SATURATION_ID, &s8);
+                set_attr(ep, EZB_ZCL_CLUSTER_ID_COLOR_CONTROL, EZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_X_ID, &x);
+                set_attr(ep, EZB_ZCL_CLUSTER_ID_COLOR_CONTROL, EZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_Y_ID, &y);
+            }
+            set_attr(ep, EZB_ZCL_CLUSTER_ID_COLOR_CONTROL, EZB_ZCL_ATTR_COLOR_CONTROL_COLOR_MODE_ID, &mode);
+            set_attr(ep, EZB_ZCL_CLUSTER_ID_COLOR_CONTROL, EZB_ZCL_ATTR_COLOR_CONTROL_ENHANCED_COLOR_MODE_ID, &mode);
+        }
         esp_zigbee_lock_release();
     }
 }
@@ -229,6 +255,17 @@ static esp_err_t run_command(const node_ev_t *ev)
         return local_light_stop(id);
     case NODE_ZCL_CT:
         return local_light_set_ct(id, ev->cmd.mireds, ds);
+    case NODE_ZCL_XY:
+        return local_light_set_xy(id, ev->cmd.x, ev->cmd.y, ds);
+    case NODE_ZCL_HS: {
+        /* ZCL's hue and saturation are 0-254; a strip's colour is xy. */
+        float x, y;
+        zbc_hs_to_xy((int)lroundf((float)ev->cmd.hue * 360.0f / 254.0f),
+                     (int)lroundf((float)ev->cmd.sat * 100.0f / 254.0f), &x, &y);
+        return local_light_set_xy(id, (uint16_t)(x * 65535.0f), (uint16_t)(y * 65535.0f), ds);
+    }
+    case NODE_ZCL_GRADIENT:
+        return local_light_set_gradient(id, &ev->cmd.gradient, ds);
     default:
         return ESP_ERR_NOT_SUPPORTED;
     }
@@ -252,6 +289,45 @@ static void send_default_rsp(const node_ev_t *ev, uint8_t status)
     esp_zigbee_lock_release();
 }
 
+/* The answer to a read of Philips' state attribute: what the strip shows, sent
+ * as a frame of our own. The stack's attribute table is not asked to hold it -
+ * it is an octet string whose length changes with the gradient, and the hub
+ * takes the answer in at APS in exactly this form (zb_coordinator.c,
+ * grad_attr_frame; host-tested against node_zcl_state_rsp). */
+static void send_state(const node_ev_t *ev)
+{
+    zbc_local_state_t st;
+    if (!local_light_get(ev->dst_ep, &st)) {
+        return;
+    }
+    zbc_gradient_t          g;
+    const bool              colour = local_light_gradient(ev->dst_ep, &g);
+    const node_zcl_report_t r      = node_zcl_report(st.on, st.level, st.comes_back_to, st.fading_out);
+    const zbc_hue_state_t   state  = node_zcl_strip_state(r.on, r.has_level ? r.level : 1, colour ? &g : NULL);
+    uint8_t                 asdu[NODE_ZCL_STATE_RSP_MAX];
+    const size_t            len = node_zcl_state_rsp(ev->tsn, &state, asdu, sizeof(asdu));
+    if (len == 0) {
+        return;
+    }
+    const ezb_apsde_data_req_t req = {
+        .dst_address  = { .addr_mode = EZB_ADDR_MODE_SHORT, .u.short_addr = ev->src },
+        .src_endpoint = ev->dst_ep,
+        .dst_endpoint = ev->src_ep,
+        .cluster_id   = ZBC_HUE_CLUSTER,
+        .profile_id   = EZB_AF_HA_PROFILE_ID,
+        .radius       = 0,
+        .tx_options   = 0,
+        .asdu_length  = (uint16_t)len,
+        .asdu         = asdu,
+    };
+    esp_zigbee_lock_acquire(portMAX_DELAY);
+    const ezb_err_t err = ezb_apsde_data_request(&req);
+    esp_zigbee_lock_release();
+    if (err != EZB_ERR_NONE) {
+        ESP_LOGW(TAG, "ep %d: the state answer was refused (0x%04x)", ev->dst_ep, err);
+    }
+}
+
 /* Zigbee callbacks hold the stack lock and must not block or send, so the frame
  * becomes a queue item; everything is then done on node_task. */
 static bool frame_is_duplicate(uint16_t src, const ezb_zcl_cmd_hdr_t *h)
@@ -261,6 +337,81 @@ static bool frame_is_duplicate(uint16_t src, const ezb_zcl_cmd_hdr_t *h)
                                   .cmd = h->cmd_id, .tsn = h->tsn, .fc = h->fc };
     return zbc_frame_repeated(recent, (int)(sizeof(recent) / sizeof(recent[0])), f, esp_timer_get_time(),
                               DUP_WINDOW_US);
+}
+
+/* A frame on Philips' state cluster for one of the lights: the command that
+ * sets a gradient or a colour, or a read of the state attribute. The hub's, as
+ * every lamp command is taken from whoever sends it. */
+static void hue_frame(const ezb_zcl_raw_frame_t *raw)
+{
+    const ezb_zcl_cmd_hdr_t *h = raw->header;
+    const uint16_t src = h->src_addr.addr_mode == EZB_ADDR_MODE_SHORT ? h->src_addr.u.short_addr : 0xFFFF;
+    if (src == 0xFFFF || h->dst_ep < 1 || h->dst_ep > NODE_LIGHT_EP_MAX ||
+        !EZB_ZCL_CMD_FC_IS_MANUF_SPEC(h->fc) || h->manuf_code != ZBC_HUE_MANUF ||
+        EZB_ZCL_CMD_FC_IS_TO_CLI_DIRECTION(h->fc)) {
+        return;
+    }
+    node_ev_t ev = {
+        .dst_ep = h->dst_ep, .src_ep = h->src_ep, .tsn = h->tsn, .cmd_id = h->cmd_id,
+        .want_rsp = !EZB_ZCL_CMD_FC_IS_DIS_DEFAULT_RSP(h->fc), .src = src, .cluster = h->cluster_id,
+    };
+    if (EZB_ZCL_CMD_FC_GET_FRAME_TYPE(h->fc) == EZB_ZCL_FRAME_TYPE_CLUSTER_SPECIFIC) {
+        if (!node_zcl_decode(h->cluster_id, h->cmd_id, raw->payload, raw->payload_length, &ev.cmd)) {
+            return;
+        }
+        ev.type = EV_COMMAND;
+    } else if (h->cmd_id == 0x00 && node_zcl_reads_state(raw->payload, raw->payload_length)) {
+        ev.type     = EV_STATE_READ;
+        ev.want_rsp = false;
+    } else {
+        return;
+    }
+    /* Seen twice by design - at APS and then at the ZCL hook - and again when the
+     * stack retries. */
+    if (!frame_is_duplicate(src, h)) {
+        xQueueSend(s_queue, &ev, 0);
+    }
+}
+
+/* Philips' cluster is on no profile the stack knows the commands of, and it may
+ * not hand such a frame to the ZCL hook at all, so it is taken at APS as well:
+ * parsed into the hook's own form. Never consumed here - the stack still
+ * acknowledges it - and raw_frame drops it afterwards if it gets there. */
+static bool aps_frame(const ezb_apsde_data_ind_t *ind)
+{
+    if (!ind || ind->status != 0 || !ind->asdu || ind->cluster_id != ZBC_HUE_CLUSTER ||
+        ind->dst_address.addr_mode == EZB_ADDR_MODE_GROUP || ind->asdu_length < 3) {
+        return false;
+    }
+    const uint8_t *p   = ind->asdu;
+    uint16_t       len = ind->asdu_length;
+    ezb_zcl_cmd_hdr_t h = {
+        .src_addr   = ind->src_address,
+        .dst_addr   = ind->dst_address,
+        .src_ep     = ind->src_endpoint,
+        .dst_ep     = ind->dst_endpoint,
+        .cluster_id = ind->cluster_id,
+        .profile_id = ind->profile_id,
+        .rssi       = ind->rssi,
+    };
+    h.fc = p[0];
+    const bool manuf = (h.fc & 0x04U) != 0;
+    if (manuf && len < 5) {
+        return false;
+    }
+    if (manuf) {
+        h.manuf_code = (uint16_t)(p[1] | (p[2] << 8));
+    }
+    const uint16_t hdr = manuf ? 5 : 3;
+    h.tsn    = p[hdr - 2];
+    h.cmd_id = p[hdr - 1];
+    const ezb_zcl_raw_frame_t raw = {
+        .header         = &h,
+        .payload_length = (uint16_t)(len - hdr),
+        .payload        = len > hdr ? (uint8_t *)&p[hdr] : NULL,
+    };
+    hue_frame(&raw);
+    return false;
 }
 
 /* Taken here rather than left to the stack's cluster servers, which step a level
@@ -284,6 +435,11 @@ static bool raw_frame(const ezb_zcl_raw_frame_t *raw)
             };
             xQueueSend(s_queue, &ev, 0);
         }
+        return true;
+    }
+
+    if (h->cluster_id == ZBC_HUE_CLUSTER) {
+        hue_frame(raw);
         return true;
     }
 
@@ -355,6 +511,11 @@ static void node_task(void *arg)
                 }
                 ezb_bdb_start_top_level_commissioning(s_commission_mode);
                 esp_zigbee_lock_release();
+                break;
+            case EV_STATE_READ:
+                if (s_started) {
+                    send_state(&ev);
+                }
                 break;
             case EV_COMMAND: {
                 if (!s_started) {
@@ -530,7 +691,35 @@ static ezb_af_ep_desc_t light_endpoint(const zbc_light_t *light)
     const uint8_t ep = (uint8_t)light->id;
     ezb_af_ep_desc_t desc;
 
-    if (zbc_light_tunable(light->kind)) {
+    if (light->kind == ZBC_LIGHT_STRIP) {
+        /* A colour lamp that says it does hue and saturation, xy and colour
+         * temperature, with Philips' state cluster beside Color Control - which
+         * is what tells the hub it may be sent a gradient (ZBC_FEAT_GRADIENT). */
+        ezb_zha_color_dimmable_light_config_t cfg = EZB_ZHA_COLOR_DIMMABLE_LIGHT_CONFIG();
+        cfg.basic_cfg.power_source          = EZB_ZCL_BASIC_POWER_SOURCE_DC_SOURCE;
+        cfg.color_cfg.color_mode            = EZB_ZCL_COLOR_CONTROL_COLOR_MODE_COLOR_TEMPERATURE_MIREDS;
+        cfg.color_cfg.enhanced_color_mode   = EZB_ZCL_COLOR_CONTROL_ENHANCED_COLOR_MODE_COLOR_TEMPERATURE_MIREDS;
+        cfg.color_cfg.color_capabilities    = EZB_ZCL_COLOR_CONTROL_COLOR_CAPABILITIES_HUE_SATURATION_SUPPORTED |
+                                              EZB_ZCL_COLOR_CONTROL_COLOR_CAPABILITIES_XY_SUPPORTED |
+                                              EZB_ZCL_COLOR_CONTROL_COLOR_CAPABILITIES_COLOR_TEMPERATURE_SUPPORTED;
+        desc = ezb_zha_create_color_dimmable_light(ep, &cfg);
+
+        ezb_zcl_cluster_desc_t color = ezb_af_endpoint_get_cluster_desc(desc, EZB_ZCL_CLUSTER_ID_COLOR_CONTROL,
+                                                                        EZB_ZCL_CLUSTER_SERVER);
+        uint16_t coolest = (uint16_t)(1000000u / ZBC_STRIP_COLD_K);
+        uint16_t warmest = (uint16_t)(1000000u / ZBC_STRIP_WARM_K);
+        uint16_t mireds  = warmest;
+        uint8_t  zero    = 0;
+        ezb_zcl_color_control_cluster_desc_add_attr(color, EZB_ZCL_ATTR_COLOR_CONTROL_COLOR_TEMPERATURE_MIREDS_ID, &mireds);
+        ezb_zcl_color_control_cluster_desc_add_attr(color, EZB_ZCL_ATTR_COLOR_CONTROL_COLOR_TEMP_PHYSICAL_MIN_MIREDS_ID, &coolest);
+        ezb_zcl_color_control_cluster_desc_add_attr(color, EZB_ZCL_ATTR_COLOR_CONTROL_COLOR_TEMP_PHYSICAL_MAX_MIREDS_ID, &warmest);
+        ezb_zcl_color_control_cluster_desc_add_attr(color, EZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_HUE_ID, &zero);
+        ezb_zcl_color_control_cluster_desc_add_attr(color, EZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_SATURATION_ID, &zero);
+        /* Listed only: its frames are taken in hue_frame, and its one attribute
+         * is answered there. */
+        const ezb_zcl_custom_cluster_config_t hue = { .cluster_id = ZBC_HUE_CLUSTER };
+        ezb_af_endpoint_add_cluster_desc(desc, ezb_zcl_custom_create_cluster_desc(&hue, EZB_ZCL_CLUSTER_SERVER));
+    } else if (zbc_light_tunable(light->kind)) {
         ezb_zha_color_dimmable_light_config_t cfg = EZB_ZHA_COLOR_DIMMABLE_LIGHT_CONFIG();
         cfg.basic_cfg.power_source          = EZB_ZCL_BASIC_POWER_SOURCE_DC_SOURCE;
         cfg.color_cfg.color_mode            = EZB_ZCL_COLOR_CONTROL_COLOR_MODE_COLOR_TEMPERATURE_MIREDS;
@@ -601,6 +790,7 @@ static esp_err_t create_endpoints(void)
 
     ESP_RETURN_ON_ERROR(ezb_af_device_desc_register(dev), TAG, "register device");
     ezb_zcl_raw_command_handler_register(raw_frame);
+    ezb_apsde_data_indication_handler_register(aps_frame);
     return ESP_OK;
 }
 

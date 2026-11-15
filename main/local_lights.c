@@ -16,6 +16,8 @@
 #include "soc/soc_caps.h"
 
 #include "buttons.h"
+#include "colorspace.h"
+#include "led_strip_out.h"
 #include "light_db.h"
 #include "local_lights.h"
 #include "settings.h"
@@ -716,6 +718,199 @@ static void ramp_settle(ramp_t *r, int64_t v)
 }
 /* >>> end host-test region: ramp <<< */
 
+/* ------------------------------------------------------------ LED strips
+ *
+ * A strip of addressable LEDs has no PWM channel here: each pixel is sent its
+ * own bytes, and what they are is worked out below. A strip shows a gradient
+ * (gradient.h) - one colour is a gradient of one - at the brightness its level
+ * gives, and moving from one gradient to another is a cross-fade.
+ *
+ * A colour is CIE xy and takes floating point to become the light of three
+ * LEDs; a frame is up to 300 pixels, a hundred times a second, on a chip with no
+ * FPU. So a gradient is worked out once, when it is set, at STRIP_ANCHORS
+ * points along the strip, and a frame is integer arithmetic between them.
+ * Twenty-four steps, a multiple of twelve, because every colour of a gradient
+ * of two, three, four or five then sits exactly on a point - a stop is shown as
+ * it was picked, not as its neighbours blend to it - with six steps or more
+ * between two stops. Between two points a pixel is a straight line in the LEDs'
+ * light, brought back to "its strongest LED at full", which is what a colour
+ * is here: without that, a pixel where the strongest LED changes from one to
+ * another between two points had both a few percent under full, and one halfway
+ * through a cross-fade from red to blue half of each.
+ *
+ * Host-tested against a simulated strip (test_strip), since none is wired up. */
+
+/* >>> host-test region: strip <<< */
+#define STRIP_STEPS   24
+#define STRIP_ANCHORS (STRIP_STEPS + 1)
+#define STRIP_ONE     32767              /* an LED at full, in an anchor */
+#define STRIP_MIX_ONE 1000               /* a cross-fade that has arrived */
+#define STRIP_DUTY_ONE 65535u            /* full brightness */
+
+/* The light of the red, green and blue LEDs at each point along the strip, the
+ * largest of the three STRIP_ONE: colour without brightness. */
+typedef struct {
+    uint16_t rgb[STRIP_ANCHORS][3];
+} strip_colors_t;
+
+static void strip_anchor(float x, float y, uint16_t out[3])
+{
+    float rgb[3];
+    zbc_xy_to_rgb(x, y, rgb);
+    for (int k = 0; k < 3; k++) {
+        const float v = rgb[k] * (float)STRIP_ONE + 0.5f;
+        out[k] = v <= 0.0f ? 0 : (v >= (float)STRIP_ONE ? STRIP_ONE : (uint16_t)v);
+    }
+}
+
+static void strip_colors_gradient(const zbc_gradient_t *g, strip_colors_t *out)
+{
+    for (int a = 0; a < STRIP_ANCHORS; a++) {
+        float x, y;
+        zbc_gradient_at(g, (float)a / (float)STRIP_STEPS, &x, &y);
+        strip_anchor(x, y, out->rgb[a]);
+    }
+}
+
+/* One colour from end to end. */
+static void strip_colors_xy(float x, float y, strip_colors_t *out)
+{
+    strip_anchor(x, y, out->rgb[0]);
+    for (int a = 1; a < STRIP_ANCHORS; a++) {
+        memcpy(out->rgb[a], out->rgb[0], sizeof(out->rgb[0]));
+    }
+}
+
+static uint32_t strip_lerp(uint32_t a, uint32_t b, uint32_t t, uint32_t one)
+{
+    return (a * (one - t) + b * t + one / 2) / one;
+}
+
+/* Where a cross-fade from `a` to `b` has got to at `mix` of STRIP_MIX_ONE: what
+ * the strip shows then, as colours of its own, for the next cross-fade to start
+ * from. A frame blends the same way, so the strip does not jump. */
+static void strip_colors_blend(const strip_colors_t *a, const strip_colors_t *b, uint32_t mix, strip_colors_t *out)
+{
+    for (int i = 0; i < STRIP_ANCHORS; i++) {
+        for (int k = 0; k < 3; k++) {
+            out->rgb[i][k] = (uint16_t)strip_lerp(a->rgb[i][k], b->rgb[i][k], mix, STRIP_MIX_ONE);
+        }
+    }
+}
+
+/* Bytes a pixel, and a frame. */
+static size_t strip_bpp(uint8_t flags)
+{
+    return (flags & ZBC_STRIP_F_RGBW) ? 4 : 3;
+}
+
+static size_t strip_bytes(uint16_t pixels, uint8_t flags)
+{
+    return (size_t)pixels * strip_bpp(flags);
+}
+
+/* Where red, green and blue go among a pixel's first three bytes. */
+static void strip_order(uint8_t order, uint8_t at[3])
+{
+    static const uint8_t ORDER[ZBC_STRIP_ORDER_COUNT][3] = {
+        [ZBC_STRIP_GRB] = { 1, 0, 2 }, [ZBC_STRIP_RGB] = { 0, 1, 2 }, [ZBC_STRIP_BRG] = { 1, 2, 0 },
+        [ZBC_STRIP_RBG] = { 0, 2, 1 }, [ZBC_STRIP_GBR] = { 2, 0, 1 }, [ZBC_STRIP_BGR] = { 2, 1, 0 },
+    };
+    memcpy(at, ORDER[order < ZBC_STRIP_ORDER_COUNT ? order : 0], 3);
+}
+
+/* One frame: every pixel's bytes for a cross-fade `mix` of STRIP_MIX_ONE of the
+ * way from `from` to `to` (`from` may be NULL once it has arrived), at `duty`
+ * of STRIP_DUTY_ONE - the light the level gives, zbc_level_to_duty's. Dark is
+ * all zeros. Lit, no pixel is: the dimmest levels round every LED of a pixel to
+ * nothing, and its strongest then gets one count, as a PWM light's duty does.
+ *
+ * An RGBW strip's white LED takes what the three have in common, which is the
+ * white in the colour. That is right for a white LED the colour of the three
+ * together, and close for the usual ones. */
+static void strip_render(const strip_colors_t *from, const strip_colors_t *to, uint32_t mix, uint32_t duty,
+                         uint16_t pixels, uint8_t order, uint8_t flags, uint8_t *buf)
+{
+    const size_t bpp = strip_bpp(flags);
+    if (duty == 0) {
+        memset(buf, 0, (size_t)pixels * bpp);
+        return;
+    }
+    uint8_t at[3];
+    strip_order(order, at);
+    if (!from || mix >= STRIP_MIX_ONE) {
+        from = to;
+        mix  = STRIP_MIX_ONE;
+    }
+    for (uint32_t i = 0; i < pixels; i++) {
+        /* Where the pixel is along the strip, in 256ths of a step. */
+        const uint32_t p   = (flags & ZBC_STRIP_F_REVERSED) ? pixels - 1 - i : i;
+        const uint32_t pos = pixels > 1 ? p * (STRIP_STEPS * 256u) / (pixels - 1u) : STRIP_STEPS * 128u;
+        uint32_t       a   = pos >> 8, f = pos & 0xFF;
+        if (a >= STRIP_STEPS) {
+            a = STRIP_STEPS - 1;
+            f = 256;
+        }
+        uint32_t c[3], v[3], top = 0;
+        int      strongest = 0;
+        for (int k = 0; k < 3; k++) {
+            const uint32_t ct = strip_lerp(to->rgb[a][k], to->rgb[a + 1][k], f, 256);
+            const uint32_t cf = strip_lerp(from->rgb[a][k], from->rgb[a + 1][k], f, 256);
+            c[k] = strip_lerp(cf, ct, mix, STRIP_MIX_ONE);
+            if (c[k] > top) {
+                top       = c[k];
+                strongest = k;
+            }
+        }
+        for (int k = 0; k < 3; k++) {
+            /* The strongest LED at full, the others in proportion; then the
+             * brightness: STRIP_ONE at a duty of STRIP_DUTY_ONE is 255. */
+            const uint32_t full = top ? (c[k] * (uint32_t)STRIP_ONE + top / 2) / top : 0;
+            v[k] = (uint32_t)(((uint64_t)full * duty * 255u + (uint64_t)STRIP_ONE * STRIP_DUTY_ONE / 2) /
+                              ((uint64_t)STRIP_ONE * STRIP_DUTY_ONE));
+        }
+        if (v[0] == 0 && v[1] == 0 && v[2] == 0) {
+            v[strongest] = 1;
+        }
+        uint8_t *px = &buf[i * bpp];
+        if (flags & ZBC_STRIP_F_RGBW) {
+            const uint32_t w = v[0] < v[1] ? (v[0] < v[2] ? v[0] : v[2]) : (v[1] < v[2] ? v[1] : v[2]);
+            v[0] -= w;
+            v[1] -= w;
+            v[2] -= w;
+            px[3] = (uint8_t)w;
+        }
+        px[at[0]] = (uint8_t)v[0];
+        px[at[1]] = (uint8_t)v[1];
+        px[at[2]] = (uint8_t)v[2];
+    }
+}
+/* >>> end host-test region: strip <<< */
+
+/* How often a lit strip is sent the frame it already shows - see led_strip_out.h. */
+#define STRIP_REFRESH_US  1000000LL
+
+/* What a strip is, beyond a light: only a strip pays for it. */
+typedef struct {
+    led_strip_out_t *out;             /* NULL: no channel, the strip stays dark */
+    uint16_t         pixels;
+    uint8_t          order, flags;
+    uint8_t          symbols;         /* of channel memory, in 48s */
+    /* A colour temperature: `to` follows the light's `mireds` ramp, as a tunable
+     * white light's channels do. Otherwise `shown` is the gradient asked for. */
+    bool             ct;
+    uint32_t         to_m;            /* the mireds `to` was worked out for; 0: none yet */
+    zbc_gradient_t   shown;
+    strip_colors_t   from, to;
+    ramp_t           mix;             /* 0 to STRIP_MIX_ONE, from `from` to `to` */
+    bool             stale;           /* the strip does not show what it should */
+    uint32_t         sent_duty, sent_mix;
+    int64_t          sent_us;
+    int64_t          save_due;        /* 0: the colour is as stored */
+    size_t           len;
+    uint8_t          buf[];           /* the frame, while it goes out */
+} strip_t;
+
 _Static_assert(RAMP_GLIDE_POINTS == LOCAL_LIGHT_GLIDE_POINTS, "a glide's points are counted in two places");
 
 typedef struct {
@@ -754,6 +949,7 @@ typedef struct {
     ramp_t        level;              /* thousandths of a ZCL level */
     ramp_t        mireds;
     int64_t       dirty_since;        /* 0 = nothing waiting to be stored */
+    strip_t      *strip;              /* an LED strip's pixels and colour; NULL for any other light */
 } live_light_t;
 
 /* Every LEDC call is made holding s_lock: ledc_set_duty_with_hpoint and
@@ -813,6 +1009,18 @@ const char *local_light_pin_problem(int gpio)
 static bool is_pwm(uint8_t kind)
 {
     return zbc_light_pwm_channels(kind) > 0;
+}
+
+/* A light that dims: by PWM, or a strip, whose pixels dim themselves. */
+static bool dims(uint8_t kind)
+{
+    return is_pwm(kind) || kind == ZBC_LIGHT_STRIP;
+}
+
+/* A strip with a data pin this board lets a light drive. */
+static bool strip_ready(const zbc_light_t *c)
+{
+    return c->kind == ZBC_LIGHT_STRIP && c->gpio >= 0 && !local_light_pin_problem(c->gpio);
 }
 
 /* A PWM light's pins and the LEDs on each, in pulse order. Returns how many. */
@@ -977,6 +1185,73 @@ static void apply_pwm_locked(live_light_t *l, int64_t now)
     l->sent_valid = true;
 }
 
+/* The strip's cross-fade starts again from what it shows now, towards whatever
+ * `to` is about to be made. */
+static void strip_refade_locked(live_light_t *l, int64_t now, uint16_t transition_ds)
+{
+    strip_t       *s   = l->strip;
+    const uint32_t mix = (uint32_t)ramp_now(&s->mix, now);
+    strip_colors_blend(&s->from, &s->to, mix > STRIP_MIX_ONE ? STRIP_MIX_ONE : mix, &s->from);
+    ramp_start(&s->mix, 0, STRIP_MIX_ONE, transition_ds, now, RAMP_LINEAR);
+    s->stale    = true;
+    s->save_due = now + SAVE_AFTER_US;
+}
+
+/* Sends the strip the frame for where it is now, when that is not the one it
+ * has - or, lit, when it has had it for a second. A frame still going out is
+ * left to finish; the strip stays stale and the next tick tries again. */
+static void apply_strip_locked(live_light_t *l, int64_t now)
+{
+    strip_t *s = l->strip;
+    if (!s || !s->out || !l->configured) {
+        return;
+    }
+    const int64_t  lvl  = l->on ? ramp_now(&l->level, now) : 0;
+    const uint32_t duty = zbc_level_to_duty(lvl > 0 ? (uint32_t)lvl : 0, STRIP_DUTY_ONE);
+    if (s->ct) {
+        const uint32_t m = (uint32_t)ramp_now(&l->mireds, now);
+        if (m != s->to_m && m > 0) {
+            float x, y;
+            zbc_kelvin_to_xy((int)(1000000u / m), &x, &y);
+            strip_colors_xy(x, y, &s->to);
+            s->to_m  = m;
+            s->stale = true;
+        }
+    }
+    uint32_t mix = (uint32_t)ramp_now(&s->mix, now);
+    if (mix > STRIP_MIX_ONE) {
+        mix = STRIP_MIX_ONE;
+    }
+    const bool changed = s->stale || duty != s->sent_duty || mix != s->sent_mix;
+    const bool refresh = duty > 0 && now - s->sent_us >= STRIP_REFRESH_US;
+    if (!changed && !refresh) {
+        return;
+    }
+    if (led_strip_out_busy(s->out)) {
+        s->stale = true;
+        return;
+    }
+    strip_render(&s->from, &s->to, mix, duty, s->pixels, s->order, s->flags, s->buf);
+    if (led_strip_out_send(s->out, s->buf, s->len) != ESP_OK) {
+        s->stale = true;
+        return;
+    }
+    s->stale     = false;
+    s->sent_duty = duty;
+    s->sent_mix  = mix;
+    s->sent_us   = now;
+}
+
+/* The light's outputs for where it is now, whichever kind drives them. */
+static void apply_locked(live_light_t *l, int64_t now)
+{
+    if (l->kind == ZBC_LIGHT_STRIP) {
+        apply_strip_locked(l, now);
+    } else {
+        apply_pwm_locked(l, now);
+    }
+}
+
 static void drive(int gpio, bool on, bool active_low)
 {
     gpio_set_level(gpio, zbc_light_pin_level(on, active_low));
@@ -991,7 +1266,10 @@ static void fade_task(void *arg)
     for (;;) {
         uint16_t          ids[CONFIG_ZBC_MAX_LIGHTS];
         zbc_light_state_t states[CONFIG_ZBC_MAX_LIGHTS];
+        uint16_t          gids[LED_STRIP_OUT_MAX];
+        zbc_gradient_t    grads[LED_STRIP_OUT_MAX];
         int               saves    = 0;
+        int               gsaves   = 0;
         bool              active   = false;
         bool              landed   = false;
         int64_t           next_due = 0;
@@ -1000,7 +1278,7 @@ static void fade_task(void *arg)
         const int64_t now = esp_timer_get_time();
         for (size_t i = 0; i < CONFIG_ZBC_MAX_LIGHTS; i++) {
             live_light_t *l = &s_live[i];
-            if (!l->used || !is_pwm(l->kind) || !l->configured) {
+            if (!l->used || !dims(l->kind) || !l->configured) {
                 continue;
             }
             const bool level_moving = ramp_active(&l->level, now);
@@ -1011,14 +1289,35 @@ static void fade_task(void *arg)
                 ramp_settle(&l->level, (int64_t)l->remembered * 1000);
                 mark_dirty(l, now);
             }
-            const bool moving = level_moving || ramp_active(&l->mireds, now);
+            const bool moving = level_moving || ramp_active(&l->mireds, now) ||
+                                (l->strip && ramp_active(&l->strip->mix, now));
             if (moving) {
                 active = true;
             } else if (l->moving) {
                 landed = true;
             }
             l->moving = moving;
-            apply_pwm_locked(l, now);
+            apply_locked(l, now);
+
+            if (l->strip) {
+                strip_t *s = l->strip;
+                if (s->stale) {
+                    active = true;      /* a frame was still going out: again next tick */
+                } else if (s->sent_duty > 0) {
+                    const int64_t due = s->sent_us + STRIP_REFRESH_US;
+                    if (!next_due || due < next_due) {
+                        next_due = due;
+                    }
+                }
+                if (s->save_due && s->save_due <= now && gsaves < LED_STRIP_OUT_MAX) {
+                    gids[gsaves]  = l->id;
+                    grads[gsaves] = s->ct ? (zbc_gradient_t){ 0 } : s->shown;
+                    gsaves++;
+                    s->save_due = 0;
+                } else if (s->save_due && (!next_due || s->save_due < next_due)) {
+                    next_due = s->save_due;
+                }
+            }
 
             if (l->dirty_since) {
                 const int64_t due = l->dirty_since + SAVE_AFTER_US;
@@ -1060,6 +1359,9 @@ static void fade_task(void *arg)
 
         for (int s = 0; s < saves; s++) {
             light_db_save_state(ids[s], &states[s]);
+        }
+        for (int s = 0; s < gsaves; s++) {
+            light_db_save_gradient(gids[s], &grads[s]);
         }
 
         TickType_t wait = portMAX_DELAY;
@@ -1399,6 +1701,11 @@ void local_lights_reload(void)
         zbc_pwm_plan(hz, chans, n, slot, timer_hz);
     }
 
+    int strips = 0, strips_seen = 0;
+    for (size_t i = 0; i < n; i++) {
+        strips += strip_ready(&cfg[i]) && strips < LED_STRIP_OUT_MAX;
+    }
+
     xSemaphoreTake(s_lock, portMAX_DELAY);
     const int64_t now = esp_timer_get_time();
     bool          wanted[SOC_GPIO_PIN_COUNT] = { 0 };
@@ -1411,7 +1718,14 @@ void local_lights_reload(void)
         const bool          pwm   = is_pwm(c->kind) && pwm_ready(c);
         const bool          plain = c->kind == ZBC_LIGHT_ONOFF && c->gpio >= 0 &&
                                     !local_light_pin_problem(c->gpio);
-        if (!pwm && !plain) {
+        /* The chip's RMT drives two strips; a table with more is from a build
+         * with other limits, as with PWM above. */
+        const bool          strip = strip_ready(c) && strips_seen < LED_STRIP_OUT_MAX;
+        if (strip_ready(c) && !strip) {
+            ESP_LOGW(TAG, "Wired light %u left dark: the chip drives %d LED strips", (unsigned)c->id,
+                     LED_STRIP_OUT_MAX);
+        }
+        if (!pwm && !plain && !strip) {
             continue;
         }
         l->used       = true;
@@ -1422,8 +1736,8 @@ void local_lights_reload(void)
         l->boot       = c->boot;
         l->mix        = c->mix;
         l->pwm_hz     = pwm ? c->pwm_hz : 0;
-        l->cold_m     = 1000000u / c->cold_k;
-        l->warm_m     = 1000000u / c->warm_k;
+        l->cold_m     = 1000000u / (strip ? ZBC_STRIP_COLD_K : c->cold_k);
+        l->warm_m     = 1000000u / (strip ? ZBC_STRIP_WARM_K : c->warm_k);
         /* A two-channel light has no neutral; the midpoint keeps the three in order. */
         l->neutral_m  = c->kind == ZBC_LIGHT_CNW && c->neutral_k ? 1000000u / c->neutral_k
                                                                  : (l->cold_m + l->warm_m) / 2;
@@ -1455,13 +1769,54 @@ void local_lights_reload(void)
             l->level       = old->level;
             l->mireds      = old->mireds;
             l->dirty_since = old->dirty_since;
-            if (pwm) {
+            if (pwm || strip) {
                 /* The two colour temperatures may have moved. */
                 const int64_t m = ramp_now(&l->mireds, now);
                 ramp_settle(&l->mireds, m < l->cold_m ? l->cold_m : (m > l->warm_m ? l->warm_m : m));
             }
         } else {
             boot_state(c, l, now);
+        }
+        if (strip) {
+            const uint8_t symbols = (uint8_t)(led_strip_out_symbols(strips_seen, strips) / 48);
+            strips_seen++;
+            strip_t *was = same_wiring ? old->strip : NULL;
+            if (was && was->out && was->pixels == c->strip_pixels && was->flags == c->strip_flags &&
+                was->order == c->strip_order && was->symbols == symbols && old->active_low == c->active_low) {
+                l->strip      = was;       /* as it is: saving the editor does not flash it */
+                l->configured = true;
+            } else {
+                const size_t len = strip_bytes(c->strip_pixels, c->strip_flags);
+                strip_t     *s   = calloc(1, sizeof(*s) + len);
+                if (!s) {
+                    ESP_LOGW(TAG, "Wired light %u left dark: no memory for %u pixels", (unsigned)c->id,
+                             (unsigned)c->strip_pixels);
+                    l->used = false;
+                    continue;
+                }
+                s->pixels  = c->strip_pixels;
+                s->order   = c->strip_order;
+                s->flags   = c->strip_flags;
+                s->symbols = symbols;
+                s->len     = len;
+                s->stale   = true;
+                ramp_settle(&s->mix, STRIP_MIX_ONE);
+                if (was) {
+                    /* The same strip with another length or order: its colour stays. */
+                    s->ct       = was->ct;
+                    s->shown    = was->shown;
+                    s->from     = was->from;
+                    s->to       = was->to;
+                    s->mix      = was->mix;
+                    s->save_due = was->save_due;
+                    s->to_m     = 0;
+                } else if (light_db_load_gradient(c->id, &s->shown)) {
+                    strip_colors_gradient(&s->shown, &s->to);
+                } else {
+                    s->ct = true;          /* the white boot_state gave it */
+                }
+                l->strip = s;
+            }
         }
         if (pwm && same_wiring && old->configured && old->timer == l->timer &&
             memcmp(old->ch, l->ch, sizeof(l->ch)) == 0 && old->pwm_hz == l->pwm_hz &&
@@ -1489,6 +1844,20 @@ void local_lights_reload(void)
         }
         for (int k = 0; !kept && k < o->nch; k++) {
             stop_channel_locked(o, k);
+        }
+    }
+    /* A strip that is gone, or is made anew, gives its channel back first: there
+     * are two, and the new one may need this one's. */
+    for (size_t j = 0; j < CONFIG_ZBC_MAX_LIGHTS; j++) {
+        strip_t *o = s_live[j].used ? s_live[j].strip : NULL;
+        bool     kept = false;
+        for (size_t i = 0; o && i < n && !kept; i++) {
+            kept = next[i].used && next[i].strip == o;
+        }
+        if (o && !kept) {
+            led_strip_out_del(o->out);
+            free(o);
+            s_live[j].strip = NULL;
         }
     }
     for (int pin = 0; pin < SOC_GPIO_PIN_COUNT; pin++) {
@@ -1574,6 +1943,16 @@ void local_lights_reload(void)
             }
             continue;
         }
+        if (l->kind == ZBC_LIGHT_STRIP) {
+            strip_t *s = l->strip;
+            if (!s->out && led_strip_out_new(l->gpio, l->active_low, s->symbols * 48, &s->out) != ESP_OK) {
+                continue;               /* no channel: dark, and commands answer "not wired up" */
+            }
+            s_owned[l->gpio] = true;
+            l->configured    = true;
+            apply_strip_locked(l, now);
+            continue;
+        }
         if (l->configured) {
             continue;
         }
@@ -1628,10 +2007,18 @@ void local_lights_save_all(void)
     }
     uint16_t          ids[CONFIG_ZBC_MAX_LIGHTS];
     zbc_light_state_t states[CONFIG_ZBC_MAX_LIGHTS];
-    int               n = 0;
+    uint16_t          gids[LED_STRIP_OUT_MAX];
+    zbc_gradient_t    grads[LED_STRIP_OUT_MAX];
+    int               n = 0, gn = 0;
     xSemaphoreTake(s_lock, portMAX_DELAY);
     for (int i = 0; i < CONFIG_ZBC_MAX_LIGHTS; i++) {
-        const live_light_t *l = &s_live[i];
+        live_light_t *l = &s_live[i];
+        if (l->used && l->strip && gn < LED_STRIP_OUT_MAX) {
+            gids[gn]  = l->id;
+            grads[gn] = l->strip->ct ? (zbc_gradient_t){ 0 } : l->strip->shown;
+            gn++;
+            l->strip->save_due = 0;
+        }
         if (l->used) {
             ids[n]    = l->id;
             states[n] = (zbc_light_state_t){
@@ -1643,6 +2030,9 @@ void local_lights_save_all(void)
     xSemaphoreGive(s_lock);
     for (int i = 0; i < n; i++) {
         light_db_save_state(ids[i], &states[i]);
+    }
+    for (int i = 0; i < gn; i++) {
+        light_db_save_gradient(gids[i], &grads[i]);
     }
 }
 
@@ -1664,7 +2054,7 @@ esp_err_t local_lights_start(void)
      * /api/status). A tick is a few
      * hundred microseconds of LEDC writes, only while something moves; Wi-Fi
      * and lwIP stay above it. */
-    if (xTaskCreate(fade_task, "lights", 3072, NULL, 6, &s_task) != pdPASS) {
+    if (xTaskCreate(fade_task, "lights", CONFIG_ZBC_LED_STRIP ? 4096 : 3072, NULL, 6, &s_task) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
     local_lights_reload();
@@ -1702,7 +2092,7 @@ void local_lights_hold(bool held)
                 }
             } else {
                 ramp_settle(&l->level, (int64_t)l->remembered * 1000);
-                apply_pwm_locked(l, now);
+                apply_locked(l, now);
                 mark_dirty(l, now);
             }
             ESP_LOGW(TAG, "Wired light %u switched off: too hot", (unsigned)l->id);
@@ -1728,8 +2118,9 @@ bool local_lights_held(void)
 /* What a command needs of the light it is for. */
 typedef enum {
     NEED_SWITCH,                      /* any light */
-    NEED_LEVEL,                       /* a light that dims: tunable white or dimmable */
-    NEED_CT,                          /* tunable white, two channels or three */
+    NEED_LEVEL,                       /* a light that dims: tunable white, dimmable or a strip */
+    NEED_CT,                          /* tunable white, two channels or three, or a strip */
+    NEED_COLOR,                       /* a strip */
 } need_t;
 
 /* Returns with s_lock held on ESP_OK. */
@@ -1741,9 +2132,11 @@ static esp_err_t lock_light(uint16_t id, need_t need, live_light_t **out)
     xSemaphoreTake(s_lock, portMAX_DELAY);
     live_light_t *l   = find_locked(id);
     esp_err_t     err = ESP_OK;
-    if (!l || (is_pwm(l->kind) && !l->configured)) {
+    if (!l || (dims(l->kind) && !l->configured)) {
         err = light_db_get(id, NULL) ? ESP_ERR_INVALID_STATE : ESP_ERR_NOT_FOUND;
-    } else if ((need == NEED_LEVEL && !is_pwm(l->kind)) || (need == NEED_CT && !zbc_light_tunable(l->kind))) {
+    } else if ((need == NEED_LEVEL && !dims(l->kind)) ||
+               (need == NEED_CT && !zbc_light_tunable(l->kind) && !l->strip) ||
+               (need == NEED_COLOR && !l->strip)) {
         err = ESP_ERR_NOT_SUPPORTED;
     }
     if (err != ESP_OK) {
@@ -1869,7 +2262,7 @@ esp_err_t local_light_on(uint16_t id, uint16_t transition_ds)
     if (err != ESP_OK) {
         return err;
     }
-    if (is_pwm(l->kind) && transition_ds) {
+    if (dims(l->kind) && transition_ds) {
         /* Not fade_in, which starts from black: an On that finds a fade still running
          * carries on from where the light is. */
         warm_up_with_fade_locked(l, l->remembered, transition_ds);
@@ -1886,9 +2279,9 @@ esp_err_t local_light_off(uint16_t id, uint16_t transition_ds)
     if (err != ESP_OK) {
         return err;
     }
-    const bool dims = is_pwm(l->kind);
+    const bool fades = dims(l->kind);
     xSemaphoreGive(s_lock);
-    return dims ? local_light_fade_off(id, transition_ds) : local_light_set(id, ZB_ONOFF_OFF);
+    return fades ? local_light_fade_off(id, transition_ds) : local_light_set(id, ZB_ONOFF_OFF);
 }
 
 esp_err_t local_light_fade_in(uint16_t id, uint8_t level, uint16_t transition_ds)
@@ -1960,7 +2353,14 @@ esp_err_t local_light_glide(uint16_t id, const uint8_t *level, const uint16_t *m
     /* A lit light carries on from where it is; a dark one starts at black,
      * whatever level it was switched off at. */
     ramp_glide(&l->level, lit ? ramp_now(&l->level, now) : 0, pts, n, 1000, transition_ds, now);
-    if (mireds && zbc_light_tunable(l->kind)) {
+    if (mireds && l->strip && !l->strip->ct) {
+        /* A strip showing a colour is taken to the colour temperatures of the
+         * way, as a lamp told one leaves its colour. */
+        strip_refade_locked(l, now, transition_ds);
+        l->strip->ct   = true;
+        l->strip->to_m = 0;
+    }
+    if (mireds && (zbc_light_tunable(l->kind) || l->strip)) {
         for (int i = 0; i < n; i++) {
             const uint32_t m = mireds[i];
             pts[i] = (uint16_t)(m < l->cold_m ? l->cold_m : (m > l->warm_m ? l->warm_m : m));
@@ -1990,6 +2390,18 @@ esp_err_t local_light_set_ct(uint16_t id, uint16_t mireds, uint16_t transition_d
     }
     const int64_t  now = esp_timer_get_time();
     const uint32_t m   = mireds < l->cold_m ? l->cold_m : (mireds > l->warm_m ? l->warm_m : mireds);
+    if (l->strip && !l->strip->ct) {
+        /* From the colour or the gradient it shows, across to the white. */
+        strip_refade_locked(l, now, transition_ds);
+        l->strip->ct   = true;
+        l->strip->to_m = 0;
+        ramp_settle(&l->mireds, m);
+        unlock_changed(l, now);
+        return ESP_OK;
+    }
+    if (l->strip) {
+        l->strip->save_due = now + SAVE_AFTER_US;
+    }
     if (l->on && ramp_active(&l->level, now) &&
         (l->level.shape == RAMP_EASED_LIGHT || l->level.shape == RAMP_GLIDE)) {
         /* The colour of a switch-on or a switch-off (a warmth curve's, or Warm
@@ -2006,6 +2418,47 @@ esp_err_t local_light_set_ct(uint16_t id, uint16_t mireds, uint16_t transition_d
     }
     unlock_changed(l, now);
     return ESP_OK;
+}
+
+esp_err_t local_light_set_gradient(uint16_t id, const zbc_gradient_t *g, uint16_t transition_ds)
+{
+    if (!zbc_gradient_valid(g)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    live_light_t   *l;
+    const esp_err_t err = lock_light(id, NEED_COLOR, &l);
+    if (err != ESP_OK) {
+        return err;
+    }
+    const int64_t now = esp_timer_get_time();
+    strip_t      *s   = l->strip;
+    strip_refade_locked(l, now, transition_ds);
+    strip_colors_gradient(g, &s->to);
+    s->ct    = false;
+    s->shown = *g;
+    unlock_changed(l, now);
+    return ESP_OK;
+}
+
+esp_err_t local_light_set_xy(uint16_t id, uint16_t x, uint16_t y, uint16_t transition_ds)
+{
+    const zbc_gradient_t g = { .n = 1, .x = { x }, .y = { y } };
+    return local_light_set_gradient(id, &g, transition_ds);
+}
+
+bool local_light_gradient(uint16_t id, zbc_gradient_t *out)
+{
+    if (!s_lock) {
+        return false;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    const live_light_t *l    = find_locked(id);
+    const bool          have = l && l->strip && l->configured && !l->strip->ct;
+    if (have && out) {
+        *out = l->strip->shown;
+    }
+    xSemaphoreGive(s_lock);
+    return have;
 }
 
 esp_err_t local_light_stop(uint16_t id)
@@ -2038,10 +2491,11 @@ bool local_light_get(uint16_t id, zbc_local_state_t *out)
     if (live && out) {
         const int64_t now = esp_timer_get_time();
         out->on = l->on ? 1 : 0;
-        if (is_pwm(l->kind)) {
+        if (dims(l->kind)) {
             int64_t lvl = l->on ? (ramp_now(&l->level, now) + 500) / 1000 : l->remembered;
             out->level  = (int16_t)(lvl < 1 ? 1 : lvl);
-            out->mireds = zbc_light_tunable(l->kind) ? (int32_t)ramp_now(&l->mireds, now) : -1;
+            out->mireds = zbc_light_tunable(l->kind) || (l->strip && l->strip->ct)
+                              ? (int32_t)ramp_now(&l->mireds, now) : -1;
             out->comes_back_to = l->remembered;
             out->fading_out    = l->off_at_end;
         } else {

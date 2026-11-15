@@ -173,6 +173,52 @@ brightness last asked for). A client that shows a slider should bind it to `inpu
 level curve is active. `brightness_pct` is what the lamp reports, which is the curve's output and so
 a different number.
 
+## Gradients
+
+A gradient strip shows several colours along its length and blends between them. Three kinds of
+light take one:
+
+- a Philips Hue gradient lamp (lightstrip, Signe, Play gradient tube);
+- an [LED strip wired to the board](wired-lights.md#led-strips);
+- an LED strip on a [Light Node](light-node.md).
+
+Such a light's page has a *Gradient* card. It opens with three colours, for the left, middle and
+right of the strip. Tap one and set it on the wheel. *Add colour* and *Remove colour* give two to
+five, spread evenly along the strip, which is as many as the Hue app offers. *Flip* swaps the ends,
+for a strip that is mounted the other way round. *One colour* ends the gradient with the selected
+colour.
+
+How a gradient behaves:
+
+- **Brightness is separate.** The room's slider, a button and a level curve dim the strip as they
+  dim any lamp, and the gradient stays.
+- **It holds its colour.** While a strip shows a gradient, a warmth curve, Adaptive Lighting's
+  colour shift and *Warm while off* leave its colour alone. They would each put the whole strip in
+  one colour.
+- **A colour set by hand ends it.** A colour or a colour temperature sent to the light from its
+  page, the API or Matter replaces the gradient.
+- **The lamp confirms it.** After sending a gradient the coordinator reads the lamp's state. The
+  card says *waiting* until the lamp reports the colours. A lamp that reports other colours is sent
+  the gradient twice more, and then what it reports is what the card shows.
+- **An ordinary Hue colour bulb gets the card too.** Hue bulbs list the same cluster as the gradient
+  lamps, and nothing in what a lamp says about itself tells them apart. A bulb that was sent a
+  gradient and reports none is marked as not taking gradients.
+- **A lamp paired before this version** gets the card after it next announces itself. Switch it off
+  and on at the wall once.
+
+From a script:
+
+```sh
+curl -X POST http://zigbee.local/api/devices/0x001788010c5d6e7f/ep/11/gradient \
+  -d '{"colors":[{"hue":28,"sat":88},{"hue":330,"sat":78},{"hue":235,"sat":85}]}'
+```
+
+**The Hue side is untested on a lamp.** The frames follow what Bifrost and zigbee2mqtt have worked
+out of Philips' format, and the host tests check them against the examples those projects publish.
+Three things are open until a gradient lamp is on the network: which end of a strip the first colour
+lands on (use *Flip*), how long the lamp's fade is for a given fade time, and what an ordinary bulb
+does with the command.
+
 ## Adaptive Lighting
 
 A room can follow the sun: dimmer and warmer towards midnight, brighter and cooler towards noon.

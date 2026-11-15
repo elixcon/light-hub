@@ -11,6 +11,7 @@
 #include "esp_err.h"
 #include "sdkconfig.h"
 #include "device_db.h"
+#include "gradient.h"
 #include "remote.h"
 
 #ifdef __cplusplus
@@ -336,6 +337,28 @@ esp_err_t zb_set_color_xy(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, uint16_t
 esp_err_t zb_set_color_hs(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, uint8_t hue, uint8_t saturation,
                           uint16_t transition_ds);
 esp_err_t zb_set_onoff(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, zb_onoff_cmd_t cmd);
+
+/* A gradient on a lamp that may take one (ZBC_FEAT_GRADIENT): two to
+ * ZBC_GRADIENT_MAX colours along its length, as Philips' gradient lamps and a
+ * Light Node's strip take them. One colour is zb_set_color_xy's business, and
+ * any plain colour command ends the gradient.
+ *
+ * Whether the lamp took it is its own word, read back after the frame is
+ * delivered: `pending` until it has said, `shown` once it reports the colours,
+ * `not taken` when it was told three times and reports none - an ordinary Hue
+ * bulb, which lists the same cluster. */
+typedef enum {
+    ZB_GRADIENT_NONE = 0,
+    ZB_GRADIENT_PENDING,
+    ZB_GRADIENT_SHOWN,
+    ZB_GRADIENT_NOT_TAKEN,
+} zb_gradient_state_t;
+esp_err_t zb_set_gradient(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, const zbc_gradient_t *g,
+                          uint16_t transition_ds);
+/* What the endpoint's gradient is: the colours it reports while shown, the ones
+ * asked for otherwise. False when it has none. `out` and `state` may be NULL. */
+bool      zb_gradient_get(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, zbc_gradient_t *out,
+                          zb_gradient_state_t *state);
 /* Fades the lamp out and switches it off, as one command the lamp carries out
  * itself - see the note in zb_coordinator.c for why two commands will not do. */
 esp_err_t zb_fade_off(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep);

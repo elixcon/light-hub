@@ -28,13 +28,16 @@ idf_component_register(
         "${app_dir}/http_wired.c"
         "${app_dir}/ota.c"
         "${app_dir}/local_lights.c"
+        "${app_dir}/led_strip_out.c"
+        "${app_dir}/gradient.c"
+        "${app_dir}/colorspace.c"
         "${app_dir}/pchip.c"
         "${app_dir}/thermal.c"
         "${app_dir}/ntc.c"
         "${app_dir}/radio_coex.c"
     INCLUDE_DIRS "." "${app_dir}"
     PRIV_REQUIRES
-        app_update bootloader_support esp_app_format esp_bootloader_format esp_adc esp_coex esp_driver_gpio esp_driver_ledc esp_driver_mcpwm esp_event
+        app_update bootloader_support esp_app_format esp_bootloader_format esp_adc esp_coex esp_driver_gpio esp_driver_ledc esp_driver_mcpwm esp_driver_rmt esp_event
         esp_http_server esp_netif esp_system esp_timer esp_wifi ieee802154 esp_hal_ieee802154 lwip mbedtls nvs_flash spi_flash)
 
 include("${CMAKE_CURRENT_LIST_DIR}/../../cmake/zbc_app.cmake")

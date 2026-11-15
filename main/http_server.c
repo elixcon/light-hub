@@ -1,4 +1,5 @@
 #include <inttypes.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -23,6 +24,7 @@
 #include "auth_http.h"
 #include "button_db.h"
 #include "buttons.h"
+#include "colorspace.h"
 #include "config_backup.h"
 #include "crash_log.h"
 #include "curve_db.h"
@@ -511,6 +513,9 @@ static cJSON *endpoint_to_json(const zbc_device_t *dev, const zbc_endpoint_t *sr
     if (src->features & ZBC_FEAT_ANY_COLOR) {
         cJSON_AddItemToArray(feat, cJSON_CreateString("color"));
     }
+    if (src->features & ZBC_FEAT_GRADIENT) {
+        cJSON_AddItemToArray(feat, cJSON_CreateString("gradient"));
+    }
     /* A remote, not a lamp. It shares the endpoint list because it is a
      * paired device like any other, and a client has to be able to tell
      * the two apart - the older Aqara switch carries "onoff" as well,
@@ -583,6 +588,20 @@ static cJSON *endpoint_to_json(const zbc_device_t *dev, const zbc_endpoint_t *sr
     } else {
         cJSON_AddStringToObject(ep, "color_mode",
                                 src->color_mode == 2 ? "color_temp" : "color");
+    }
+
+    /* The gradient a strip shows or has been sent: its colours from its start to
+     * its end, and whether the lamp has said it shows them. Only where there
+     * could be one. */
+    if (src->features & ZBC_FEAT_GRADIENT) {
+        zbc_gradient_t      g;
+        zb_gradient_state_t gs = ZB_GRADIENT_NONE;
+        if (lighting_get_gradient(dev->ieee, src->ep, &g, &gs)) {
+            gradient_to_json(ep, &g, gs == ZB_GRADIENT_SHOWN ? "shown"
+                                     : gs == ZB_GRADIENT_NOT_TAKEN ? "not_taken" : "pending");
+        } else {
+            cJSON_AddNullToObject(ep, "gradient");
+        }
     }
 
     /* Which response curves this endpoint has, and the brightness that
@@ -881,6 +900,27 @@ static esp_err_t device_color_post(httpd_req_t *req, const uint8_t ieee[ZBC_IEEE
     cJSON_Delete(json);
 
     return send_command_result(req, ieee, lighting_set_color_hs(ieee, ep, zcl_hue, zcl_sat, dsec));
+}
+
+/* POST /api/devices/{ieee}/ep/{ep}/gradient
+ *   {"colors": [{"hue": 0-359, "sat": 0-100} | {"kelvin": 1000-10000}, ...]}
+ *
+ * One to five colours along a strip, the first at its start. One is a plain
+ * colour, which every colour lamp takes; more need a light that shows gradients. */
+static esp_err_t device_gradient_post(httpd_req_t *req, const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep)
+{
+    cJSON *json = read_json_body(req);
+    if (!json) {
+        return ESP_FAIL;
+    }
+    zbc_gradient_t g;
+    const char    *bad  = gradient_from_json(json, &g);
+    const uint16_t dsec = transition_ds_from_json(json);
+    cJSON_Delete(json);
+    if (bad) {
+        return send_error(req, "400 Bad Request", bad);
+    }
+    return send_command_result(req, ieee, lighting_set_gradient(ieee, ep, &g, dsec));
 }
 
 /* POST /api/devices/{ieee}/ep/{ep}/matter  {"expose": true|false}
@@ -1251,6 +1291,9 @@ static esp_err_t device_dispatch(httpd_req_t *req)
         }
         if (strcmp(tail, "color") == 0) {
             return device_color_post(req, ieee, (uint8_t)ep);
+        }
+        if (strcmp(tail, "gradient") == 0) {
+            return device_gradient_post(req, ieee, (uint8_t)ep);
         }
         if (strcmp(tail, "curves") == 0) {
             return device_curves_post(req, ieee, (uint8_t)ep);

@@ -13,6 +13,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "gradient.h"
 #include "zb_coordinator.h"
 
 #ifdef __cplusplus
@@ -21,7 +22,8 @@ extern "C" {
 
 /* What a wired light is showing, in the units a Zigbee lamp reports: level
  * 0-254 (the level it comes back to while it is off, as a lamp switched off with
- * OffWithEffect keeps its CurrentLevel), mireds; -1 where it does not apply. */
+ * OffWithEffect keeps its CurrentLevel), mireds; -1 where it does not apply - an
+ * LED strip showing a colour or a gradient has no mireds. */
 typedef struct {
     int8_t  on;
     int16_t level;
@@ -85,6 +87,15 @@ esp_err_t local_light_glide(uint16_t id, const uint8_t *level, const uint16_t *m
 /* Clamped to the light's own two colour temperatures. Sent while a switch-on or
  * switch-off is fading, it travels with that fade rather than on its own. */
 esp_err_t local_light_set_ct(uint16_t id, uint16_t mireds, uint16_t transition_ds);
+/* An LED strip's colour: a gradient of one to ZBC_GRADIENT_MAX colours along
+ * it, or one colour as CIE xy in 65536ths. The strip cross-fades to it over
+ * transition_ds from whatever it shows. ESP_ERR_NOT_SUPPORTED for any light
+ * but a strip. A colour temperature (local_light_set_ct) ends it. */
+esp_err_t local_light_set_gradient(uint16_t id, const zbc_gradient_t *g, uint16_t transition_ds);
+esp_err_t local_light_set_xy(uint16_t id, uint16_t x, uint16_t y, uint16_t transition_ds);
+/* The colours a strip was last given, one or more. False for a strip showing a
+ * colour temperature, and for any other light. `out` may be NULL. */
+bool      local_light_gradient(uint16_t id, zbc_gradient_t *out);
 /* Ends a level ramp where it has got to. A fade out is left to finish. */
 esp_err_t local_light_stop(uint16_t id);
 

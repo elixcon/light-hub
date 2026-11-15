@@ -11,6 +11,7 @@
 #include <stddef.h>
 #include <string.h>
 
+#include "../main/gradient.h"
 #include "ent-frame.inc"
 
 static int failures, checks;

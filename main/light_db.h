@@ -17,6 +17,7 @@
 #include <stddef.h>
 
 #include "esp_err.h"
+#include "gradient.h"
 #include "light_math.h"
 
 #ifdef __cplusplus
@@ -30,6 +31,7 @@ typedef enum {
     ZBC_LIGHT_CWWW,                   /* two PWM pins, cold and warm white */
     ZBC_LIGHT_DIM,                    /* one PWM pin, brightness only: a single-colour strip */
     ZBC_LIGHT_CNW,                    /* three PWM pins, cold, neutral and warm white */
+    ZBC_LIGHT_STRIP,                  /* one data pin: a strip of addressable RGB or RGBW LEDs */
     ZBC_LIGHT_KIND_COUNT,
 } zbc_light_kind_t;
 
@@ -75,9 +77,16 @@ typedef struct {
      * two-channel light ignores the neutral one). Kept whatever the mix, so
      * going back to a formula and then to the curves loses nothing. */
     zbc_mix_curve_t curve[ZBC_PWM_MAX_LIGHT_CH];
+    /* An LED strip. In what was reserved and zero, so a table stored before
+     * strips loads as it is: order GRB, and pixels 0, which light_db_set makes
+     * the default when a light first becomes a strip. Kept while the light is
+     * another kind. */
+    uint8_t  strip_order;             /* zbc_strip_order_t */
+    uint16_t strip_pixels;            /* 1..ZBC_STRIP_PIXELS_MAX */
+    uint8_t  strip_flags;             /* ZBC_STRIP_F_* */
     /* Zero. A field added in here later changes nothing stored, where one added
      * after it would bump LIGHT_BLOB_VERSION. */
-    uint8_t  reserved[8];
+    uint8_t  reserved[4];
 } zbc_light_t;
 
 /* What a light was last doing, for its power-on setting. `level` means something
@@ -110,8 +119,14 @@ bool      light_db_pin_taken(int gpio, uint16_t except_id);
  * differs from what is stored. */
 bool      light_db_load_state(uint16_t id, zbc_light_state_t *out);
 void      light_db_save_state(uint16_t id, const zbc_light_state_t *st);
-/* Whether an NVS key is one of those states, of any light: "lstate12", or the
- * older "light12" - never "lights", the table itself. */
+/* The colour an LED strip shows, under a key of its own as well: one to
+ * ZBC_GRADIENT_MAX colours, one being a plain colour. None stored (false) is a
+ * strip showing a colour temperature, which is `mireds` above. Saving n == 0
+ * erases it. */
+bool      light_db_load_gradient(uint16_t id, zbc_gradient_t *out);
+void      light_db_save_gradient(uint16_t id, const zbc_gradient_t *g);
+/* Whether an NVS key is one of those states, of any light: "lstate12", "lgrad12",
+ * or the older "light12" - never "lights", the table itself. */
 bool      light_db_is_state_key(const char *key);
 
 esp_err_t light_db_erase(void);

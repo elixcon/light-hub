@@ -19,6 +19,8 @@
  */
 #pragma once
 
+#include <stdbool.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -52,6 +54,13 @@ void zbc_hs_to_xy(int hue_deg, int sat_pct, float *x, float *y);
  * inside the triangle. Degrees and percent come back as floats so a caller
  * scaling to ZCL's 0-254 rounds once rather than twice. */
 void zbc_xy_to_hs(float x, float y, float *hue_deg, float *sat_pct);
+
+/* CIE xy as the light of a red, a green and a blue LED, linear, the largest of
+ * the three 1: what zbc_xy_to_hs works out on its way, before the gamma step,
+ * and what a strip of addressable LEDs is driven with. Outside the sRGB
+ * triangle it is brought in the same way. False, with all three 0, for an xy
+ * nothing can be made of. */
+bool zbc_xy_to_rgb(float x, float y, float rgb[3]);
 
 #ifdef __cplusplus
 }

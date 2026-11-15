@@ -48,6 +48,26 @@ esp_err_t lighting_set_color_hs(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, ui
 esp_err_t lighting_set_color_xy(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, uint16_t x, uint16_t y,
                                 uint16_t transition_ds);
 
+/* A gradient for a light that may show one (ZBC_FEAT_GRADIENT): one to
+ * ZBC_GRADIENT_MAX colours along its length - a Hue gradient lamp, a Light
+ * Node's LED strip or a wired one. One colour is lighting_set_color_xy.
+ *
+ * It is the light's colour from then on: colour that policy would send by itself
+ * - a warmth curve's, Adaptive Lighting's, Warm while off's - is held back from
+ * a light showing a gradient, and its brightness moves as ever. One of the three
+ * calls above, a colour chosen by hand, ends it. ESP_ERR_NOT_SUPPORTED for a
+ * light that takes none. */
+esp_err_t lighting_set_gradient(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, const zbc_gradient_t *g,
+                                uint16_t transition_ds);
+/* The gradient a light shows or has been sent, two colours or more, and how
+ * far that has got (zb_coordinator.h; a wired strip's is always shown). False
+ * when it has none. */
+bool      lighting_get_gradient(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, zbc_gradient_t *out,
+                                zb_gradient_state_t *state);
+/* What colour sent by policy answers for a light showing a gradient. Quiet, like
+ * LIGHTING_ERR_STREAMING below: nothing warns and nothing is recorded as sent. */
+#define LIGHTING_ERR_GRADIENT ((esp_err_t)0x5A0003)
+
 /* input_pct is what the user asked for, 1-100; what the lamp is told depends on
  * its curve. Returns ESP_ERR_NOT_FOUND for an unknown endpoint and
  * ESP_ERR_NOT_SUPPORTED for one that cannot dim. */

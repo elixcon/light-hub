@@ -42,9 +42,11 @@ digits, endpoint 1.
 Every command answers `202`, and the lamp's own report decides the final state. A command to a
 device that has stopped answering gets `503`.
 
-Each endpoint in `/api/devices` has a `features` list (`onoff`, `brightness`, `color_temp`, `color`)
-and the lamp's physical `min_kelvin` and `max_kelvin`, so a client never has to guess what a light
-can do. With a level curve active, bind a slider to `input_pct`, not `brightness_pct` (see [Response
+Each endpoint in `/api/devices` has a `features` list (`onoff`, `brightness`, `color_temp`, `color`,
+`gradient`) and the lamp's physical `min_kelvin` and `max_kelvin`, so a client never has to guess
+what a light can do. An endpoint with `gradient` also has a `gradient` member: `null`, or its
+`colors` (`[{"hue","sat"}, ...]`, from the strip's start to its end) and a `state` of `pending`,
+`shown` or `not_taken` (see [Gradients](lighting.md#gradients)). With a level curve active, bind a slider to `input_pct`, not `brightness_pct` (see [Response
 curves](lighting.md#setting-curves-from-a-script)). A remote's endpoint has `switch` and a motion
 sensor's `motion`, with `reports_clear` saying whether the sensor reports the end of motion itself
 (see [motion sensors](buttons-and-remotes.md#motion-sensors)). An endpoint shown in Matter on its
@@ -84,6 +86,7 @@ those are only on `/api/status`.
 | `POST` | `/api/devices/{ieee}/ep/{ep}/level` | `{"pct":30}`: brightness, 1-100 |
 | `POST` | `/api/devices/{ieee}/ep/{ep}/color_temp` | `{"kelvin":2700}` |
 | `POST` | `/api/devices/{ieee}/ep/{ep}/color` | `{"hue":280,"sat":90}`: degrees and percent |
+| `POST` | `/api/devices/{ieee}/ep/{ep}/gradient` | `{"colors":[{"hue":28,"sat":88},{"kelvin":2700}, ...]}`: one to five colours along a strip, each a hue and saturation or a kelvin. One colour is a plain colour, which any colour lamp takes; more need the `gradient` feature, `409` without it |
 | `PATCH` | `/api/devices/{ieee}` | `{"name":"Desk lamp"}` |
 | `POST` | `/api/devices/{ieee}/wifi` | `{"minutes":15}`, optional: asks a [Light Node](light-node.md) to open Wi-Fi until that many minutes without a request. Answers `202`, and `409` for any other device. Its control endpoint then shows `node_wifi` (`off`, `joining`, `station` or `hotspot`) and `node_ip` |
 | `DELETE` | `/api/devices/{ieee}` | asks a lamp to leave and forgets the device (a sleepy remote or sensor is only forgotten); a wired light gives its pin back; a Matter lamp is forgotten, and its device is told to forget the coordinator (RemoveFabric) when it was the device's last lamp |
@@ -92,7 +95,7 @@ those are only on `/api/status`.
 | `POST` | `/api/devices/{ieee}/ep/{ep}/curves` | replaces them: `level` points, `chroma` stops; a `null` member clears that part |
 | `DELETE` | `/api/devices/{ieee}/ep/{ep}/curves` | back to passing the brightness straight through |
 | `POST` | `/api/lights` | `{"name":"Porch"}` creates a wired light, answers `id`, `ieee` and `ep` |
-| `PATCH` | `/api/lights/{id}` | its wiring, any subset: `name`, `gpio`, `active_low`, `power_on` (`off`/`on`/`last`), `kind` (`onoff`/`dim`/`cwww`/`cwnwww`), `pwm_hz` (100-19531) for a dimmable or tunable-white light, and for tunable white `gpio_warm`, `cold_kelvin`, `warm_kelvin`, `mix` (`constant`/`full`/`custom`) and `mix_curves` (`{"cold"|"neutral"|"warm": {"points": [[x, y], ...]} \| null}`, x 1 = warm LEDs to 100 = cold, y percent, see [wired lights](wired-lights.md#mixing)), plus `gpio_neutral` and `neutral_kelvin` for three channels; switched and removed through `/api/devices` like any lamp |
+| `PATCH` | `/api/lights/{id}` | its wiring, any subset: `name`, `gpio`, `active_low`, `power_on` (`off`/`on`/`last`), `kind` (`onoff`/`dim`/`cwww`/`cwnwww`/`strip`), for an [LED strip](wired-lights.md#led-strips) `pixels` (1-300), `order` (`grb`/`rgb`/`brg`/`rbg`/`gbr`/`bgr`), `rgbw` and `reversed`, `pwm_hz` (100-19531) for a dimmable or tunable-white light, and for tunable white `gpio_warm`, `cold_kelvin`, `warm_kelvin`, `mix` (`constant`/`full`/`custom`) and `mix_curves` (`{"cold"|"neutral"|"warm": {"points": [[x, y], ...]} \| null}`, x 1 = warm LEDs to 100 = cold, y percent, see [wired lights](wired-lights.md#mixing)), plus `gpio_neutral` and `neutral_kelvin` for three channels; switched and removed through `/api/devices` like any lamp |
 
 ## Rooms
 

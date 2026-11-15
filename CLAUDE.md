@@ -111,7 +111,7 @@ The updater compiles shared modules (`wifi_manager.c`, `settings.c`, `auth.c`, `
   lamps (`matter_priv.h` is internal and runs on the CHIP thread; `matter_ctl.h` is the C API). No
   Thread: the radio runs Zigbee.
 - Leaf modules have no ESP-IDF dependencies and compile whole in host tests: `remote.c`,
-  `colorspace.c`, `sun.c`, `tz.c`, `ntc.c`, `zb_ota_file.c`, `light_math.h`, `frame_dup.h`, `btn_gesture.h`,
+  `colorspace.c`, `gradient.c`, `sun.c`, `tz.c`, `ntc.c`, `zb_ota_file.c`, `light_math.h`, `frame_dup.h`, `btn_gesture.h`,
   `node_proto.h`, and in
   `node/main` `node_mode.c`, `node_fallback.c`, `node_zcl.c`. Keep them that way.
 - `main/CMakeLists.txt` links several `-Wl,--wrap=` hooks: the 802.15.4 driver (`radio_ed.c`
@@ -127,7 +127,7 @@ The updater compiles shared modules (`wifi_manager.c`, `settings.c`, `auth.c`, `
 `node/` is a project of its own, because `CONFIG_ZB_ZED` selects another Zigbee library at compile
 time. It builds against the same `partitions.csv` with the same updater, and compiles what it shares
 from `main/` by path, so keep those files free of rules, rooms and Matter: `local_lights.c`,
-`light_db.c`, `button_db.c`, `btn_gesture.c`, `http_util.c`, `http_wired.c`, `ota.c`, `wifi_manager.c`.
+`led_strip_out.c`, `gradient.c`, `colorspace.c`, `light_db.c`, `button_db.c`, `btn_gesture.c`, `http_util.c`, `http_wired.c`, `ota.c`, `wifi_manager.c`.
 `node_state_rev.c` replaces `state_rev.c`, so a change wakes the attribute sync.
 
 - To the hub it is an ordinary lamp per light, with its receiver on. A light's endpoint is its
@@ -199,6 +199,27 @@ interval, so the lamp keeps moving and a lost frame is repaired by the next one.
 Everything model-specific about a remote lives in `remote.c` (decoding by model via
 `remote_model()`), and `web/src/lib/remotes.ts` mirrors its key numbers (0 on/off, 2 up, 1 down).
 Each entry must follow the frames the device actually sends or its zigbee2mqtt converter.
+
+### Gradients
+
+A gradient is one to five CIE xy colours along a strip (`gradient.h`); one is a plain colour. Three
+lights take one, and `lighting_set_gradient` routes to each:
+
+- A Hue gradient lamp, by command 0 of Philips' cluster `0xFC03` (manufacturer `0x100B`). It is a
+  `ZBC_CMD_GRADIENT` in the gate's colour channel; the colours do not fit a `zbc_cmd_t` and live in
+  `s_grad`, which the command names by `gen`. `ZBC_FEAT_GRADIENT` is the cluster beside Color
+  Control, which ordinary Hue bulbs list too, so the lamp's state attribute (`0x0002`) is read back
+  after delivery and decides: shown, sent again (twice at most), or not taken. The answer is taken
+  in at APS (`grad_note_aps`), since the cluster is on no endpoint of ours.
+- A wired LED strip (`ZBC_LIGHT_STRIP`): `local_lights.c` renders pixels (region `strip`) and
+  `led_strip_out.c` sends them by RMT (region `ws-encode`). Two strips, the chip's two TX channels.
+- A Light Node's strip, which lists `0xFC03` and takes the same command, so the hub has no code for
+  it. The node answers the state read with a frame of its own (`node_zcl_state_rsp`).
+
+While a light shows a gradient, colour sent by policy (curves, Adaptive Lighting, Warm while off) is
+refused quietly (`gradient_holds`, `LIGHTING_ERR_GRADIENT`); a colour set by hand ends it. None of
+this has run on hardware: `test_gradient`, `test_huegrad`, `test_strip` and `test_nodezcl` stand in
+for the lamp, the strip and the node. The Philips format is from Bifrost and zigbee2mqtt.
 
 ### Wired-light PWM
 

@@ -118,8 +118,11 @@ static cJSON *light_to_json(const zbc_light_t *l)
 
     zbc_local_state_t st = { .on = -1, .level = -1, .mireds = -1 };
     local_light_get(l->id, &st);
-    const bool dims    = zbc_light_pwm_channels(l->kind) > 0;
-    const bool tunable = zbc_light_tunable(l->kind);
+    const bool strip   = l->kind == ZBC_LIGHT_STRIP;
+    const bool dims    = zbc_light_pwm_channels(l->kind) > 0 || strip;
+    const bool tunable = zbc_light_tunable(l->kind) || strip;
+    zbc_gradient_t g;
+    const bool colour  = strip && local_light_gradient(l->id, &g);
 
     cJSON *eps = cJSON_AddArrayToObject(d, "endpoints");
     cJSON *ep  = cJSON_CreateObject();
@@ -134,6 +137,10 @@ static cJSON *light_to_json(const zbc_light_t *l)
     if (tunable) {
         cJSON_AddItemToArray(feat, cJSON_CreateString("color_temp"));
     }
+    if (strip) {
+        cJSON_AddItemToArray(feat, cJSON_CreateString("color"));
+        cJSON_AddItemToArray(feat, cJSON_CreateString("gradient"));
+    }
     if (st.on < 0) {
         cJSON_AddNullToObject(ep, "on");
     } else {
@@ -145,10 +152,10 @@ static cJSON *light_to_json(const zbc_light_t *l)
         cJSON_AddNullToObject(ep, "brightness_pct");
     }
     if (tunable) {
-        add_kelvin(ep, "kelvin", st.mireds);
-        cJSON_AddNumberToObject(ep, "min_kelvin", l->warm_k);
-        cJSON_AddNumberToObject(ep, "max_kelvin", l->cold_k);
-        cJSON_AddStringToObject(ep, "color_mode", "color_temp");
+        add_kelvin(ep, "kelvin", st.mireds > 0 ? st.mireds : ZBC_UNKNOWN);
+        cJSON_AddNumberToObject(ep, "min_kelvin", strip ? ZBC_STRIP_WARM_K : l->warm_k);
+        cJSON_AddNumberToObject(ep, "max_kelvin", strip ? ZBC_STRIP_COLD_K : l->cold_k);
+        cJSON_AddStringToObject(ep, "color_mode", colour ? "color" : "color_temp");
     } else {
         cJSON_AddNullToObject(ep, "kelvin");
         cJSON_AddNullToObject(ep, "min_kelvin");
@@ -157,6 +164,11 @@ static cJSON *light_to_json(const zbc_light_t *l)
     }
     cJSON_AddNullToObject(ep, "hue");
     cJSON_AddNullToObject(ep, "sat");
+    if (colour && g.n >= 2) {
+        gradient_to_json(ep, &g, "shown");
+    } else if (strip) {
+        cJSON_AddNullToObject(ep, "gradient");
+    }
     cJSON *curves = cJSON_AddObjectToObject(ep, "curves");
     cJSON_AddBoolToObject(curves, "level", false);
     cJSON_AddBoolToObject(curves, "chroma", false);
@@ -208,7 +220,7 @@ static esp_err_t light_result(httpd_req_t *req, esp_err_t err)
     return send_error(req, "404 Not Found", "unknown light");
 }
 
-/* /api/devices/{ieee}[/ep/1/{onoff,level,color_temp}]: the wired lights, as the hub's
+/* /api/devices/{ieee}[/ep/1/{onoff,level,color_temp,gradient}]: the wired lights, as the hub's
  * editor reaches them. Curves and rooms are the hub's, so they are not here. */
 static esp_err_t device_dispatch(httpd_req_t *req)
 {
@@ -269,6 +281,12 @@ static esp_err_t device_dispatch(httpd_req_t *req)
         const cJSON *k = cJSON_GetObjectItem(json, "kelvin");
         if (cJSON_IsNumber(k) && k->valueint >= ZBC_LIGHT_KELVIN_MIN && k->valueint <= ZBC_LIGHT_KELVIN_MAX) {
             err = local_light_set_ct(id, (uint16_t)(1000000 / k->valueint), ds);
+        }
+    } else if (strcmp(tail, "gradient") == 0) {
+        /* An LED strip's colours, one or more: to try the strip from here. */
+        zbc_gradient_t g;
+        if (!gradient_from_json(json, &g)) {
+            err = local_light_set_gradient(id, &g, ds);
         }
     }
     cJSON_Delete(json);

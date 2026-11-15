@@ -3,7 +3,7 @@
 
 import type { MixCurvesJson } from "./mix.ts";
 
-export type Feature = "onoff" | "brightness" | "color_temp" | "color" | "switch" | "hue_buttons" | "motion" | "node";
+export type Feature = "onoff" | "brightness" | "color_temp" | "color" | "switch" | "hue_buttons" | "motion" | "node" | "gradient";
 
 export interface Endpoint {
   ep: number;
@@ -21,6 +21,11 @@ export interface Endpoint {
   sat: number | null;
   color_mode: "color_temp" | "color" | null;
   curves: { level: boolean; chroma: boolean };
+  /* A strip that may show a gradient (feature "gradient"): its colours from its
+   * start to its end, two or more, and whether the lamp has said it shows them -
+   * "not_taken" is one that was sent it and reports none. Null while it shows
+   * one colour. */
+  gradient?: { colors: { hue: number; sat: number }[]; state: "pending" | "shown" | "not_taken" } | null;
   input_pct: number | null;
   /* A motion sensor: whether it has been heard saying "unoccupied" itself,
    * which decides what its no-motion time is counted from. */
@@ -101,6 +106,13 @@ export interface Device {
   /* Mix "custom": one curve per channel over the light's colour temperatures
    * (lib/mix.ts); null for a channel with none. Kept whatever the mix. */
   mix_curves?: MixCurvesJson;
+  /* An LED strip (kind "strip"): how many pixels, the order each takes its
+   * colours in, whether it has a white LED, and whether a gradient's first
+   * colour is at its far end. */
+  pixels?: number;
+  order?: StripOrder;
+  rgbw?: boolean;
+  reversed?: boolean;
   /* A wired light held off by the overheat protection: switching on is refused. */
   held?: boolean;
   /* A Matter lamp: the device it is on (a hex string - it does not fit a JS
@@ -152,7 +164,8 @@ export interface ZbOtaStatus {
 }
 
 export type PowerOn = "off" | "on" | "last";
-export type LightKind = "onoff" | "dim" | "cwww" | "cwnwww";
+export type LightKind = "onoff" | "dim" | "cwww" | "cwnwww" | "strip";
+export type StripOrder = "grb" | "rgb" | "brg" | "rbg" | "gbr" | "bgr";
 export type LightMix = "constant" | "full" | "custom";
 
 export interface GroupMember {

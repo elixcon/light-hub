@@ -25,6 +25,7 @@
 #include "node_proto.h"
 #include "device_db.h"
 #include "remote.h"
+#include "gradient.h"
 #include "settings.h"
 #include "state_rev.h"
 #include "wifi_manager.h"
@@ -42,6 +43,9 @@ static const char *zb_err_name(esp_err_t err)
 {
     return err == ZB_ERR_UNREACHABLE ? "not answering" : esp_err_to_name(err);
 }
+
+/* How many endpoints can hold a gradient at once - see "gradients" below. */
+#define ZBC_GRAD_SLOTS CONFIG_ZBC_MAX_GRADIENTS
 
 /* Our own endpoint. A "custom gateway" endpoint carries the client side of the
  * usual HA clusters, which is what lets us drive other people's lights. */
@@ -91,6 +95,7 @@ static const char *zb_err_name(esp_err_t err)
  *
  * Runs in the Zigbee task with the stack lock held, so it must not take it. */
 static void data_confirm_cb(ezb_af_user_cnf_t *cnf, void *user_ctx);
+static void grad_confirm_locked(uint16_t short_addr, uint8_t ep, uint16_t gen, bool delivered, bool superseded);
 
 /* How many endpoints can have a command in flight at once: one settle slot and
  * one gate slot each. Sized for every device, not one group - a Matter scene or
@@ -324,6 +329,7 @@ static void ensure_color_info(uint16_t short_addr, const zbc_device_t *dev);
 static void read_attributes(uint16_t short_addr, uint8_t ep, uint16_t cluster_id, uint16_t *attrs, uint8_t count);
 static void read_onoff_state(uint16_t short_addr, uint8_t ep);
 static void read_light_state(uint16_t short_addr, uint8_t ep, uint16_t features);
+static void read_gradient_state(uint16_t short_addr, uint8_t ep, uint16_t features);
 static void read_static_color_info(uint16_t short_addr, uint8_t ep);
 static void read_ota_client_info(uint16_t short_addr, uint8_t ep);
 static void ota_wake_post(void);
@@ -347,6 +353,7 @@ typedef enum {
     ZBC_CMD_WARM_OFF,  /* a: mireds, b: 1 for a plain Off; two frames, see zb_warm_off */
     ZBC_CMD_HS,        /* a: hue 0-254, b: saturation 0-254 */
     ZBC_CMD_XY,        /* a: CIE x, b: CIE y, both /65536 */
+    ZBC_CMD_GRADIENT,  /* a: which gradient of the endpoint's (zbc_grad_t.gen); the colours are there */
 } zbc_cmd_kind_t;
 
 typedef struct {
@@ -361,6 +368,279 @@ typedef struct {
 #define ZBC_CH_COLOR 1   /* colour temperature, hue/saturation, xy */
 #define ZBC_CH_COUNT 2
 /* >>> end host-test region: gate-types <<< */
+
+/* ------------------------------------------------------------ gradients
+ *
+ * A Hue gradient lamp shows several colours along its length (gradient.h has
+ * the format). The command is one frame on Philips' cluster 0xFC03, and it goes
+ * through the gate's colour queue like any other colour. Its colours do not fit
+ * a zbc_cmd_t, so they are kept here, per endpoint, and the command names which
+ * of them it carries.
+ *
+ * Nothing says which lamps take one: cluster 0xFC03 is on ordinary Hue bulbs
+ * too, for their effects, and no attribute anyone has found tells a strip from
+ * a bulb. So, as for every other command, the lamp's own word decides: after
+ * the frame is delivered its state attribute is read, and a lamp that reports
+ * the colours it was sent is showing them. One that reports other colours, or
+ * none, is sent the frame again a bounded number of times, and after that it is
+ * showing what it says - a gradient of its own choosing, or none at all, which
+ * is what an ordinary bulb ends as ("not taken").
+ *
+ * The decisions are below, apart from the radio, and host-tested against a
+ * lamp made of gradient.c's decoder (test_huegrad): there is no lamp to try
+ * them on. */
+
+/* >>> host-test region: grad-check <<< */
+#define ZBC_GRAD_NONE      0   /* no gradient: the slot is free */
+#define ZBC_GRAD_PENDING   1   /* sent, or about to be; the lamp has not said yet */
+#define ZBC_GRAD_SHOWN     2   /* the lamp reports it */
+#define ZBC_GRAD_NOT_TAKEN 3   /* the lamp was sent it and reports none */
+
+#define ZBC_GRAD_FIXES    2    /* re-sends after a report that disagreed */
+#define ZBC_GRAD_RESENDS  2    /* re-sends after a frame the stack could not deliver */
+#define ZBC_GRAD_READS    2    /* reads after a delivery, while none is answered */
+/* The first read waits out the fade and this much more; the next comes a gap
+ * later. */
+#define ZBC_GRAD_READ_MARGIN_US 1000000LL
+#define ZBC_GRAD_READ_GAP_US    2500000LL
+/* How far a reported colour may sit from the one sent, in 65536ths of x and of
+ * y: 0.02. The format carries twelve bits, which is 12 of these, and a lamp
+ * pulls a colour outside its gamut to the edge of it, which can be more. */
+#define ZBC_GRAD_TOLERANCE 1300
+
+typedef struct {
+    uint16_t       short_addr;     /* 0 - never a lamp - marks a free slot */
+    uint8_t        ep;
+    uint8_t        state;          /* ZBC_GRAD_* */
+    uint16_t       gen;            /* which request this is; a command carries it */
+    uint16_t       transition_ds;
+    uint8_t        fixes_left;
+    uint8_t        resends_left;
+    uint8_t        reads_left;
+    bool           delivered;      /* the frame carrying `want` reached the lamp */
+    int64_t        read_due_us;    /* 0: no read waiting */
+    uint32_t       stamp;          /* when it was last asked for, for eviction */
+    zbc_gradient_t want;
+    zbc_gradient_t reported;       /* while ZBC_GRAD_SHOWN */
+} zbc_grad_t;
+
+typedef enum {
+    ZBC_GRAD_DO_NOTHING = 0,
+    ZBC_GRAD_DO_SEND,              /* send `want` (again) */
+    ZBC_GRAD_DO_READ,              /* read the lamp's state attribute */
+} zbc_grad_do_t;
+
+static zbc_grad_t s_grad[ZBC_GRAD_SLOTS];
+static uint32_t   s_grad_stamp;
+static uint16_t   s_grad_gen;
+
+static zbc_grad_t *grad_find(uint16_t short_addr, uint8_t ep)
+{
+    for (int i = 0; i < ZBC_GRAD_SLOTS; i++) {
+        if (s_grad[i].short_addr == short_addr && s_grad[i].ep == ep && short_addr != 0) {
+            return &s_grad[i];
+        }
+    }
+    return NULL;
+}
+
+static void grad_free(zbc_grad_t *g)
+{
+    memset(g, 0, sizeof(*g));
+}
+
+/* The endpoint's slot, or one for it: a free one, else the one that matters
+ * least - a lamp that took none, then one already showing its gradient, then
+ * one still waiting - and among equals the one asked for longest ago. */
+static zbc_grad_t *grad_claim(uint16_t short_addr, uint8_t ep)
+{
+    zbc_grad_t *g = grad_find(short_addr, ep);
+    if (g) {
+        return g;
+    }
+    static const uint8_t rank[] = { [ZBC_GRAD_NONE] = 0, [ZBC_GRAD_NOT_TAKEN] = 1,
+                                    [ZBC_GRAD_SHOWN] = 2, [ZBC_GRAD_PENDING] = 3 };
+    for (int i = 0; i < ZBC_GRAD_SLOTS; i++) {
+        zbc_grad_t *c = &s_grad[i];
+        if (c->short_addr == 0) {
+            g = c;
+            break;
+        }
+        if (!g || rank[c->state] < rank[g->state] ||
+            (rank[c->state] == rank[g->state] && c->stamp < g->stamp)) {
+            g = c;
+        }
+    }
+    grad_free(g);
+    g->short_addr = short_addr;
+    g->ep         = ep;
+    return g;
+}
+
+/* A gradient was asked for. The caller sends it. */
+static void grad_begin(zbc_grad_t *g, const zbc_gradient_t *want, uint16_t transition_ds)
+{
+    g->state         = ZBC_GRAD_PENDING;
+    g->gen           = ++s_grad_gen;
+    g->transition_ds = transition_ds;
+    g->fixes_left    = ZBC_GRAD_FIXES;
+    g->resends_left  = ZBC_GRAD_RESENDS;
+    g->reads_left    = 0;
+    g->delivered     = false;
+    g->read_due_us   = 0;
+    g->stamp         = ++s_grad_stamp;
+    g->want          = *want;
+}
+
+/* The stack has finished with the frame carrying request `gen`: delivered, or
+ * given up on. */
+static zbc_grad_do_t grad_confirmed(zbc_grad_t *g, uint16_t gen, bool delivered, int64_t now)
+{
+    if (g->state != ZBC_GRAD_PENDING || g->gen != gen) {
+        return ZBC_GRAD_DO_NOTHING;      /* an older request's frame */
+    }
+    if (!delivered) {
+        if (g->resends_left == 0) {
+            return ZBC_GRAD_DO_NOTHING;  /* the lamp is not there; it stays wanted */
+        }
+        g->resends_left--;
+        return ZBC_GRAD_DO_SEND;
+    }
+    g->delivered   = true;
+    g->reads_left  = ZBC_GRAD_READS;
+    g->read_due_us = now + (int64_t)g->transition_ds * 100000LL + ZBC_GRAD_READ_MARGIN_US;
+    return ZBC_GRAD_DO_NOTHING;
+}
+
+/* Whether it is time to ask the lamp. */
+static zbc_grad_do_t grad_tick(zbc_grad_t *g, int64_t now)
+{
+    if (g->state != ZBC_GRAD_PENDING || !g->read_due_us || g->read_due_us > now) {
+        return ZBC_GRAD_DO_NOTHING;
+    }
+    if (g->reads_left == 0) {
+        g->read_due_us = 0;
+        return ZBC_GRAD_DO_NOTHING;
+    }
+    g->reads_left--;
+    g->read_due_us = g->reads_left ? now + ZBC_GRAD_READ_GAP_US : 0;
+    return ZBC_GRAD_DO_READ;
+}
+
+/* The lamp said what it is showing. `corrected` is set when that was not what
+ * it was sent and it is being sent again. A slot left at ZBC_GRAD_NONE is the
+ * caller's to free. */
+static zbc_grad_do_t grad_reported(zbc_grad_t *g, const zbc_hue_state_t *st, bool *corrected)
+{
+    const bool has = (st->flags & ZBC_HUE_F_COLORS) && st->gradient.n >= 2;
+    *corrected = false;
+    if (g->state != ZBC_GRAD_PENDING) {
+        /* Nothing is being waited for: this is the lamp's state as found, after
+         * a restart or changed by something else. */
+        if (has) {
+            g->reported = st->gradient;
+            g->state    = ZBC_GRAD_SHOWN;
+        } else if (g->state == ZBC_GRAD_SHOWN) {
+            g->state = ZBC_GRAD_NONE;
+        }
+        return ZBC_GRAD_DO_NOTHING;
+    }
+    if (!g->delivered) {
+        return ZBC_GRAD_DO_NOTHING;      /* from before the frame got there */
+    }
+    if (has && zbc_gradient_near(&g->want, &st->gradient, ZBC_GRAD_TOLERANCE)) {
+        g->reported    = st->gradient;
+        g->state       = ZBC_GRAD_SHOWN;
+        g->read_due_us = 0;
+        return ZBC_GRAD_DO_NOTHING;
+    }
+    if (g->fixes_left) {
+        g->fixes_left--;
+        g->delivered   = false;
+        g->read_due_us = 0;
+        *corrected     = true;
+        return ZBC_GRAD_DO_SEND;
+    }
+    /* It has been told three times. What it says is what it shows. */
+    if (has) {
+        g->reported = st->gradient;
+        g->state    = ZBC_GRAD_SHOWN;
+    } else {
+        g->state = ZBC_GRAD_NOT_TAKEN;
+    }
+    g->read_due_us = 0;
+    return ZBC_GRAD_DO_NOTHING;
+}
+
+/* The earliest read waiting, 0 for none. */
+static int64_t grad_next_due(void)
+{
+    int64_t due = 0;
+    for (int i = 0; i < ZBC_GRAD_SLOTS; i++) {
+        if (s_grad[i].short_addr && s_grad[i].read_due_us && (!due || s_grad[i].read_due_us < due)) {
+            due = s_grad[i].read_due_us;
+        }
+    }
+    return due;
+}
+
+/* The state attribute's value in a Read Attributes Response or a Report
+ * Attributes frame on cluster 0xFC03, as it arrives at APS: the ZCL header
+ * (frame control, the manufacturer code when its bit is set, sequence number,
+ * command), then the attribute's id, a status in a response, the type - an
+ * octet string - and its length and bytes. False for any other frame. */
+static bool grad_attr_frame(const uint8_t *asdu, size_t len, const uint8_t **val, size_t *vlen)
+{
+    if (!asdu || len < 3) {
+        return false;
+    }
+    const uint8_t fc  = asdu[0];
+    const size_t  hdr = (fc & 0x04) ? 5 : 3;
+    if ((fc & 0x03) != 0x00 || len < hdr) {
+        return false;                    /* cluster-specific, or too short */
+    }
+    const uint8_t cmd = asdu[hdr - 1];
+    size_t        at  = hdr;
+    if (cmd != 0x01 && cmd != 0x0A) {
+        return false;                    /* neither a read response nor a report */
+    }
+    if (len - at < 2 || (uint16_t)(asdu[at] | (asdu[at + 1] << 8)) != ZBC_HUE_ATTR_STATE) {
+        return false;
+    }
+    at += 2;
+    if (cmd == 0x01) {
+        if (len - at < 1 || asdu[at] != 0x00) {
+            return false;                /* the lamp has no such attribute */
+        }
+        at++;
+    }
+    if (len - at < 2 || asdu[at] != 0x41 || asdu[at + 1] == 0xFF) {
+        return false;                    /* not an octet string, or an invalid one */
+    }
+    const size_t n = asdu[at + 1];
+    at += 2;
+    if (len - at < n) {
+        return false;
+    }
+    *val  = &asdu[at];
+    *vlen = n;
+    return true;
+}
+/* >>> end host-test region: grad-check <<< */
+
+/* The table is written from the HTTP task, the work task and the Zigbee
+ * callbacks. A spinlock of its own, never held across a send, for the reason
+ * the gate's is. */
+static portMUX_TYPE       s_grad_mux = portMUX_INITIALIZER_UNLOCKED;
+static esp_timer_handle_t s_grad_timer;
+
+_Static_assert(ZBC_GRAD_NONE == (int)ZB_GRADIENT_NONE && ZBC_GRAD_PENDING == (int)ZB_GRADIENT_PENDING &&
+               ZBC_GRAD_SHOWN == (int)ZB_GRADIENT_SHOWN && ZBC_GRAD_NOT_TAKEN == (int)ZB_GRADIENT_NOT_TAKEN,
+               "the table's states and the ones handed out are the same numbers");
+
+static void grad_arm(void);
+static void grad_clear(uint16_t short_addr, uint8_t ep);
+static bool gate_inflight_cmd(uint16_t short_addr, uint8_t ep, zbc_cmd_t *out);
 
 static bool      no_off_effect(uint16_t short_addr, uint8_t ep);
 static void      mark_no_off_effect(uint16_t short_addr, uint8_t ep);
@@ -517,7 +797,7 @@ static void simple_desc_result(const ezb_zdo_simple_desc_req_result_t *result, v
      * endpoint; the On/Off binding is what makes the older one report. */
     uint16_t features = 0;
     bool     has_multistate = false, has_onoff = false, has_level = false, has_ota = false;
-    bool     has_scenes = false;
+    bool     has_scenes = false, has_hue_state = false;
     for (int i = 0; i < desc->app_input_cluster_count; i++) {
         switch (desc->app_cluster_list[i]) {
         case EZB_ZCL_CLUSTER_ID_ON_OFF:        features |= ZBC_FEAT_ONOFF; has_onoff = true; break;
@@ -528,8 +808,15 @@ static void simple_desc_result(const ezb_zdo_simple_desc_req_result_t *result, v
             features |= ZBC_FEAT_SWITCH; has_multistate = true; break;
         /* A Light Node's control endpoint: its wired buttons arrive here unbound. */
         case NODE_PROTO_CLUSTER: features |= ZBC_FEAT_SWITCH | ZBC_FEAT_NODE; break;
+        case ZBC_HUE_CLUSTER:    has_hue_state = true; break;
         default: break;
         }
+    }
+    /* Philips' state cluster beside Color Control: a lamp that may take a
+     * gradient. Ordinary Hue colour bulbs list it too; which it is shows when
+     * one is sent - see "gradients". */
+    if (has_hue_state && (features & ZBC_FEAT_COLOR_TEMP)) {
+        features |= ZBC_FEAT_GRADIENT;
     }
     /* Output clusters sit in the tail of the same array. A remote advertises
      * On/Off and Level there because it sends those commands; either direction
@@ -701,6 +988,7 @@ static void simple_desc_result(const ezb_zdo_simple_desc_req_result_t *result, v
         read_static_color_info(saddr, desc->ep_id);
     }
     read_light_state(saddr, desc->ep_id, features);
+    read_gradient_state(saddr, desc->ep_id, features);
     if (has_ota) {
         read_ota_client_info(saddr, desc->ep_id);
     }
@@ -1086,6 +1374,35 @@ static void read_light_state(uint16_t short_addr, uint8_t ep, uint16_t features)
     }
 
     read_color_state(short_addr, ep, features);
+}
+
+/* What a lamp that may take a gradient is showing: Philips' state attribute,
+ * which is manufacturer-specific. Asked when the lamp is interrogated, at the
+ * first pass after a restart, and after a gradient is sent - never with the
+ * settle reads, which no gradient moves. The answer is taken in at APS
+ * (grad_note_aps). */
+static void read_gradient_state(uint16_t short_addr, uint8_t ep, uint16_t features)
+{
+    if (!(features & ZBC_FEAT_GRADIENT) || !reach_admits(short_addr, false)) {
+        return;
+    }
+    uint16_t                attrs[] = { ZBC_HUE_ATTR_STATE };
+    ezb_zcl_read_attr_cmd_t cmd     = {
+        .cmd_ctrl = {
+            .dst_addr   = { .addr_mode = EZB_ADDR_MODE_SHORT, .u.short_addr = short_addr },
+            .dst_ep     = ep,
+            .src_ep     = ZBC_GATEWAY_EP_ID,
+            .cluster_id = ZBC_HUE_CLUSTER,
+            .manuf_code = ZBC_HUE_MANUF,
+            .fc         = { .manuf_specific = 1 },
+            .cnf_ctx    = { .cb = read_confirm_cb },
+        },
+        .payload = { .attr_number = 1, .attr_field = attrs },
+    };
+    ezb_err_t err = ezb_zcl_read_attr_cmd_req(&cmd);
+    if (err != EZB_ERR_NONE) {
+        ESP_LOGW(TAG, "Read of 0x%04x ep %d gradient refused by the stack (0x%04x)", short_addr, ep, err);
+    }
 }
 
 static const uint16_t ZBC_BINDABLE[] = {
@@ -3033,6 +3350,8 @@ static bool aps_feed_zcl(const ezb_apsde_data_ind_t *ind)
 static bool ent_note_aps(const ezb_apsde_data_ind_t *ind);
 #endif
 
+static bool grad_note_aps(const ezb_apsde_data_ind_t *ind);
+
 static bool aps_group_frame_handler(const ezb_apsde_data_ind_t *ind)
 {
     if (!ind || ind->status != 0 || ind->src_address.addr_mode != EZB_ADDR_MODE_SHORT || !ind->asdu) {
@@ -3045,6 +3364,12 @@ static bool aps_group_frame_handler(const ezb_apsde_data_ind_t *ind)
         return ent_note_aps(ind);
     }
 #endif
+
+    /* A lamp's answer about its gradient, on a cluster that is on no endpoint of
+     * ours either. */
+    if (ind->cluster_id == ZBC_HUE_CLUSTER && ind->dst_address.addr_mode != EZB_ADDR_MODE_GROUP) {
+        return grad_note_aps(ind);
+    }
 
     /* A Hue dimmer's button cluster. 0xFC00 is on no endpoint of ours and the
      * stack may not pass it up to the ZCL hook, so it is taken here like the
@@ -3648,6 +3973,7 @@ static void warn_if_channels_collide(void);
 static void channel_work(void);
 static void survey_work(void);
 static void settle_work(void);
+static void grad_work(void);
 
 /* ------------------------------------------------ the worker task
  *
@@ -3667,6 +3993,7 @@ static void settle_work(void);
 #define ZBC_WORK_ASK      (1u << 7)
 #define ZBC_WORK_CHANNEL  (1u << 8)
 #define ZBC_WORK_SURVEY   (1u << 9)
+#define ZBC_WORK_GRAD     (1u << 10)
 
 static TaskHandle_t s_work_task;
 
@@ -3686,6 +4013,7 @@ static void ota_recheck_timer_cb(void *arg) { (void)arg; work_post(ZBC_WORK_OTA)
 static void ota_wake_post(void) { work_post(ZBC_WORK_OTA_WAKE); }
 static void channel_timer_cb(void *arg) { (void)arg; work_post(ZBC_WORK_CHANNEL); }
 static void survey_timer_cb(void *arg) { (void)arg; work_post(ZBC_WORK_SURVEY); }
+static void grad_timer_cb(void *arg) { (void)arg; work_post(ZBC_WORK_GRAD); }
 
 /* A device heard from with no endpoints on record: a remote whose interrogation
  * missed because it had gone back to sleep. Having just sent something, it is
@@ -4173,6 +4501,7 @@ static void zb_work_task(void *arg)
         if (bits & ZBC_WORK_ASK)      { ask_work(); }
         if (bits & ZBC_WORK_CHANNEL)  { channel_work(); }
         if (bits & ZBC_WORK_SURVEY)   { survey_work(); }
+        if (bits & ZBC_WORK_GRAD)     { grad_work(); }
     }
 }
 
@@ -4211,6 +4540,8 @@ static void data_confirm_cb(ezb_af_user_cnf_t *cnf, void *user_ctx)
     /* Which of the endpoint's two intents this frame carried, asked before
      * gate_advance below puts the next frame in its place. */
     const bool was_color = gate_inflight_is_color(addr, ep);
+    zbc_cmd_t  was       = { .kind = ZBC_CMD_NONE };
+    gate_inflight_cmd(addr, ep, &was);
 
     reach_note(addr, cnf->status == 0);
     if (cnf->status != 0) {
@@ -4245,6 +4576,13 @@ static void data_confirm_cb(ezb_af_user_cnf_t *cnf, void *user_ctx)
     /* The stack has finished with this frame either way, so nothing of it can
      * still arrive: whatever was held back for this endpoint can go now. */
     const bool superseded = gate_advance(addr, ep);
+
+    /* A gradient's frame: its own table decides what follows - the read that
+     * checks it, or the frame again - and the settle slot knows nothing of it. */
+    if (was.kind == ZBC_CMD_GRADIENT) {
+        grad_confirm_locked(addr, ep, was.a, cnf->status == 0, superseded);
+        return;
+    }
 
     if (cnf->status == 0) {
         return;
@@ -5010,6 +5348,42 @@ static ezb_err_t send_cmd_now(uint16_t short_addr, uint8_t ep, const zbc_cmd_t *
         return ezb_zcl_color_control_move_to_color_cmd_req(&req);
     }
 
+    case ZBC_CMD_GRADIENT: {
+        /* The colours are the endpoint's, in s_grad; the command says which
+         * request it is. One that has been replaced or withdrawn since it was
+         * queued has nothing to send. */
+        zbc_gradient_t want;
+        bool           have = false;
+        portENTER_CRITICAL(&s_grad_mux);
+        const zbc_grad_t *g = grad_find(short_addr, ep);
+        if (g && g->gen == c->a && g->state == ZBC_GRAD_PENDING) {
+            want = g->want;
+            have = true;
+        }
+        portEXIT_CRITICAL(&s_grad_mux);
+        uint8_t      body[ZBC_HUE_GRADIENT_LEN_MAX];
+        const size_t len = have ? zbc_hue_gradient_encode(&want, zbc_hue_fade_from_ds(c->transition_ds),
+                                                          body, sizeof(body)) : 0;
+        if (len == 0) {
+            return EZB_ERR_INV_ARG;
+        }
+        const ezb_zcl_custom_cmd_t req = {
+            .cmd_ctrl = {
+                .dst_addr   = { .addr_mode = EZB_ADDR_MODE_SHORT, .u.short_addr = short_addr },
+                .dst_ep     = ep,
+                .src_ep     = ZBC_GATEWAY_EP_ID,
+                .cluster_id = ZBC_HUE_CLUSTER,
+                .manuf_code = ZBC_HUE_MANUF,
+                .fc         = { .manuf_specific = 1, .direction = 0, .dis_default_rsp = 1 },
+                .cnf_ctx    = { .cb = data_confirm_cb },
+            },
+            .cmd_id      = ZBC_HUE_CMD_STATE,
+            .data_length = (uint16_t)len,
+            .data        = body,
+        };
+        return ezb_zcl_custom_cmd_req(&req);
+    }
+
     default:
         return EZB_ERR_INV_ARG;
     }
@@ -5339,6 +5713,214 @@ static bool gate_inflight_is_color(uint16_t short_addr, uint8_t ep)
     }
     portEXIT_CRITICAL(&s_gate_mux);
     return color;
+}
+
+/* The command in flight to this endpoint. False when there is none. */
+static bool gate_inflight_cmd(uint16_t short_addr, uint8_t ep, zbc_cmd_t *out)
+{
+    bool have = false;
+    portENTER_CRITICAL(&s_gate_mux);
+    const int i = gate_find(short_addr, ep);
+    if (i >= 0 && s_gate[i].busy) {
+        *out = s_gate[i].inflight;
+        have = true;
+    }
+    portEXIT_CRITICAL(&s_gate_mux);
+    return have;
+}
+
+/* ------------------------------------------------- gradients: the radio */
+
+static void grad_arm(void)
+{
+    portENTER_CRITICAL(&s_grad_mux);
+    const int64_t due = grad_next_due();
+    portEXIT_CRITICAL(&s_grad_mux);
+    esp_timer_stop(s_grad_timer);
+    if (due) {
+        const int64_t in_us = due - esp_timer_get_time();
+        esp_timer_start_once(s_grad_timer, (uint64_t)(in_us < 1000 ? 1000 : in_us));
+    }
+}
+
+/* Sends the endpoint's gradient again, as request `gen`. Zigbee task. */
+static void grad_resend_locked(uint16_t short_addr, uint8_t ep, uint16_t gen, uint16_t transition_ds)
+{
+    const zbc_cmd_t c = { .kind = ZBC_CMD_GRADIENT, .a = gen, .transition_ds = transition_ds };
+    gate_send_locked(short_addr, ep, &c, ZBC_CH_COLOR);
+}
+
+/* From data_confirm_cb, for a gradient's frame. One that a newer command has
+ * taken the place of is not sent again: the newer one is on its way. */
+static void grad_confirm_locked(uint16_t short_addr, uint8_t ep, uint16_t gen, bool delivered, bool superseded)
+{
+    zbc_grad_do_t act = ZBC_GRAD_DO_NOTHING;
+    uint16_t      ds  = 0;
+    portENTER_CRITICAL(&s_grad_mux);
+    zbc_grad_t *g = grad_find(short_addr, ep);
+    if (g && (delivered || !superseded)) {
+        act = grad_confirmed(g, gen, delivered, esp_timer_get_time());
+        ds  = g->transition_ds;
+    }
+    portEXIT_CRITICAL(&s_grad_mux);
+    if (act == ZBC_GRAD_DO_SEND) {
+        ESP_LOGW(TAG, "Gradient for 0x%04x ep %d was not delivered - sending it again", short_addr, ep);
+        grad_resend_locked(short_addr, ep, gen, ds);
+    }
+    grad_arm();
+}
+
+/* A frame on cluster 0xFC03 from a lamp, at APS. Zigbee task. Consumed when it
+ * is the state attribute: nothing else here knows the cluster. */
+static bool grad_note_aps(const ezb_apsde_data_ind_t *ind)
+{
+    const uint8_t *val  = NULL;
+    size_t         vlen = 0;
+    if (!grad_attr_frame(ind->asdu, ind->asdu_length, &val, &vlen)) {
+        return false;
+    }
+    const uint16_t  addr = ind->src_address.u.short_addr;
+    const uint8_t   ep   = ind->src_endpoint;
+    zbc_hue_state_t st;
+    device_db_touch_by_short(addr);
+    if (!zbc_hue_state_decode(val, vlen, &st)) {
+        ESP_LOGW(TAG, "Device 0x%04x ep %d reported a state of %u byte(s) this build cannot read",
+                 addr, ep, (unsigned)vlen);
+        return true;
+    }
+
+    zbc_grad_do_t act = ZBC_GRAD_DO_NOTHING;
+    bool          corrected = false, changed = false;
+    uint16_t      gen = 0, ds = 0;
+    uint8_t       state = ZBC_GRAD_NONE;
+    const bool    has = (st.flags & ZBC_HUE_F_COLORS) && st.gradient.n >= 2;
+    portENTER_CRITICAL(&s_grad_mux);
+    /* A lamp found showing a gradient nobody here asked for gets a slot; one
+     * showing none needs none. */
+    zbc_grad_t *g = has ? grad_claim(addr, ep) : grad_find(addr, ep);
+    if (g) {
+        const uint8_t before = g->state;
+        act   = grad_reported(g, &st, &corrected);
+        state = g->state;
+        gen   = g->gen;
+        ds    = g->transition_ds;
+        changed = state != before || state == ZBC_GRAD_SHOWN;
+        if (state == ZBC_GRAD_NONE) {
+            grad_free(g);
+        }
+    }
+    portEXIT_CRITICAL(&s_grad_mux);
+
+    if (corrected) {
+        s_radio.corrections++;
+        ESP_LOGW(TAG, "Device 0x%04x ep %d is not showing the gradient it was sent - sending it again", addr, ep);
+    }
+    if (act == ZBC_GRAD_DO_SEND) {
+        grad_resend_locked(addr, ep, gen, ds);
+    } else if (state == ZBC_GRAD_NOT_TAKEN && changed) {
+        ESP_LOGW(TAG, "Device 0x%04x ep %d takes no gradient", addr, ep);
+    }
+    if (changed) {
+        zbc_state_bump();
+    }
+    grad_arm();
+    return true;
+}
+
+/* The reads that are due. Work task. */
+static void grad_work(void)
+{
+    esp_zigbee_lock_acquire(portMAX_DELAY);
+    const int64_t now = esp_timer_get_time();
+    for (int i = 0; i < ZBC_GRAD_SLOTS; i++) {
+        uint16_t addr = 0;
+        uint8_t  ep   = 0;
+        portENTER_CRITICAL(&s_grad_mux);
+        if (s_grad[i].short_addr && grad_tick(&s_grad[i], now) == ZBC_GRAD_DO_READ) {
+            addr = s_grad[i].short_addr;
+            ep   = s_grad[i].ep;
+        }
+        portEXIT_CRITICAL(&s_grad_mux);
+        if (addr) {
+            read_gradient_state(addr, ep, ZBC_FEAT_GRADIENT);
+        }
+    }
+    esp_zigbee_lock_release();
+    grad_arm();
+}
+
+/* The endpoint shows one colour again: a plain colour command went to it. */
+static void grad_clear(uint16_t short_addr, uint8_t ep)
+{
+    bool had = false;
+    portENTER_CRITICAL(&s_grad_mux);
+    zbc_grad_t *g = grad_find(short_addr, ep);
+    if (g) {
+        grad_free(g);
+        had = true;
+    }
+    portEXIT_CRITICAL(&s_grad_mux);
+    if (had) {
+        zbc_state_bump();
+        grad_arm();
+    }
+}
+
+esp_err_t zb_set_gradient(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, const zbc_gradient_t *g,
+                          uint16_t transition_ds)
+{
+    uint16_t short_addr, features;
+    ESP_RETURN_ON_ERROR(lookup_endpoint(ieee, ep, &short_addr, &features), TAG, "unknown endpoint");
+    if (!(features & ZBC_FEAT_GRADIENT)) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    if (!zbc_gradient_valid(g) || g->n < 2) {
+        return ESP_ERR_INVALID_ARG;      /* one colour is a colour command */
+    }
+
+    portENTER_CRITICAL(&s_grad_mux);
+    zbc_grad_t *slot = grad_claim(short_addr, ep);
+    grad_begin(slot, g, transition_ds);
+    const uint16_t gen = slot->gen;
+    portEXIT_CRITICAL(&s_grad_mux);
+
+    const zbc_cmd_t c   = { .kind = ZBC_CMD_GRADIENT, .a = gen, .transition_ds = transition_ds };
+    esp_err_t       err = gate_send(short_addr, ep, &c, ZBC_CH_COLOR);
+    if (err != ESP_OK) {
+        /* Nothing went out and nothing will: the lamp keeps what it shows. */
+        portENTER_CRITICAL(&s_grad_mux);
+        slot = grad_find(short_addr, ep);
+        if (slot && slot->gen == gen) {
+            grad_free(slot);
+        }
+        portEXIT_CRITICAL(&s_grad_mux);
+    }
+    zbc_state_bump();
+    ESP_LOGI(TAG, "Set a gradient of %d colours on 0x%04x ep %d (%s)", g->n, short_addr, ep, zb_err_name(err));
+    return err;
+}
+
+bool zb_gradient_get(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, zbc_gradient_t *out,
+                     zb_gradient_state_t *state)
+{
+    uint16_t short_addr;
+    if (!device_db_short_by_ieee(ieee, &short_addr)) {
+        return false;
+    }
+    bool have = false;
+    portENTER_CRITICAL(&s_grad_mux);
+    const zbc_grad_t *g = grad_find(short_addr, ep);
+    if (g && g->state != ZBC_GRAD_NONE) {
+        if (out) {
+            *out = g->state == ZBC_GRAD_SHOWN ? g->reported : g->want;
+        }
+        if (state) {
+            *state = (zb_gradient_state_t)g->state;
+        }
+        have = true;
+    }
+    portEXIT_CRITICAL(&s_grad_mux);
+    return have;
 }
 
 /* Says again what the settle slot last asked for, after a lamp reported
@@ -6244,6 +6826,9 @@ static void refresh_all_states(bool only_unknown)
             }
             esp_zigbee_lock_acquire(portMAX_DELAY);
             read_light_state(devices[i].short_addr, ep->ep, ep->features);
+            if (!only_unknown) {
+                read_gradient_state(devices[i].short_addr, ep->ep, ep->features);
+            }
             esp_zigbee_lock_release();
         }
     }
@@ -6693,8 +7278,8 @@ esp_err_t zb_level_stop(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep)
 #define ZBC_ENT_MODE_DEVICE   0x0B
 #define ZBC_ENT_BRI_MAX       2047
 #define ZBC_ENT_SMOOTH_MAX_US 2560000LL
-#define ZBC_ENT_GAMUT_X       0.7347f
-#define ZBC_ENT_GAMUT_Y       0.8264f
+#define ZBC_ENT_GAMUT_X       ZBC_HUE_GAMUT_X
+#define ZBC_ENT_GAMUT_Y       ZBC_HUE_GAMUT_Y
 
 static uint16_t ent_smoothing(int64_t interval_us)
 {
@@ -6707,22 +7292,11 @@ static uint16_t ent_smoothing(int64_t interval_us)
     return (uint16_t)(interval_us * 0x10000 / ZBC_ENT_SMOOTH_MAX_US);
 }
 
-static uint16_t ent_quant(float v, float max)
-{
-    if (!(v > 0.0f)) {
-        return 0;
-    }
-    const float q = v * 4095.0f / max;
-    return q >= 4095.0f ? 4095 : (uint16_t)q;
-}
-
+/* The colour's three bytes: gradient.h has the packing, which a gradient's
+ * colours share. */
 static void ent_quant_xy(float x, float y, uint8_t out[3])
 {
-    const uint16_t qx = ent_quant(x, ZBC_ENT_GAMUT_X);
-    const uint16_t qy = ent_quant(y, ZBC_ENT_GAMUT_Y);
-    out[0] = (uint8_t)(qx & 0xFF);
-    out[1] = (uint8_t)(((qx >> 8) & 0x0F) | ((qy & 0x0F) << 4));
-    out[2] = (uint8_t)(qy >> 4);
+    zbc_hue_pack_xy(x, y, out);
 }
 
 static void ent_pack_record(uint16_t addr, uint16_t bri, uint8_t mode, const uint8_t xy[3],
@@ -7093,6 +7667,7 @@ esp_err_t zb_set_color_temp(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, uint16
     const zbc_cmd_t c = { .kind = ZBC_CMD_CT, .a = mireds, .transition_ds = transition_ds };
     esp_err_t       err = gate_send(short_addr, ep, &c, ZBC_CH_COLOR);
     if (err == ESP_OK) {
+        grad_clear(short_addr, ep);
         /* The slot is the level command's too (ZBC_WANT_KEEP), and this call moves
          * its deadline to the end of *this* transition. A long colour transition -
          * Apple Home's Adaptive Lighting asks for half an hour - would push the
@@ -7142,6 +7717,7 @@ esp_err_t zb_set_color_hs(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, uint8_t 
 
     esp_err_t err = gate_send(short_addr, ep, &c, ZBC_CH_COLOR);
     if (err == ESP_OK) {
+        grad_clear(short_addr, ep);
         schedule_settle_read_ex(short_addr, ep, features, transition_ds, ZBC_WANT_KEEP, 0, &c);
     }
 
@@ -7177,6 +7753,7 @@ esp_err_t zb_set_color_xy(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, uint16_t
 
     esp_err_t err = gate_send(short_addr, ep, &c, ZBC_CH_COLOR);
     if (err == ESP_OK) {
+        grad_clear(short_addr, ep);
         /* The full feature mask, as zb_set_color_hs and zb_set_color_temp use -
          * not the reduced one the level and on/off paths pass. The point of this
          * read is to see the colour land. And ZBC_WANT_KEEP, because a curve
@@ -7232,6 +7809,9 @@ esp_err_t zb_remove_device(const uint8_t ieee[ZBC_IEEE_LEN])
         return device_db_remove(ieee);
     }
     const uint16_t short_addr = dev.short_addr;
+    for (int i = 0; i < dev.ep_count; i++) {
+        grad_clear(short_addr, dev.eps[i].ep);
+    }
     /* In the setup portal the stack was never initialised, and the lock below
      * asserts - DELETE /api/devices/{ieee} is reachable there without a key. The
      * leave request cannot go out, but the local removal still can. */
@@ -7499,6 +8079,7 @@ esp_err_t zb_coordinator_stop(void)
     esp_timer_stop(s_ota_recheck_timer);
     esp_timer_stop(s_channel_timer);
     esp_timer_stop(s_survey_timer);
+    esp_timer_stop(s_grad_timer);
     /* The stack's file table goes with it; the mapping stays with zb_ota. */
     s_ota_file = NULL;
     zb_ota_set_offered(false);
@@ -7512,6 +8093,12 @@ esp_err_t zb_coordinator_start(void)
         .name     = "zb_retry",
     };
     ESP_ERROR_CHECK(esp_timer_create(&retry_args, &s_retry_timer));
+
+    const esp_timer_create_args_t grad_args = {
+        .callback = grad_timer_cb,
+        .name     = "zb_grad",
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&grad_args, &s_grad_timer));
 
     const esp_timer_create_args_t settle_args = {
         .callback = settle_timer_cb,

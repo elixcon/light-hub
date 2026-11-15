@@ -51,11 +51,12 @@ TESTS    = test_framedup test_nodemode test_fallback test_nodezcl test_variant t
            test_unlock test_btnstep test_authkey test_switchpoint test_prewarm test_lightaddr test_cwww test_ramp test_updater test_convert \
            test_sun test_tz test_ntc test_alstate test_linkgap test_reach test_zbota test_fadein \
            test_mctl_gate test_mctl_disc test_clause test_parent test_crash test_ent test_stream test_wled \
-           test_config_backup test_idfver test_motion test_delayed test_bdbpool test_devrow
+           test_config_backup test_idfver test_motion test_delayed test_bdbpool test_devrow \
+           test_gradient test_huegrad test_strip
 REGIONS  = gate-types gate-body settle-types settle-body sweep zremote btnstep motion delayed levels matter slug \
            authkey switchpoint prewarm fadein lightaddr cwww ramp pchip updater-decide convert-plan alstate linkgap reach zota-wake \
            mctl-gate mctl-disc clause parent crash-scan ent-frame stream wled-parse cfg-plan idf-ver variant \
-           bdb-types bdb-table dev-types devrow
+           bdb-types bdb-table dev-types devrow grad-check strip ws-encode
 INCS     = $(REGIONS:%=%.inc)
 
 .PHONY: all clean FORCE
@@ -109,6 +110,9 @@ FROM_bdb-types    = ../main/button_db.h
 FROM_bdb-table    = ../main/button_db.c
 FROM_dev-types    = ../main/device_db.h
 FROM_devrow       = ../main/device_db.c
+FROM_grad-check   = $(SRC)
+FROM_strip        = $(SRC_LL)
+FROM_ws-encode    = ../main/led_strip_out.c
 
 # FORCE rather than a plain mtime dependency: make compares timestamps to the
 # second, so an edit and a re-run inside the same second leaves the extracted
@@ -226,8 +230,8 @@ test_alstate: test_alstate.c alstate.inc pchip.inc ../main/sun.c ../main/sun.h .
 test_crash: test_crash.c crash-scan.inc
 	@$(CC) $(CFLAGS) -o $@ $<
 
-test_ent:    test_ent.c    ent-frame.inc
-	@$(CC) $(CFLAGS) -o $@ $<
+test_ent:    test_ent.c    ent-frame.inc ../main/gradient.c ../main/gradient.h
+	@$(CC) $(CFLAGS) -o $@ $< ../main/gradient.c
 
 test_stream: test_stream.c stream.inc
 	@$(CC) $(CFLAGS) -o $@ $< -lm
@@ -247,6 +251,20 @@ test_zbota: test_zbota.c zota-wake.inc ../main/zb_ota_file.c ../main/zb_ota_file
 test_sun: test_sun.c ../main/sun.c ../main/sun.h
 	@$(CC) $(CFLAGS) -I../main -o $@ test_sun.c ../main/sun.c -lm
 
+# gradient.c is a leaf: a gradient, and Philips' format for one.
+test_gradient: test_gradient.c ../main/gradient.c ../main/gradient.h ../main/colorspace.c ../main/colorspace.h
+	@$(CC) $(CFLAGS) -I../main -o $@ test_gradient.c ../main/gradient.c ../main/colorspace.c -lm
+
+# A Hue gradient lamp made of gradient.c's decoder, against the coordinator's
+# decisions about one (region `grad-check`).
+test_huegrad: test_huegrad.c grad-check.inc ../main/gradient.c ../main/gradient.h
+	@$(CC) $(CFLAGS) -I../main -o $@ test_huegrad.c ../main/gradient.c
+
+# A strip of addressable LEDs, simulated: the frame local_lights.c renders
+# (region `strip`) through the pulses led_strip_out.c makes of it (`ws-encode`).
+test_strip: test_strip.c strip.inc ws-encode.inc cwww.inc pchip.inc ../main/light_math.h ../main/gradient.c ../main/colorspace.c
+	@$(CC) $(CFLAGS) -I../main -o $@ test_strip.c ../main/gradient.c ../main/colorspace.c -lm
+
 # tz.c too: the POSIX time zone rules the sunrise and sunset limits are read in.
 test_tz: test_tz.c ../main/tz.c ../main/tz.h
 	@$(CC) $(CFLAGS) -I../main -o $@ test_tz.c ../main/tz.c
@@ -263,8 +281,8 @@ test_nodemode: test_nodemode.c $(NODE_DIR)/node_mode.c $(NODE_DIR)/node_mode.h
 test_fallback: test_fallback.c $(NODE_DIR)/node_fallback.c $(NODE_DIR)/node_fallback.h ../main/node_proto.h
 	@$(CC) $(CFLAGS) -I$(NODE_DIR) -I../main -o $@ test_fallback.c $(NODE_DIR)/node_fallback.c
 
-test_nodezcl: test_nodezcl.c $(NODE_DIR)/node_zcl.c $(NODE_DIR)/node_zcl.h
-	@$(CC) $(CFLAGS) -I$(NODE_DIR) -o $@ test_nodezcl.c $(NODE_DIR)/node_zcl.c
+test_nodezcl: test_nodezcl.c $(NODE_DIR)/node_zcl.c $(NODE_DIR)/node_zcl.h grad-check.inc ../main/gradient.c ../main/gradient.h
+	@$(CC) $(CFLAGS) -I$(NODE_DIR) -I../main -o $@ test_nodezcl.c $(NODE_DIR)/node_zcl.c ../main/gradient.c
 
 test_ntc: test_ntc.c ../main/ntc.c ../main/ntc.h
 	@$(CC) $(CFLAGS) -I../main -o $@ test_ntc.c ../main/ntc.c -lm

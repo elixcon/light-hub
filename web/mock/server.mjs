@@ -51,17 +51,18 @@ function pairingNow() {
 /* A light on a pin: listed as a device under a made-up address, wired through /api/lights. */
 const wiredEp = () => ({ ep: 1, device_id: 0, features: ["onoff"], on: false, brightness_pct: null, kelvin: null, min_kelvin: null, max_kelvin: null, hue: null, sat: null, color_mode: null, curves: { level: false, chroma: false }, input_pct: null });
 const wired = (id, name, gpio) => refreshWired({ ieee: `0x025a42434c00${id.toString(16).padStart(4, "0")}`, short_addr: 0, name, manufacturer: "", model: "", online: false, last_seen_s_ago: 0, lqa: null,
-  source: "gpio", id, kind: "onoff", gpio, gpio_warm: null, active_low: false, power_on: "off", pwm_hz: 4882, pwm_phase: null, cold_kelvin: 6500, warm_kelvin: 2700, gpio_neutral: null, neutral_kelvin: 4000, mix: "constant", mix_curves: { cold: null, neutral: null, warm: null }, endpoints: [wiredEp()] });
+  source: "gpio", id, kind: "onoff", gpio, gpio_warm: null, active_low: false, power_on: "off", pwm_hz: 4882, pwm_phase: null, cold_kelvin: 6500, warm_kelvin: 2700, gpio_neutral: null, neutral_kelvin: 4000, mix: "constant", mix_curves: { cold: null, neutral: null, warm: null }, pixels: 30, order: "grb", rgbw: false, reversed: false, endpoints: [wiredEp()] });
 /* What http_server.c derives from the wiring: the model line and, for tunable white, the abilities. */
 function refreshWired(d) {
-  const e = d.endpoints[0], three = d.kind === "cwnwww", cwww = d.kind === "cwww" || three, dims = cwww || d.kind === "dim";
+  const e = d.endpoints[0], three = d.kind === "cwnwww", strip = d.kind === "strip", cwww = d.kind === "cwww" || three, dims = cwww || d.kind === "dim" || strip;
   d.online = d.gpio != null && (!cwww || d.gpio_warm != null) && (!three || d.gpio_neutral != null);
-  d.model = !d.online ? "" : three ? `GPIO ${d.gpio} + ${d.gpio_neutral} + ${d.gpio_warm}` : cwww ? `GPIO ${d.gpio} + ${d.gpio_warm}` : `GPIO ${d.gpio}`;
-  e.features = cwww ? ["onoff", "brightness", "color_temp"] : dims ? ["onoff", "brightness"] : ["onoff"];
-  e.min_kelvin = cwww ? d.warm_kelvin : null; e.max_kelvin = cwww ? d.cold_kelvin : null;
-  e.color_mode = cwww ? "color_temp" : null;
+  d.model = !d.online ? "" : strip ? `GPIO ${d.gpio}, ${d.pixels ?? 30} LEDs` : three ? `GPIO ${d.gpio} + ${d.gpio_neutral} + ${d.gpio_warm}` : cwww ? `GPIO ${d.gpio} + ${d.gpio_warm}` : `GPIO ${d.gpio}`;
+  e.features = strip ? ["onoff", "brightness", "color_temp", "color", "gradient"] : cwww ? ["onoff", "brightness", "color_temp"] : dims ? ["onoff", "brightness"] : ["onoff"];
+  e.min_kelvin = strip ? 2000 : cwww ? d.warm_kelvin : null; e.max_kelvin = strip ? 6500 : cwww ? d.cold_kelvin : null;
+  e.color_mode = strip ? e.color_mode ?? "color_temp" : cwww ? "color_temp" : null;
   e.brightness_pct = dims ? e.brightness_pct ?? 60 : null;
-  e.kelvin = cwww ? e.kelvin ?? 4000 : null;
+  e.kelvin = cwww || strip ? e.kelvin ?? 4000 : null;
+  if (strip) e.gradient ??= null; else delete e.gradient;
   return d;
 }
 /* What each device's OTA client said. The PAR16 and the Hue button run versions
@@ -101,6 +102,14 @@ devices.push({ ieee: "0x404ccafffe42c504", short_addr: 0xc5a2, name: "Porch node
     { ep: 1, device_id: 0x0102, features: ["onoff", "brightness", "color_temp"], on: false, brightness_pct: 40, kelvin: 3000, min_kelvin: 2700, max_kelvin: 6500, hue: null, sat: null, color_mode: "color_temp", curves: { level: false, chroma: false }, input_pct: null },
     { ep: 200, device_id: 0x0005, features: ["switch", "node"], on: null, brightness_pct: null, kelvin: null, min_kelvin: null, max_kelvin: null, hue: null, sat: null, color_mode: null, curves: { level: false, chroma: false }, input_pct: null, node_wifi: "off", node_ip: null },
   ] });
+devices.push(Object.assign(wired(5, "Counter LEDs", 5), { kind: "strip", pixels: 60 }));
+refreshWired(devices[devices.length - 1]);
+/* A Hue gradient strip, and an ordinary Hue bulb that lists the same cluster. */
+const hueEp = (extra) => ({ ep: 11, device_id: 0x010d, features: ["onoff", "brightness", "color_temp", "color", "gradient"], on: true, brightness_pct: 70, kelvin: 2700, min_kelvin: 2000, max_kelvin: 6500, hue: 30, sat: 60, color_mode: "color_temp", curves: { level: false, chroma: false }, input_pct: null, ...extra });
+devices.push({ ieee: "0x001788010c5d6e7f", short_addr: 0x5a11, name: "TV gradient strip", manufacturer: "Signify Netherlands B.V.", model: "LCX004", online: true, last_seen_s_ago: 4, lqa: 190,
+  endpoints: [hueEp({ gradient: { colors: [{ hue: 20, sat: 90 }, { hue: 300, sat: 70 }, { hue: 220, sat: 85 }], state: "shown" } })], ota: null });
+devices.push({ ieee: "0x001788010c5d6e80", short_addr: 0x5a12, name: "Reading lamp", manufacturer: "Signify Netherlands B.V.", model: "LCA001", online: true, last_seen_s_ago: 9, lqa: 170,
+  endpoints: [hueEp({ gradient: null, no_gradient: true })], ota: null });
 /* How a room offers Adaptive Lighting, and whether it runs; pct and offset_k are filled in by syncGroup. */
 const alOff = () => ({ expose: "off", active: false, reason: "off", pct: null, offset_k: null });
 const groups = [
@@ -314,8 +323,20 @@ http.createServer(async (req, res) => {
       const b = await body(req);
       if (p[5] === "onoff") e.on = b.state === "toggle" ? !e.on : b.state === "on";
       if (p[5] === "level") { e.on = true; if (e.curves.level) { e.input_pct = b.pct; e.brightness_pct = Math.round(b.pct * 0.6); } else e.brightness_pct = b.pct; }
-      if (p[5] === "color_temp") { e.kelvin = b.kelvin; e.color_mode = "color_temp"; }
-      if (p[5] === "color") { e.hue = b.hue; e.sat = b.sat; e.color_mode = "color"; }
+      if (p[5] === "color_temp") { e.kelvin = b.kelvin; e.color_mode = "color_temp"; if ("gradient" in e) e.gradient = null; }
+      if (p[5] === "color") { e.hue = b.hue; e.sat = b.sat; e.color_mode = "color"; if ("gradient" in e) e.gradient = null; }
+      if (p[5] === "gradient") {
+        /* As zb_coordinator.c has it: pending until the lamp is read back, then shown -
+         * or, for a lamp that only lists the cluster, not taken. One colour is a colour. */
+        if (!Array.isArray(b.colors) || b.colors.length < 1 || b.colors.length > 5) return json(res, 400, { error: "colors must be a list of 1 to 5 colours" });
+        if (!e.features.includes("gradient") && b.colors.length > 1) return json(res, 409, { error: "this light does not support that" });
+        e.hue = b.colors[0].hue; e.sat = b.colors[0].sat; e.color_mode = "color";
+        if (b.colors.length === 1) e.gradient = null;
+        else {
+          const g = e.gradient = { colors: b.colors, state: devices.find((x) => x.ieee === ieee)?.source === "gpio" ? "shown" : "pending" };
+          if (g.state === "pending") setTimeout(() => { if (e.gradient === g) g.state = e.no_gradient ? "not_taken" : "shown"; }, 1500);
+        }
+      }
       return json(res, 202, { ok: true });
     }
     if (m === "PATCH") { const d = devices.find((x) => x.ieee === ieee); const b = await body(req); if (d && b.name !== undefined) d.name = b.name; return json(res, 200, { ok: true }); }

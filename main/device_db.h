@@ -46,7 +46,7 @@ static inline bool zbc_short_known(uint16_t short_addr)
 #define ZBC_FEAT_COLOR_XY   (1u << 4)  /* colour, CIE xy only */
 #define ZBC_FEAT_ANY_COLOR  (ZBC_FEAT_COLOR_HS | ZBC_FEAT_COLOR_XY)
 /* This endpoint sends us button presses - a wireless remote, or a wall switch
- * with no lamp behind it. Bits 10..15 are still free; a bit is stored with the
+ * with no lamp behind it. Bits 11..15 are still free; a bit is stored with the
  * features word, where a new field of zbc_endpoint_t would need a place in the
  * stored record (device_db.c, dr_encode) as well. */
 #define ZBC_FEAT_SWITCH     (1u << 5)
@@ -69,6 +69,12 @@ static inline bool zbc_short_known(uint16_t short_addr)
 /* The control endpoint of a Light Node (node_proto.h): its wired buttons are this
  * endpoint's keys, and it can be asked to open Wi-Fi. From the cluster it lists. */
 #define ZBC_FEAT_NODE          (1u << 9)
+/* A lamp that may show a gradient - several colours along its length: Philips'
+ * state cluster (0xFC03) beside Color Control. A Hue gradient strip, a Light
+ * Node's LED strip, and every ordinary Hue colour bulb too, since no cluster
+ * list tells them apart; which it is shows when a gradient is sent
+ * (zb_coordinator.h, zb_set_gradient). A wired LED strip has it as well. */
+#define ZBC_FEAT_GRADIENT      (1u << 10)
 
 /* Attributes we track per endpoint, addressed by this enum so one setter serves
  * every ZCL attribute we care about. */

@@ -1,5 +1,6 @@
 #include "http_wired.h"
 
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -7,8 +8,10 @@
 
 #include "btn_gesture.h"
 #include "button_db.h"
+#include "colorspace.h"
 #include "curve_db.h"
 #include "http_util.h"
+#include "led_strip_out.h"
 #include "light_math.h"
 #include "local_lights.h"
 #include "ntc.h"
@@ -19,7 +22,9 @@ static const char *TAG = "http";
 
 /* zbc_light_boot_t, as the API spells it. */
 static const char *const LIGHT_BOOT_NAMES[ZBC_LIGHT_BOOT_COUNT] = { "off", "on", "last" };
-static const char *const LIGHT_KIND_NAMES[ZBC_LIGHT_KIND_COUNT] = { "onoff", "cwww", "dim", "cwnwww" };
+static const char *const LIGHT_KIND_NAMES[ZBC_LIGHT_KIND_COUNT] = { "onoff", "cwww", "dim", "cwnwww", "strip" };
+/* zbc_strip_order_t: the order a strip's pixels take their three colours in. */
+static const char *const STRIP_ORDER_NAMES[ZBC_STRIP_ORDER_COUNT] = { "grb", "rgb", "brg", "rbg", "gbr", "bgr" };
 static const char *const LIGHT_MIX_NAMES[ZBC_MIX_COUNT]         = { "constant", "full", "custom" };
 /* A light's mixing curves, by ZBC_CH_* as the API names them. */
 static const char *const LIGHT_CH_NAMES[ZBC_PWM_MAX_LIGHT_CH]  = { "cold", "neutral", "warm" };
@@ -81,8 +86,58 @@ void wired_light_to_json(cJSON *d, uint16_t light_id, const zbc_light_t *lp)
     for (int c = 0; curves && c < ZBC_PWM_MAX_LIGHT_CH; c++) {
         cJSON_AddItemToObject(curves, LIGHT_CH_NAMES[c], mix_curve_to_json(&light.curve[c]));
     }
+    /* An LED strip's pixels; kept, like the rest, while the light is another kind. */
+    cJSON_AddNumberToObject(d, "pixels", light.strip_pixels ? light.strip_pixels : ZBC_STRIP_PIXELS_DEFAULT);
+    cJSON_AddStringToObject(d, "order",
+                            STRIP_ORDER_NAMES[light.strip_order < ZBC_STRIP_ORDER_COUNT ? light.strip_order : 0]);
+    cJSON_AddBoolToObject(d, "rgbw", (light.strip_flags & ZBC_STRIP_F_RGBW) != 0);
+    cJSON_AddBoolToObject(d, "reversed", (light.strip_flags & ZBC_STRIP_F_REVERSED) != 0);
     /* Held off by the overheat protection; switching on is refused. */
     cJSON_AddBoolToObject(d, "held", local_lights_held());
+}
+
+const char *gradient_from_json(const cJSON *json, zbc_gradient_t *out)
+{
+    const cJSON *colors = cJSON_GetObjectItem(json, "colors");
+    const int    n      = cJSON_IsArray(colors) ? cJSON_GetArraySize(colors) : 0;
+    memset(out, 0, sizeof(*out));
+    if (n < 1 || n > ZBC_GRADIENT_MAX) {
+        return "colors must be a list of 1 to 5 colours";
+    }
+    for (int i = 0; i < n; i++) {
+        const cJSON *c   = cJSON_GetArrayItem(colors, i);
+        const cJSON *hue = cJSON_GetObjectItem(c, "hue");
+        const cJSON *sat = cJSON_GetObjectItem(c, "sat");
+        const cJSON *k   = cJSON_GetObjectItem(c, "kelvin");
+        float        x, y;
+        if (cJSON_IsNumber(k) && k->valueint >= 1000 && k->valueint <= 10000) {
+            zbc_kelvin_to_xy(k->valueint, &x, &y);
+        } else if (cJSON_IsNumber(hue) && cJSON_IsNumber(sat) && hue->valueint >= 0 && hue->valueint <= 360 &&
+                   sat->valueint >= 0 && sat->valueint <= 100) {
+            zbc_hs_to_xy(hue->valueint % 360, sat->valueint, &x, &y);
+        } else {
+            return "a colour is {\"hue\": 0-360, \"sat\": 0-100} or {\"kelvin\": 1000-10000}";
+        }
+        out->x[i] = (uint16_t)(x * 65535.0f);
+        out->y[i] = (uint16_t)(y * 65535.0f);
+    }
+    out->n = (uint8_t)n;
+    return NULL;
+}
+
+void gradient_to_json(cJSON *ep, const zbc_gradient_t *g, const char *state)
+{
+    cJSON *go     = cJSON_AddObjectToObject(ep, "gradient");
+    cJSON *colors = cJSON_AddArrayToObject(go, "colors");
+    for (int i = 0; i < g->n; i++) {
+        float h, sat;
+        zbc_xy_to_hs((float)g->x[i] / 65536.0f, (float)g->y[i] / 65536.0f, &h, &sat);
+        cJSON *c = cJSON_CreateObject();
+        cJSON_AddNumberToObject(c, "hue", (int)lroundf(h) % 360);
+        cJSON_AddNumberToObject(c, "sat", (int)lroundf(sat));
+        cJSON_AddItemToArray(colors, c);
+    }
+    cJSON_AddStringToObject(go, "state", state);
 }
 
 bool curve_from_json(const cJSON *obj, zbc_curve_t *out)
@@ -303,9 +358,56 @@ static const char *light_from_json(const cJSON *json, zbc_light_t *out, uint16_t
     if (kind) {
         const int i = name_index(LIGHT_KIND_NAMES, ZBC_LIGHT_KIND_COUNT, kind);
         if (i < 0) {
-            return "kind must be onoff, dim, cwww or cwnwww";
+            return "kind must be onoff, dim, cwww, cwnwww or strip";
         }
         out->kind = (uint8_t)i;
+    }
+
+    const cJSON *pixels = cJSON_GetObjectItem(json, "pixels");
+    if (pixels) {
+        if (!cJSON_IsNumber(pixels) || pixels->valueint < 1 || pixels->valueint > ZBC_STRIP_PIXELS_MAX) {
+            return "pixels must be 1-300";
+        }
+        out->strip_pixels = (uint16_t)pixels->valueint;
+    }
+    const cJSON *order = cJSON_GetObjectItem(json, "order");
+    if (order) {
+        const int i = name_index(STRIP_ORDER_NAMES, ZBC_STRIP_ORDER_COUNT, order);
+        if (i < 0) {
+            return "order must be grb, rgb, brg, rbg, gbr or bgr";
+        }
+        out->strip_order = (uint8_t)i;
+    }
+    const cJSON *rgbw = cJSON_GetObjectItem(json, "rgbw");
+    if (rgbw && !cJSON_IsBool(rgbw)) {
+        return "rgbw must be true or false";
+    }
+    const cJSON *reversed = cJSON_GetObjectItem(json, "reversed");
+    if (reversed && !cJSON_IsBool(reversed)) {
+        return "reversed must be true or false";
+    }
+    if (rgbw) {
+        out->strip_flags = (uint8_t)(cJSON_IsTrue(rgbw) ? out->strip_flags | ZBC_STRIP_F_RGBW
+                                                        : out->strip_flags & ~ZBC_STRIP_F_RGBW);
+    }
+    if (reversed) {
+        out->strip_flags = (uint8_t)(cJSON_IsTrue(reversed) ? out->strip_flags | ZBC_STRIP_F_REVERSED
+                                                            : out->strip_flags & ~ZBC_STRIP_F_REVERSED);
+    }
+    if (out->kind == ZBC_LIGHT_STRIP) {
+#if !CONFIG_ZBC_LED_STRIP
+        return "this firmware was built without LED strips";
+#endif
+        /* Each takes one of the chip's RMT transmit channels. */
+        zbc_light_t  all[CONFIG_ZBC_MAX_LIGHTS];
+        const size_t count = light_db_snapshot(all, CONFIG_ZBC_MAX_LIGHTS);
+        int          others = 0;
+        for (size_t i = 0; i < count; i++) {
+            others += all[i].id != id && all[i].kind == ZBC_LIGHT_STRIP;
+        }
+        if (others >= LED_STRIP_OUT_MAX) {
+            return "this chip drives two LED strips, and two lights are strips already";
+        }
     }
 
     const cJSON *warm = cJSON_GetObjectItem(json, "gpio_warm");

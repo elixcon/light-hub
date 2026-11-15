@@ -9,7 +9,7 @@ of its own, because the hub has them.
 
 | | |
 |---|---|
-| Lights | Up to 3 wired lights: on/off, dimmable, or tunable white with two or three channels. The same PWM code as a hub's [wired lights](wired-lights.md), and the same overheat hold |
+| Lights | Up to 3 wired lights: on/off, dimmable, tunable white with two or three channels, or an [LED strip](wired-lights.md#led-strips) (two of those at most). The same code as a hub's [wired lights](wired-lights.md), and the same overheat hold |
 | Buttons | Up to 8 wired buttons or switches. Each is a key on the hub's Remotes page, set up with the hub's rules |
 | Without the hub | A button can toggle one of the node's own lights while the hub cannot be reached |
 | Wi-Fi | Off in normal running. It comes on only to configure the node |
@@ -17,6 +17,10 @@ of its own, because the hub has them.
 
 A tunable white light fades up from dark as a filament does: warm at first, reaching its colour as it reaches its
 brightness. So one set cold last time does not start cold when it next comes on warm.
+
+An LED strip on a node is a colour lamp to the hub, and takes a [gradient](lighting.md#gradients) from it in the
+format a Hue gradient lamp takes one. The hub reads it back the same way, so the strip's page there says when the node
+shows it. The node's own page has the *Gradient* card too, for trying the strip while it is being set up.
 
 The limit of 3 lights is the hub's: it stores four endpoints per device, and the buttons take one.
 
@@ -129,6 +133,10 @@ From a node on a test board, under a hub on the same desk:
 - A quick double press on real switches: the hub heard the second press 117 and 207 ms after the first click.
 
 Open:
+
+- **LED strips and gradients have not run on a node.** The frames between hub and node are checked against each other
+  in the host tests (`test/test_nodezcl.c`). Whether the Zigbee stack hands a node the frames of Philips' cluster, and
+  acknowledges them, is first seen on a board.
 
 - **Slow and lost commands come and go, and the cause is not known.** Through a TS011F plug, 32 % of 40 on/off commands
   had their acknowledgement delayed by about 1.6 s in one run, which holds that endpoint's next command back. In about a

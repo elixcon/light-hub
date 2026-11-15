@@ -28,6 +28,10 @@ typedef struct {
     uint16_t reserved;
 } light_blob_header_t;
 
+/* The stored table is these structs end to end: a size that moves is a format
+ * that changed, and LIGHT_BLOB_VERSION with it. */
+_Static_assert(sizeof(zbc_light_t) == 100, "zbc_light_t is stored as it is: bump LIGHT_BLOB_VERSION");
+
 static void set_tunable_defaults(zbc_light_t *l)
 {
     l->gpio_warm    = -1;
@@ -291,6 +295,10 @@ static bool valid_light(const zbc_light_t *in)
     if (in->kind == ZBC_LIGHT_CNW && !(in->warm_k < in->neutral_k && in->neutral_k < in->cold_k)) {
         return false;
     }
+    if (in->strip_order >= ZBC_STRIP_ORDER_COUNT || in->strip_pixels > ZBC_STRIP_PIXELS_MAX ||
+        (in->strip_flags & ~ZBC_STRIP_F_KNOWN)) {
+        return false;
+    }
     return in->name[0] && in->kind < ZBC_LIGHT_KIND_COUNT && in->boot < ZBC_LIGHT_BOOT_COUNT &&
            in->gpio >= -1 && in->gpio_warm >= -1 && in->gpio_neutral >= -1 && in->mix < ZBC_MIX_COUNT &&
            in->pwm_hz >= ZBC_PWM_HZ_MIN && in->pwm_hz <= ZBC_PWM_HZ_MAX &&
@@ -312,6 +320,9 @@ esp_err_t light_db_set(uint16_t id, const zbc_light_t *in)
     *l        = *in;
     l->in_use = true;
     l->id     = id;                     /* the key is ours, not the caller's */
+    if (l->strip_pixels == 0) {
+        l->strip_pixels = ZBC_STRIP_PIXELS_DEFAULT;
+    }
     memset(l->reserved, 0, sizeof(l->reserved));
     esp_err_t err = ldb_save_locked();
     LDB_UNLOCK();
@@ -348,19 +359,27 @@ static void legacy_key(uint16_t id, char *out, size_t cap)
     snprintf(out, cap, "light%u", (unsigned)id);
 }
 
+static void gradient_key(uint16_t id, char *out, size_t cap)
+{
+    snprintf(out, cap, "lgrad%u", (unsigned)id);
+}
+
 static void erase_state_keys(nvs_handle_t nvs, uint16_t id)
 {
     char key[16];
     state_key(id, key, sizeof(key));
     nvs_erase_key(nvs, key);
+    gradient_key(id, key, sizeof(key));
+    nvs_erase_key(nvs, key);
     legacy_key(id, key, sizeof(key));
     nvs_erase_key(nvs, key);
 }
 
-/* lstate<id> or the older light<id>, of any light. */
+/* lstate<id>, lgrad<id> or the older light<id>, of any light. */
 bool light_db_is_state_key(const char *key)
 {
     const char *digits = strncmp(key, "lstate", 6) == 0 ? key + 6
+                         : strncmp(key, "lgrad", 5) == 0 ? key + 5
                          : strncmp(key, "light", 5) == 0 ? key + 5 : NULL;
     if (!digits || !*digits) {
         return false;
@@ -517,6 +536,54 @@ void light_db_save_state(uint16_t id, const zbc_light_state_t *st)
     if (nvs_set_blob(nvs, key, st, sizeof(*st)) == ESP_OK) {
         legacy_key(id, key, sizeof(key));
         nvs_erase_key(nvs, key);        /* read once as a fallback, then gone */
+        nvs_commit(nvs);
+    }
+    nvs_close(nvs);
+}
+
+bool light_db_load_gradient(uint16_t id, zbc_gradient_t *out)
+{
+    nvs_handle_t nvs;
+    if (nvs_open(LIGHT_NVS_NAMESPACE, NVS_READONLY, &nvs) != ESP_OK) {
+        return false;
+    }
+    char           key[16];
+    zbc_gradient_t g;
+    size_t         size = sizeof(g);
+    gradient_key(id, key, sizeof(key));
+    const bool found = nvs_get_blob(nvs, key, &g, &size) == ESP_OK && size == sizeof(g) &&
+                       zbc_gradient_valid(&g);
+    nvs_close(nvs);
+    if (found) {
+        *out = g;
+    }
+    return found;
+}
+
+void light_db_save_gradient(uint16_t id, const zbc_gradient_t *g)
+{
+    const bool     none = !zbc_gradient_valid(g);
+    zbc_gradient_t now, want;
+    const bool     had = light_db_load_gradient(id, &now);
+    /* Field by field into a zeroed one: the bytes between the fields are
+     * stored and compared too. */
+    memset(&want, 0, sizeof(want));
+    for (int i = 0; !none && i < g->n; i++) {
+        want.x[i] = g->x[i];
+        want.y[i] = g->y[i];
+    }
+    want.n = none ? 0 : g->n;
+    g      = &want;
+    if (none ? !had : (had && zbc_gradient_near(&now, g, 0))) {
+        return;                         /* as stored: no flash entry spent */
+    }
+    nvs_handle_t nvs;
+    if (nvs_open(LIGHT_NVS_NAMESPACE, NVS_READWRITE, &nvs) != ESP_OK) {
+        return;
+    }
+    char key[16];
+    gradient_key(id, key, sizeof(key));
+    if ((none ? nvs_erase_key(nvs, key) : nvs_set_blob(nvs, key, g, sizeof(*g))) == ESP_OK) {
         nvs_commit(nvs);
     }
     nvs_close(nvs);
