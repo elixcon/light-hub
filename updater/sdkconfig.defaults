@@ -49,6 +49,9 @@ CONFIG_ESP_PHY_RF_CAL_FULL=y
 CONFIG_LWIP_DHCP_DOES_NOT_CHECK_OFFERED_IP=y
 CONFIG_LWIP_LOCAL_HOSTNAME="zigbee"
 
+# The hardware stack guard is off for its false alarms, as in the coordinator.
+CONFIG_ESP_SYSTEM_HW_STACK_GUARD=n
+
 # Cookies and a multipart Content-Type do not fit the default header limit.
 CONFIG_HTTPD_MAX_URI_LEN=256
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024

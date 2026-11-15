@@ -217,8 +217,9 @@ menu "Elixcon Light Hub"
         help
             Lets POST /api/restart take {"crash": "abort"}, {"crash": "fault"} or
             {"crash": "stack"}: half a second later a task of its own calls
-            abort(), reads an unmapped address or overruns its stack (the
-            hardware stack guard's fault), and the next boot shows what
+            abort(), reads an unmapped address or overruns its stack (FreeRTOS's
+            abort, or the hardware stack guard's fault in a build that has
+            it), and the next boot shows what
             crash_log.c recorded as `last_crash` in /api/status. Refused while
             the image is on trial, which a crash would roll back. For a test
             build only.

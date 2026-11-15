@@ -3388,6 +3388,7 @@ static esp_err_t zigbee_scan_get(httpd_req_t *req)
 #if CONFIG_ZBC_CRASH_TEST
 enum { CRASH_FAULT, CRASH_ABORT, CRASH_STACK };
 
+#if CONFIG_ESP_SYSTEM_HW_STACK_GUARD
 /* One frame deeper than the crash task's whole stack: the hardware stack guard's
  * fault, with sp below the bounds it records. The byte written is the frame's
  * top one, still on the task's stack, in case the guard's interrupt is taken a
@@ -3397,6 +3398,20 @@ static void __attribute__((noinline)) crash_overflow(void)
     volatile uint8_t big[4096];
     big[sizeof(big) - 1] = 1;
 }
+#else
+/* Without the guard (sdkconfig.defaults) an overrun is found by FreeRTOS, which
+ * checks the lowest bytes of a task's stack when it switches away from it. So
+ * this spoils those bytes, which nothing else uses, and yields: an abort naming
+ * the task, and no other memory touched. */
+static void crash_overflow(void)
+{
+    volatile uint8_t *low = (volatile uint8_t *)xTaskGetStackStart(NULL);
+    for (int i = 0; i < 16; i++) {
+        low[i] = 0;
+    }
+    vTaskDelay(1);
+}
+#endif
 
 /* The crash CONFIG_ZBC_CRASH_TEST offers, in a task of its own so the answer gets
  * out first and the record names a task that is not the web server. */

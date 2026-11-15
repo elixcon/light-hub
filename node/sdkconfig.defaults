@@ -41,6 +41,9 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=5120
 CONFIG_FREERTOS_HZ=1000
 CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
 
+# Off for its false alarms, as on the hub.
+CONFIG_ESP_SYSTEM_HW_STACK_GUARD=n
+
 # Three lights and the control endpoint: the hub stores four endpoints a device.
 CONFIG_ZBC_MAX_LIGHTS=3
 CONFIG_ZBC_MAX_BUTTONS=8
