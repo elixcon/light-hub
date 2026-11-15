@@ -150,7 +150,7 @@
 			</div>
 			<div>
 				<Label for="gadaptive" class="mb-2 block">Adaptive Lighting</Label>
-				<select id="gadaptive" class="sel" bind:value={expose}>
+				<select id="gadaptive" class="sel w-full" bind:value={expose}>
 					<option value="off">Off</option>
 					<option value="mode_select">Mode Select (Matter standard)</option>
 					<option value="endpoint">Second light (for Apple Home)</option>
@@ -160,7 +160,7 @@
 			</div>
 			<div>
 				<Label for="gturnon" class="mb-2 block">Turned on by Alexa or a Home app</Label>
-				<select id="gturnon" class="sel" bind:value={turnOn}>
+				<select id="gturnon" class="sel w-full" bind:value={turnOn}>
 					<option value="last">As it was</option>
 					<option value="adaptive" disabled={expose === "off" && turnOn !== "adaptive"}>Adaptive Lighting</option>
 					<option value="full">Full brightness</option>
@@ -177,8 +177,3 @@
 		<AdaptiveDayEditor groupId={g.id} />
 	{/if}
 {/if}
-
-<style>
-	.sel { height: 2.5rem; width: 100%; border-radius: var(--radius-md); border: 1px solid var(--input); background: var(--card);
-		color: var(--foreground); padding: 0 .6rem; font-size: .875rem; }
-</style>

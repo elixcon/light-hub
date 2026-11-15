@@ -1,6 +1,7 @@
 <script lang="ts">
 	import OtaProgress from "$lib/components/OtaProgress.svelte";
 	import * as Card from "$lib/components/ui/card";
+	import ListHeading from "$lib/components/ListHeading.svelte";
 	import { Button } from "$lib/components/ui/button";
 	import { Input } from "$lib/components/ui/input";
 	import { Label } from "$lib/components/ui/label";
@@ -216,7 +217,34 @@
 	}
 </script>
 
-<h2 class="mt-5 text-lg font-semibold">Settings</h2>
+<!-- What this coordinator is and how it is reached, then how the lights behave,
+     then the radio and the board, then upkeep, and what cannot be undone last. -->
+<ListHeading title="Settings" />
+
+<Card.Root class="mt-4">
+	<Card.Header><Card.Title>Coordinator</Card.Title></Card.Header>
+	<Card.Content class="flex flex-col gap-4">
+		<div>
+			<Label for="cname" class="mb-2 block">Name</Label>
+			<Input id="cname" bind:value={name} maxlength={maxLen} autocomplete="off" onchange={saveName}
+				onkeydown={(ev) => { if (ev.key === "Enter") (ev.currentTarget as HTMLInputElement).blur(); }} />
+			<div class="text-muted-foreground mt-2 text-xs">Reachable at http://{hostname}.local</div>
+			<div class="text-muted-foreground mt-1 text-xs">What this coordinator calls itself — on the network, and to Matter controllers. The address follows the name, so changing it restarts the coordinator. Clear the field to go back to the default.</div>
+		</div>
+		<div class="flex flex-col divide-y">
+			<a href="#/settings/wifi" class="link"><span>Wi-Fi</span><ChevronRight class="text-muted-foreground size-4" /></a>
+			<a href="#/settings/access" class="link"><span>Access</span><ChevronRight class="text-muted-foreground size-4" /></a>
+			<a href="#/settings/matter" class="link"><span>Matter</span><ChevronRight class="text-muted-foreground size-4" /></a>
+		</div>
+		<div class="text-muted-foreground text-xs">
+			{#if s}
+				Firmware {s.version}{s.ota?.updater ? ` · updater ${s.ota.updater}` : ""} · up {Math.floor(s.uptime_s / 60)} min<br>
+				Coordinator {s.zigbee.ieee}
+				{#if s.ota?.pending_verify}<br>This firmware is still on trial — it is confirmed once the coordinator is back on Wi-Fi.{/if}
+			{/if}
+		</div>
+	</Card.Content>
+</Card.Root>
 
 <Card.Root class="mt-4">
 	<Card.Header><Card.Title>Lights</Card.Title></Card.Header>
@@ -234,6 +262,8 @@
 		<div class="text-muted-foreground text-xs">A light being switched off is dimmed right down, set to its warmest white and then switched off, so it comes back on warm in the evening instead of flashing cold. A light already at its warmest is left alone. Lights without a colour temperature are unaffected, and so is a light switched off at the wall.</div>
 	</Card.Content>
 </Card.Root>
+
+<AdaptiveCard cfg={adaptiveCfg} />
 
 {#if wledBuilt}
 <Card.Root class="mt-4">
@@ -273,6 +303,13 @@
 {/if}
 
 <Card.Root class="mt-4">
+	<Card.Header><Card.Title>Zigbee network</Card.Title></Card.Header>
+	<Card.Content class="flex flex-col gap-5">
+		<ZigbeeChannel />
+	</Card.Content>
+</Card.Root>
+
+<Card.Root class="mt-4">
 	<Card.Header>
 		<Card.Title>Overheat protection</Card.Title>
 		<Card.Description>For a board with a temperature sensor (NTC) beside its relay, like a converted Shelly. At the shutoff temperature — or when the sensor reads as broken — every wired light is switched off at once. They stay off until the board is 5 °C cooler and somebody switches them on again. Zigbee lamps are not affected.</Card.Description>
@@ -287,6 +324,9 @@
 			</select>
 			{#if thLine}<div class="mt-2 text-xs {ts?.state === 'ok' ? 'text-muted-foreground' : 'text-destructive'}">{thLine}</div>{/if}
 		</div>
+		{#if thPins.includes(3)}
+			<Button variant="outline" size="sm" class="self-start" onclick={() => saveThermal({ ...SHELLY })}>Use the Shelly Gen3/Gen4 sensor</Button>
+		{/if}
 		{#if th.gpio !== null}
 			<div class="grid grid-cols-2 gap-3">
 				<div>
@@ -294,12 +334,12 @@
 					<Input id="thtrip" type="number" min="40" max="120" value={th.trip_c} onchange={(e) => saveThermal({ trip_c: numberField(e.currentTarget.value) })} />
 				</div>
 				<div>
-					<Label for="thb" class="mb-2 block">B constant (K)</Label>
-					<Input id="thb" type="number" min="1000" max="10000" value={th.b} onchange={(e) => saveThermal({ b: numberField(e.currentTarget.value) })} />
-				</div>
-				<div>
 					<Label for="thr0" class="mb-2 block">NTC at 25 °C (Ω)</Label>
 					<Input id="thr0" type="number" min="100" max="1000000" value={th.r0_ohm} onchange={(e) => saveThermal({ r0_ohm: numberField(e.currentTarget.value) })} />
+				</div>
+				<div>
+					<Label for="thb" class="mb-2 block">B constant (K)</Label>
+					<Input id="thb" type="number" min="1000" max="10000" value={th.b} onchange={(e) => saveThermal({ b: numberField(e.currentTarget.value) })} />
 				</div>
 				<div>
 					<Label for="thrs" class="mb-2 block">Fixed resistor (Ω)</Label>
@@ -312,43 +352,6 @@
 				<label class="flex items-center gap-2"><input type="radio" name="thto" class="accent-primary" checked={th.ntc_to === "3v3"} onchange={() => saveThermal({ ntc_to: "3v3" })} /> 3V3, fixed resistor to GND — ESPHome "upstream"</label>
 			</fieldset>
 		{/if}
-		{#if thPins.includes(3)}
-			<Button variant="outline" size="sm" class="self-start" onclick={() => saveThermal({ ...SHELLY })}>Use the Shelly Gen3/Gen4 sensor</Button>
-		{/if}
-	</Card.Content>
-</Card.Root>
-
-<AdaptiveCard cfg={adaptiveCfg} />
-
-<Card.Root class="mt-4">
-	<Card.Header><Card.Title>Zigbee network</Card.Title></Card.Header>
-	<Card.Content class="flex flex-col gap-5">
-		<ZigbeeChannel />
-	</Card.Content>
-</Card.Root>
-
-<Card.Root class="mt-4">
-	<Card.Header><Card.Title>Coordinator</Card.Title></Card.Header>
-	<Card.Content class="flex flex-col gap-4">
-		<div>
-			<Label for="cname" class="mb-2 block">Name</Label>
-			<Input id="cname" bind:value={name} maxlength={maxLen} autocomplete="off" onchange={saveName}
-				onkeydown={(ev) => { if (ev.key === "Enter") (ev.currentTarget as HTMLInputElement).blur(); }} />
-			<div class="text-muted-foreground mt-2 text-xs">Reachable at http://{hostname}.local</div>
-			<div class="text-muted-foreground mt-1 text-xs">What this coordinator calls itself — on the network, and to Matter controllers. The address follows the name, so changing it restarts the coordinator. Clear the field to go back to the default.</div>
-		</div>
-		<div class="text-muted-foreground text-xs">
-			{#if s}
-				Firmware {s.version}{s.ota?.updater ? ` · updater ${s.ota.updater}` : ""} · up {Math.floor(s.uptime_s / 60)} min<br>
-				Coordinator {s.zigbee.ieee}
-				{#if s.ota?.pending_verify}<br>This firmware is still on trial — it is confirmed once the coordinator is back on Wi-Fi.{/if}
-			{/if}
-		</div>
-		<div class="flex flex-col divide-y">
-			<a href="#/settings/access" class="link"><span>Access</span><ChevronRight class="text-muted-foreground size-4" /></a>
-			<a href="#/settings/matter" class="link"><span>Matter</span><ChevronRight class="text-muted-foreground size-4" /></a>
-			<a href="#/settings/wifi" class="link"><span>Wi-Fi</span><ChevronRight class="text-muted-foreground size-4" /></a>
-		</div>
 	</Card.Content>
 </Card.Root>
 
@@ -460,8 +463,6 @@
 </Card.Root>
 
 <style>
-	.sel { height: 2.5rem; border-radius: var(--radius-md); border: 1px solid var(--input); background: var(--card);
-		color: var(--foreground); padding: 0 .6rem; font-size: .875rem; }
 	.link { display: flex; align-items: center; justify-content: space-between; padding: .7rem 0; font-size: .95rem; }
 	.link:hover { color: var(--primary); }
 	.warn { display: flex; gap: .6rem; padding: .7rem .9rem; border-radius: var(--radius); font-size: .8125rem;

@@ -1,12 +1,8 @@
 <script lang="ts">
-	import StatusChips from "$lib/components/StatusChips.svelte";
+	import PageHeader from "$lib/components/PageHeader.svelte";
 	import { app } from "$lib/state.svelte.ts";
 	import { hex4, plural } from "$lib/format.ts";
 
-	/* The chips lie on the aurora. In the dark theme a 10 % tint left teal-300
-	 * text at about 3:1 there, and ink at 80 % keeps both kinds above 4.5:1
-	 * where it is brightest. In the light theme teal-600 on its own 10 % tint
-	 * was 4.2:1 even on plain sand; on white it is 4.9:1. */
 	interface Chip { text: string; bad: boolean }
 	const chips = $derived.by((): Chip[] => {
 		const s = app.status;
@@ -23,7 +19,4 @@
 	});
 </script>
 
-<header class="pr-12 pt-[env(safe-area-inset-top)]">
-	<h1 class="text-2xl font-semibold tracking-tight">{app.name}</h1>
-	<StatusChips {chips} />
-</header>
+<PageHeader {chips} />

@@ -187,8 +187,3 @@
 		</Card.Content>
 	</Card.Root>
 {/if}
-
-<style>
-	.sel { height: 2.5rem; border-radius: var(--radius-md); border: 1px solid var(--input); background: var(--card);
-		color: var(--foreground); padding: 0 .6rem; font-size: .875rem; }
-</style>

@@ -40,7 +40,7 @@
 </script>
 
 <div class="flex flex-col gap-3">
-	<div class="bg-muted inline-flex self-start rounded-lg p-0.5" role="tablist">
+	<div class="bg-muted inline-flex self-start rounded-full p-0.5" role="tablist">
 		{#each channels as ch (ch)}
 			<button class="tab" role="tab" aria-selected={sel === ch} onclick={() => (sel = ch)}>{CHANNEL_NAMES[ch]}</button>
 		{/each}
@@ -65,8 +65,3 @@
 			the Hue's 2203–6536 K and stretched to this light's range.</div>
 	{/if}
 </div>
-
-<style>
-	.tab { padding: .4rem .9rem; border-radius: 6px; font-size: .85rem; font-weight: 500; color: var(--muted-foreground); }
-	.tab[aria-selected="true"] { background: var(--card); color: var(--foreground); box-shadow: var(--elev-1); }
-</style>

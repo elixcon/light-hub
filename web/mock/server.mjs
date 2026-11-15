@@ -3,13 +3,8 @@
 import http from "node:http";
 import { parseHhmm, sampleAt, usedDay } from "../src/lib/adaptive.ts";
 
+/* The first four are referred to by index below: add devices after them. */
 const devices = [
-  /* A Light Node: three lamps would be the same, and a control endpoint is what makes it one. */
-  { ieee: "0x404ccafffe42c504", short_addr: 0xc5a2, name: "Porch node", manufacturer: "Elixcon", model: "LightNode", source: "zigbee", online: true, last_seen_s_ago: 4, lqa: 140, rssi: -52, parent: null, child: false,
-    endpoints: [
-      { ep: 1, device_id: 0x0102, features: ["onoff", "brightness", "color_temp"], on: false, brightness_pct: 40, kelvin: 3000, min_kelvin: 2700, max_kelvin: 6500, hue: null, sat: null, color_mode: "color_temp", curves: { level: false, chroma: false }, input_pct: null },
-      { ep: 200, device_id: 0x0005, features: ["switch", "node"], on: null, brightness_pct: null, kelvin: null, min_kelvin: null, max_kelvin: null, hue: null, sat: null, color_mode: null, curves: { level: false, chroma: false }, input_pct: null, node_wifi: "off", node_ip: null },
-    ] },
   { ieee: "0x001788010bd6f2a1", short_addr: 0x046b, name: "Sofa strip", manufacturer: "Signify Netherlands B.V.", model: "LST002", online: true, last_seen_s_ago: 4, lqa: 114,
     endpoints: [{ ep: 11, device_id: 0x0210, features: ["onoff", "brightness", "color_temp", "color"], on: true, brightness_pct: 61, kelvin: 2700, min_kelvin: 2000, max_kelvin: 6500, hue: 30, sat: 60, color_mode: "color_temp", curves: { level: true, chroma: true }, input_pct: 40 }] },
   { ieee: "0x7cb03eaa0a0c5e12", short_addr: 0xa2b4, name: "Desk spot", manufacturer: "OSRAM", model: "PAR16 50 TW", online: true, last_seen_s_ago: 9, lqa: 98,
@@ -100,6 +95,12 @@ devices.push(Object.assign(wired(3, "Shelf strip", 20), { kind: "dim", pwm_hz: 4
 refreshWired(devices[devices.length - 1]);
 devices.push(Object.assign(wired(4, "Ceiling panel", 21), { kind: "cwnwww", gpio_neutral: 22, gpio_warm: 23, pwm_hz: 4882, pwm_phase: 0 }));
 refreshWired(devices[devices.length - 1]);
+/* A Light Node: three lamps would be the same, and a control endpoint is what makes it one. */
+devices.push({ ieee: "0x404ccafffe42c504", short_addr: 0xc5a2, name: "Porch node", manufacturer: "Elixcon", model: "LightNode", source: "zigbee", online: true, last_seen_s_ago: 4, lqa: 140, rssi: -52, parent: null, child: false,
+  endpoints: [
+    { ep: 1, device_id: 0x0102, features: ["onoff", "brightness", "color_temp"], on: false, brightness_pct: 40, kelvin: 3000, min_kelvin: 2700, max_kelvin: 6500, hue: null, sat: null, color_mode: "color_temp", curves: { level: false, chroma: false }, input_pct: null },
+    { ep: 200, device_id: 0x0005, features: ["switch", "node"], on: null, brightness_pct: null, kelvin: null, min_kelvin: null, max_kelvin: null, hue: null, sat: null, color_mode: null, curves: { level: false, chroma: false }, input_pct: null, node_wifi: "off", node_ip: null },
+  ] });
 /* How a room offers Adaptive Lighting, and whether it runs; pct and offset_k are filled in by syncGroup. */
 const alOff = () => ({ expose: "off", active: false, reason: "off", pct: null, offset_k: null });
 const groups = [
@@ -183,7 +184,7 @@ const surveyNow = () => {
       { channel: 20, pan_id: 21086, ext_pan_id: "0x98a316fffe717cfc", permit_join: false }] : [] };
 };
 const status = () => ({ name: "Living Room Hub", wifi: { mode: wifiMode, connected: true, ssid: "elixcon", ip: "192.168.1.42", hostname: "living-room-hub", rssi: -61, channel: 6, weak_uplink: false, temporary_hotspot: false },
-  zigbee: { network_up: true, pan_id: 0x5fb3, channel: (moveNow(), zbChannel), channel_move: moveNow(), permit_join_remaining_s: Math.max(0, Math.round((permit - Date.now()) / 1000)), ieee: "0x404ccafffe5a1b2c", radio: { cmd_undelivered: 0, read_undelivered: 1, went_quiet: 0, corrections: 0, gate_timeouts: 0 }, ota: zotaStatus() },
+  zigbee: { network_up: true, pan_id: 0x5fb3, channel: (moveNow(), zbChannel), channel_move: moveNow(), permit_join_remaining_s: Math.max(0, Math.round((permit - Date.now()) / 1000)), ieee: "0x404ccafffe5a1b2c", radio: { cmd_undelivered: 0, read_undelivered: 1, cmd_retried_later: 0, went_quiet: 0, corrections: 0, gate_timeouts: 0 }, ota: zotaStatus() },
   device_count: devices.length, uptime_s: Math.round((Date.now() - boot) / 1000) + 5000, version: "mock-1", build: "deadbeef", ota: { partition: "app", pending_verify: false, updater: "mock-updater-1", updater_valid: true, updater_problem: null, layout: zota.layout }, heap: { free: 120000, min_free: 84000, largest: 82000 },
   thermal: thermalCfg.gpio === null ? { state: "off", temp_c: null, max_c: null, trip_c: thermalCfg.trip_c, release_c: thermalCfg.trip_c - 5, trips: 0, mv: -1, held: false }
     : { state: 41.3 >= thermalCfg.trip_c ? "hot" : "ok", temp_c: 41.3, max_c: 52, trip_c: thermalCfg.trip_c, release_c: thermalCfg.trip_c - 5, trips: 0, mv: 1120, held: 41.3 >= thermalCfg.trip_c } });

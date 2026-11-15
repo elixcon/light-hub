@@ -1,0 +1,98 @@
+/* The cards that light up: a lamp's or a room's (`.lamp`), filled with its
+ * light's colour, and a remote's button while it is pressed (`.glow`). Imported
+ * by the hub's main.ts, after app.css, so the Light Node's page does not carry
+ * it. */
+
+/* Registered so a lamp card's colour can transition: a gradient does not. Not
+ * inherited, and set only on the card's ::before from the card's plain
+ * `--lamp-top` / `--lamp-bottom`: the frames of a colour change restyle that
+ * one layer, not every element on the card. */
+@property --lamp-a { syntax: "<color>"; inherits: false; initial-value: transparent; }
+@property --lamp-b { syntax: "<color>"; inherits: false; initial-value: transparent; }
+
+/* An unlit lamp's card, through which the room shows, and the amber a pressed
+ * remote button's card holds. */
+:root { --tile: rgb(255 255 255 / .5); --glow: #ffe3ae; }
+@media (prefers-color-scheme: dark) {
+  :root { --tile: rgb(20 18 15 / .55); --glow: #4a3305; }
+}
+
+@layer components {
+  /* What a lit card holds is a pseudo-element faded in over the card,
+   * because a gradient does not animate and an opacity does. Only `data-lit`
+   * shows it, so a lamp whose state is unknown stays plain. */
+  :is(.glow, .lamp) { position: relative; isolation: isolate; }
+  :is(.glow, .lamp)::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    opacity: 0;
+  }
+  :is(.glow, .lamp)[data-lit]::before { opacity: 1; }
+
+  /* A pressed remote button's card: a glow of amber in its corner. */
+  .glow::before {
+    background: radial-gradient(130% 150% at 0% 0%, var(--glow) 15%, transparent 75%);
+    transition: opacity .4s ease;
+  }
+
+  /* An unlit lamp's card is recessed into the room, a lit one stands out of
+   * it. Through the card's own `--card-bg`: its background is a utility and
+   * would win over one set here, and `--card` is also what a select or an
+   * outline button on the card would read. */
+  .lamp { --card-bg: var(--tile); }
+
+  /* A lit lamp's card is filled with the light's colour, `--lamp-top` to
+   * `--lamp-bottom` from lib/glow.ts (`lampAttrs`). The card's own colours are
+   * redefined for what sits on the colour - text, its grey, the slider's track
+   * and fill, the switch, outlines, focus, a badge - in black or white ink by
+   * `data-ink`; lib/glow.ts has chosen the ink and moved the colour so that
+   * the grey reads at 4.5:1. The two inks and the grey's opacity are INK and
+   * MUTED there. */
+  .lamp::before {
+    --lamp-a: var(--lamp-top);
+    --lamp-b: var(--lamp-bottom);
+    background: linear-gradient(to bottom, var(--lamp-a), var(--lamp-b));
+    transition: opacity .4s ease, --lamp-a .4s ease, --lamp-b .4s ease;
+  }
+  /* The ink changes halfway through the fade, not at once: switched on, black
+   * text would sit on the dark card while the colour fades in; switched off,
+   * on a colour fading out. Unregistered custom properties animate discretely,
+   * flipping at the midpoint, given allow-discrete. On the card's content,
+   * which reads them, because the card itself redefines them at once. */
+  .lamp > * {
+    color: var(--card-foreground);
+    transition-property: --foreground, --card-foreground, --muted-foreground, --primary, --primary-foreground,
+      --muted, --border, --on, --ring, --level-fill;
+    transition-duration: .4s;
+    transition-behavior: allow-discrete;
+  }
+  .lamp[data-lit] { --level-fill: rgb(255 255 255 / .55); }
+  .lamp[data-lit][data-ink="dark"] {
+    --foreground: #1c1b17;
+    --card-foreground: #1c1b17;
+    --muted-foreground: rgb(28 27 23 / .72);
+    --primary: #1c1b17;
+    --primary-foreground: #ffffff;
+    --muted: rgb(0 0 0 / .16);        /* the slider's track, a ghost button's hover */
+    --border: rgb(0 0 0 / .14);
+    --on: rgb(0 0 0 / .28);           /* the switch's track */
+    --ring: #1c1b17;
+  }
+  .lamp[data-lit][data-ink="light"] {
+    --foreground: #ffffff;
+    --card-foreground: #ffffff;
+    --muted-foreground: rgb(255 255 255 / .8);
+    --primary: #ffffff;
+    --primary-foreground: #1c1b17;
+    --muted: rgb(255 255 255 / .2);
+    --border: rgb(255 255 255 / .25);
+    --on: rgb(255 255 255 / .35);
+    --ring: #ffffff;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .glow::before, .lamp::before, .lamp > * { transition: none; }
+  }
+}

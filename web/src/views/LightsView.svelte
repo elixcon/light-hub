@@ -3,9 +3,8 @@
 	import { Button } from "$lib/components/ui/button";
 	import { Badge } from "$lib/components/ui/badge";
 	import Pencil from "@lucide/svelte/icons/pencil";
-	import ChevronRight from "@lucide/svelte/icons/chevron-right";
 	import PowerSwitch from "$lib/components/PowerSwitch.svelte";
-	import CreateByName from "$lib/components/CreateByName.svelte";
+	import ListHeading from "$lib/components/ListHeading.svelte";
 	import LevelSlider from "$lib/components/LevelSlider.svelte";
 	import MatterPairDialog from "$lib/components/MatterPairDialog.svelte";
 	import { app, data, pending, key, value, epPct, isRemoteEp, setOnOff, setLevel, seenIeee, openPairing } from "$lib/state.svelte.ts";
@@ -27,31 +26,22 @@
 		.filter((d, i) => d.endpoints.length || !data.devices[i].endpoints.length));
 </script>
 
-<!-- Three ways a light arrives, behind one button: side by side they wrapped
-     into two rows beside the heading on a phone, and only the empty page said
+<!-- Three ways a light arrives, behind the one button, each with a line on
      which one is for what. -->
-<CreateByName title="Lights" addLabel="Add a light" placeholder="Name this light" path="/api/lights" route="/lights"
-	to={(l) => `/lights/${l.ieee}/${l.ep}`}>
-	{#snippet choices({ name, close })}
-		<button class="choice" disabled={app.pairing} onclick={() => { close(); openPairing(); }}>
-			<span><b>Pair a light</b><small>A Zigbee bulb, plug or relay, put into pairing mode.</small></span><ChevronRight />
-		</button>
-		<button class="choice" onclick={() => { close(); matterOpen = true; }}>
-			<span><b>Add a Matter lamp</b><small>A lamp you already have in Apple Home or another app.</small></span><ChevronRight />
-		</button>
-		<button class="choice" onclick={name}>
-			<span><b>Add a wired light</b><small>A lamp or relay wired to a pin of this board.</small></span><ChevronRight />
-		</button>
-	{/snippet}
-</CreateByName>
+<ListHeading title="Lights" items={[
+	{ title: "Pair a light", text: "A Zigbee bulb, plug or relay, put into pairing mode.", disabled: app.pairing, run: openPairing },
+	{ title: "Add a Matter lamp", text: "A lamp you already have in Apple Home or another app.", run: () => { matterOpen = true; } },
+	{ title: "Add a wired light", text: "A lamp or relay wired to a pin of this board.", placeholder: "Name this light", path: "/api/lights",
+		to: (l) => `/lights/${l.ieee}/${l.ep}` },
+]} />
 <MatterPairDialog bind:open={matterOpen} />
 
 {#if !lights.length}
 	<div class="text-muted-foreground mt-8 text-center text-sm">
 		<p class="text-foreground text-base font-medium">No lights paired yet</p>
-		<p class="mt-2">Press <b>Add a light</b> and <b>Pair a light</b>, then put the light into pairing mode — for most bulbs that means a power-cycle sequence, or a reset with the remote that came with it.</p>
-		<p class="mt-2">A lamp or relay wired to a pin of the board works too: press <b>Add a wired light</b> and pick the pin.</p>
-		<p class="mt-2">A Matter lamp you already have in Apple Home or another app: press <b>Add a Matter lamp</b>.</p>
+		<p class="mt-2">Press <b>+</b> and <b>Pair a light</b>, then put the light into pairing mode — for most bulbs that means a power-cycle sequence, or a reset with the remote that came with it.</p>
+		<p class="mt-2">A lamp or relay wired to a pin of the board works too: press <b>+</b> and <b>Add a wired light</b>, and pick the pin.</p>
+		<p class="mt-2">A Matter lamp you already have in Apple Home or another app: press <b>+</b> and <b>Add a Matter lamp</b>.</p>
 	</div>
 {:else}
 	<div class="mt-4 grid gap-3 md:grid-cols-2">
@@ -67,7 +57,7 @@
 				{@const on = value(d.ieee, e.ep, "on", e.on)}
 				{@const pct = value(d.ieee, e.ep, "pct", epPct(e))}
 				{@const dims = e.features.includes("brightness")}
-				<Card.Root class="lamp lift data-new:ring-primary/60" data-new={isNew(d.ieee) || undefined} data-lit={on === true || undefined}
+				<Card.Root class="lamp data-new:ring-primary/60 data-new:ring-2" data-new={isNew(d.ieee) || undefined} data-lit={on === true || undefined}
 					{...lampAttrs(lightColour(e))}>
 					<Card.Content class="flex flex-col gap-3">
 						<div class="flex items-start gap-2">
@@ -107,19 +97,3 @@
 		{/each}
 	</div>
 {/if}
-
-<style>
-	/* The rows of Settings' Access / Matter / Wi-Fi list, with a line on what
-	 * each one is for. */
-	.choice {
-		display: flex; align-items: center; gap: .75rem; width: 100%; text-align: left;
-		padding: .7rem var(--card-spacing); cursor: pointer;
-	}
-	.choice span { flex: 1; min-width: 0; }
-	.choice b { display: block; font-size: .95rem; font-weight: 500; }
-	.choice small { display: block; margin-top: .1rem; font-size: .75rem; color: var(--muted-foreground); }
-	.choice :global(svg) { width: 1rem; height: 1rem; flex-shrink: 0; color: var(--muted-foreground); }
-	.choice:hover:enabled b { color: var(--primary); }
-	.choice:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; border-radius: calc(var(--radius) - 4px); }
-	.choice:disabled { opacity: .5; cursor: default; }
-</style>

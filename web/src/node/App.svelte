@@ -6,7 +6,9 @@
 	import Toast from "$lib/components/Toast.svelte";
 	import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
 	import LockScreen from "$lib/components/LockScreen.svelte";
-	import StatusChips from "$lib/components/StatusChips.svelte";
+	import PageHeader from "$lib/components/PageHeader.svelte";
+	import NavBar from "$lib/components/NavBar.svelte";
+	import Backdrop from "$lib/components/Backdrop.svelte";
 	import LightView from "../views/LightView.svelte";
 	import NodeHome from "./NodeHome.svelte";
 	import NodeButton from "./NodeButton.svelte";
@@ -35,20 +37,14 @@
 	});
 </script>
 
+<Backdrop />
 {#if auth.locked}
 	<LockScreen />
 {:else}
-	<main class="mx-auto max-w-[640px] px-4 pb-16 pt-4 md:max-w-[900px]">
-		<header class="pt-[env(safe-area-inset-top)]">
-			<div class="flex items-start justify-between gap-3">
-				<h1 class="text-2xl font-semibold tracking-tight">{app.name}</h1>
-				<nav class="flex shrink-0 gap-3 pt-1.5 text-sm">
-					<a href="#/lights" class="text-primary underline-offset-4 hover:underline">Wiring</a>
-					<a href="#/settings" class="text-primary underline-offset-4 hover:underline">Settings</a>
-				</nav>
-			</div>
-			<StatusChips {chips} />
-		</header>
+	<!-- An address without a route is the wiring page, and the router calls that "groups". -->
+	<NavBar items={[["Wiring", "/lights", "groups lights light remote-button"], ["Settings", "/settings", "settings wifi"]]} />
+	<main class="mx-auto max-w-[640px] px-4 pb-28 pt-4 md:max-w-[900px] md:pb-16 md:pt-20">
+		<PageHeader {chips} />
 		{#if route.name === "light"}
 			<LightView ieee={route.params.ieee} ep={Number(route.params.ep)} node />
 		{:else if route.name === "remote-button"}

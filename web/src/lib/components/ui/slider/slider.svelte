@@ -1,7 +1,9 @@
 <script lang="ts">
-	/* A native range input sized for a finger: 8 px track, 24 px thumb with a
-	 * 48 px hit area, the range painted by the caller through --range. The input
-	 * draws only the thumb; the track and the fill are spans behind it, because
+	/* A native range input sized for a finger: a 28 px pill of a track, filled
+	 * up to the value, with a 48 px hit area; the range is painted by the caller
+	 * through --range. There is no knob: the round end of the fill is the
+	 * handle, with a dot in it, and that is where the input's own thumb lies,
+	 * transparent. The track and the fill are spans behind the input, because
 	 * an input's own track cannot take a gradient that stops at the thumb.
 	 *
 	 * Touch is handled here rather than by the input: iOS moves a range input
@@ -25,7 +27,7 @@
 		onValueCommit?: (value: number) => void;
 	} = $props();
 
-	const THUMB_PX = 24;
+	const THUMB_PX = 28;
 	const frac = $derived(max > min ? Math.min(1, Math.max(0, (value - min) / (max - min))) : 0);
 
 	/* The same geometry the input uses: the thumb's centre travels from half a
@@ -63,13 +65,13 @@
 	}
 </script>
 
-<div data-slot="slider" class={cn("relative flex h-6 w-full items-center select-none", disabled && "opacity-50", className)} {style}>
-	<span data-slot="slider-track" class="bg-muted relative h-2 w-full overflow-hidden rounded-full">
-		<span data-slot="slider-range" class="absolute inset-y-0 left-0"
-			style="width: calc({THUMB_PX / 2}px + (100% - {THUMB_PX}px) * {frac}); background: var(--range, var(--color-primary))"></span>
+<div data-slot="slider" class={cn("relative flex h-7 w-full items-center select-none", disabled && "opacity-50", className)} {style}>
+	<span data-slot="slider-track" class="bg-muted relative h-full w-full overflow-hidden rounded-full">
+		<span data-slot="slider-range" class="absolute inset-y-0 left-0 rounded-full"
+			style="width: calc({THUMB_PX}px + (100% - {THUMB_PX}px) * {frac}); background: var(--range, var(--color-primary))"></span>
 	</span>
 	<input type="range" {min} {max} {step} {disabled} bind:value {@attach noNativeTouch}
-		class="absolute inset-x-0 -top-3 h-12 w-full touch-none"
+		class="absolute inset-x-0 -top-2.5 h-12 w-full touch-none"
 		onchange={() => onValueCommit?.(value)}
 		onpointerdown={down} onpointermove={move} onpointerup={up} onpointercancel={up}
 		{...restProps} />
@@ -80,22 +82,20 @@
 	input:disabled { cursor: default; }
 	input:focus { outline: none; }
 	input:is(:hover, :focus-visible, :active):not(:disabled) {
-		--thumb-ring: 0 0 0 4px color-mix(in oklab, var(--ring) 40%, transparent);
+		--thumb-ring: 0 0 0 3px color-mix(in oklab, var(--ring) 55%, transparent);
 	}
 	input::-webkit-slider-runnable-track { height: 100%; background: transparent; }
 	input::-moz-range-track { background: transparent; }
 	/* WebKit puts the thumb at the top of its track; Firefox centres it. */
 	input::-webkit-slider-thumb {
-		-webkit-appearance: none; margin-top: 12px;
-		box-sizing: border-box; width: 24px; height: 24px; border-radius: 9999px;
-		background: #fff; border: 1px solid var(--border);
-		box-shadow: var(--thumb-ring, 0 0 #0000), var(--elev-2);
-		transition: box-shadow .15s;
+		-webkit-appearance: none; margin-top: 10px;
+		box-sizing: border-box; width: 28px; height: 28px; border: 0; border-radius: 9999px;
+		background: radial-gradient(#fff 4px, transparent 5px);
+		box-shadow: var(--thumb-ring, 0 0 #0000);
 	}
 	input::-moz-range-thumb {
-		box-sizing: border-box; width: 24px; height: 24px; border-radius: 9999px;
-		background: #fff; border: 1px solid var(--border);
-		box-shadow: var(--thumb-ring, 0 0 #0000), var(--elev-2);
-		transition: box-shadow .15s;
+		box-sizing: border-box; width: 28px; height: 28px; border: 0; border-radius: 9999px;
+		background: radial-gradient(#fff 4px, transparent 5px);
+		box-shadow: var(--thumb-ring, 0 0 #0000);
 	}
 </style>

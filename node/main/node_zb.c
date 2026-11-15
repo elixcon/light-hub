@@ -357,6 +357,9 @@ static void node_task(void *arg)
                 esp_zigbee_lock_release();
                 break;
             case EV_COMMAND: {
+                if (!s_started) {
+                    break;   /* stopped for the hotspot since the frame came: see zb_coordinator_stop */
+                }
                 const esp_err_t err = run_command(&ev);
                 if (err != ESP_OK) {
                     ESP_LOGW(TAG, "ep %d cluster 0x%04x cmd 0x%02x: %s", ev.dst_ep, ev.cluster, ev.cmd_id,
@@ -391,11 +394,17 @@ static void node_task(void *arg)
             case EV_ANNOUNCE: {
                 /* The hub interrogates on an announce, and that is how it hears of a
                  * light added or removed. */
+                if (!s_started) {
+                    break;
+                }
                 ezb_zdo_device_annce_req_t req = { 0 };
                 esp_zigbee_lock_acquire(portMAX_DELAY);
-                ezb_zdo_device_annce_req(&req);
+                const ezb_err_t err = ezb_zdo_device_annce_req(&req);
                 esp_zigbee_lock_release();
-                node_store_set_endpoints(s_endpoints_digest);
+                /* One that could not be sent is tried again at the next join. */
+                if (err == EZB_ERR_NONE) {
+                    node_store_set_endpoints(s_endpoints_digest);
+                }
                 break;
             }
             default:
@@ -689,13 +698,13 @@ esp_err_t node_zb_send_button(uint8_t key, uint8_t event, uint8_t seq)
     return send_to_hub(NODE_CMD_BUTTON, body, sizeof(body), button_sent, (void *)(uintptr_t)seq);
 }
 
-void node_zb_send_wifi_state(uint8_t state, const uint8_t ipv4[4])
+esp_err_t node_zb_send_wifi_state(uint8_t state, const uint8_t ipv4[4])
 {
     uint8_t body[5] = { state, 0, 0, 0, 0 };
     if (ipv4) {
         memcpy(&body[1], ipv4, 4);
     }
-    send_to_hub(NODE_CMD_WIFI_STATE, body, sizeof(body), NULL, NULL);
+    return send_to_hub(NODE_CMD_WIFI_STATE, body, sizeof(body), NULL, NULL);
 }
 
 esp_err_t node_zb_start(void)
@@ -725,8 +734,16 @@ esp_err_t zb_coordinator_stop(void)
         return ESP_OK;
     }
     ESP_LOGW(TAG, "Stopping the Zigbee stack to free the radio for Wi-Fi");
+    /* First, as on the hub: esp_zigbee_stop() ends the mainloop and zb_main_task then
+     * calls esp_zigbee_deinit(), while node_task and whoever sends to the hub would
+     * still call into a stack that no longer exists. */
+    s_started = false;
     esp_timer_stop(s_commission_timer);
-    return esp_zigbee_stop() == ESP_OK ? ESP_OK : ESP_FAIL;
+    if (esp_zigbee_stop() != ESP_OK) {
+        s_started = true;   /* still there, and still answering */
+        return ESP_FAIL;
+    }
+    return ESP_OK;
 }
 
 /* radio_coex.c asks whether the hub's energy-scan watchdog (radio_ed.c) is alive. An

@@ -111,14 +111,18 @@ static void window_task(void *arg)
                                                          : NODE_WIFI_JOINING;
         static int ticks;
         if (state != last_state || ++ticks >= 60) {
-            ticks = 0;
             uint8_t ip[4] = { 0 };
             esp_ip4_addr_t addr = { 0 };
             if (esp_netif_str_to_ip4(w.ip, &addr) == ESP_OK) {
                 memcpy(ip, &addr.addr, 4);
             }
-            node_zb_send_wifi_state(state, ip);
-            last_state = state;
+            /* Wi-Fi is usually up before Zigbee has rejoined, and then nothing went
+             * out: told only once it has, or the hub would wait for the minute's
+             * repeat to show the address. */
+            if (node_zb_send_wifi_state(state, ip) == ESP_OK) {
+                ticks      = 0;
+                last_state = state;
+            }
         }
     }
 }

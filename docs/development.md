@@ -96,7 +96,8 @@ riscv32-esp-elf-addr2line -pfiaC -e elixcon_light_hub.elf 0x40806ac2 0x42023315 
 `stack_bounds` is the crashed task's stack, lowest and highest address, null outside a task.
 
 A `Stack protection fault` comes from the hardware stack guard, which holds sp to the running
-stack's bounds. Its interrupt is taken an instruction or more after sp left them, so `pc` and `sp`
+stack's bounds. `sdkconfig.defaults` turns it off (`CONFIG_ESP_SYSTEM_HW_STACK_GUARD`) for the false
+alarm described below, so only older builds, and ones that turn it back on, record one. Its interrupt is taken an instruction or more after sp left them, so `pc` and `sp`
 are where the code had got to by then. Such a record has `guard`, null in any other: `pc`, the
 instruction after the one that moved sp (give it to addr2line as it is), the `bounds` it was held to,
 and `sp_in_bounds`. A real overflow leaves sp below them, as the test crash does:
@@ -110,16 +111,20 @@ and `sp_in_bounds`. A real overflow leaves sp below them, as the test crash does
 `sp_in_bounds: true` with `guard.pc` in task code is the guard going off with sp in range, right
 after an instruction that loads sp from memory (`lw sp,…`), as a function with a variable-length
 array does on its way out. That is [esp-idf#14456](https://github.com/espressif/esp-idf/issues/14456),
-open and without a known cause. In October 2026 it restarted two boxes from the Zigbee library's
-link status (`nwk_link_mngr_send_link_status_cmd`, every 15 s), with `zigbee_main` using some 500
-bytes of its 6 KB stack. Such a record does not mean a stack is too small. Records stored before
-`stack_bounds` and `guard` existed show both as null.
+open and without a known cause. In October and November 2026 it restarted boxes from the Zigbee
+library's link status (`nwk_link_mngr_send_link_status_cmd`, every 15 s), after hours to days, with
+`zigbee_main` using some 500 bytes of its 6 KB stack. Such a record does not mean a stack is too
+small. Records stored before `stack_bounds` and `guard` existed show both as null.
+
+With the guard off, a task that overran its stack is stopped by FreeRTOS's check of the stack's
+lowest bytes at the task's next context switch: an abort whose message is `***ERROR*** A stack
+overflow in task <name> has been detected.`, after whatever lay below the stack was written over.
 
 So keep `build/elixcon_light_hub.elf` of every image that goes onto a box; a release has it as
 `elixcon_light_hub-<version>.elf`, the `version` in the record. `build` matches the
 "ELF file SHA256" `idf.py build` prints. To test the record, build with `CONFIG_ZBC_CRASH_TEST`. Then
 `POST /api/restart` takes `{"crash": "abort"}`, `{"crash": "fault"}` or `{"crash": "stack"}` (an
-overflow the stack guard catches) and crashes half a second later.
+overflow as FreeRTOS's check finds it, or as the stack guard does in a build with it) and crashes half a second later.
 
 ## Continuous integration
 

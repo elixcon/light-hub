@@ -266,6 +266,50 @@
 	{#if d.held}
 		<p class="text-destructive mt-3 text-sm">Held off by the overheat protection — it can be switched on again once the board has cooled.</p>
 	{/if}
+	<NodeWifiCard device={d} />
+
+	<!-- Device -->
+	<Card.Root class="mt-4">
+		<Card.Header><Card.Title>Device</Card.Title></Card.Header>
+		<Card.Content class="flex flex-col gap-4">
+			<div>
+				<Label for="lname" class="mb-2 block">Name</Label>
+				<Input id="lname" bind:value={name} maxlength={31} onchange={rename} onkeydown={(ev) => { if (ev.key === "Enter") (ev.currentTarget as HTMLInputElement).blur(); }} />
+			</div>
+			<dl class="text-muted-foreground grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
+				{#if wired}
+					<dt>Wiring</dt><dd class="text-foreground">{d.gpio == null ? "no pin yet" : `GPIO ${d.gpio}`}</dd>
+				{:else}
+					<dt>Model</dt><dd class="text-foreground">{[d.manufacturer, d.model].filter(Boolean).join(" · ") || "unknown"}</dd>
+				{/if}
+				{#if !node}<dt>Address</dt><dd class="text-foreground font-mono text-xs">{d.ieee} · endpoint {e.ep}</dd>{/if}
+				{#if matter}
+					<dt>Matter</dt><dd class="text-foreground">node <span class="font-mono text-xs">{d.node_id}</span> · endpoint {d.remote_ep}{d.bridged ? " · behind a hub" : ""}</dd>
+					<dt>Vendor</dt><dd class="text-foreground font-mono text-xs">{hex4(d.vendor_id ?? 0)} · product {hex4(d.product_id ?? 0)}</dd>
+					<dt>Certificate</dt><dd class="text-foreground">{d.verified ? "verified" : "not verified"}</dd>
+					<dt>Connection</dt><dd class="text-foreground">{d.needs_pairing ? "needs pairing again: Matter was reset" : d.online ? "subscribed" : "offline"}</dd>
+					<dt>Last report</dt><dd class="text-foreground">{agoS(d.last_seen_s_ago)}</dd>
+				{:else if !wired}
+					<dt>Link</dt><dd class="text-foreground">{linkText(d)}{d.online ? "" : " · offline"}</dd>
+					<dt>Last seen</dt><dd class="text-foreground">{agoS(d.last_seen_s_ago)}</dd>
+				{/if}
+				{#if !node}<dt>Rooms</dt><dd class="text-foreground">{groupsOf.length ? groupsOf.join(", ") : "none"}</dd>{/if}
+			</dl>
+			{#if matter && d.bridged}
+				<div class="text-muted-foreground text-xs">A lamp added to the hub later appears here after <b>Rescan device</b>.</div>
+			{/if}
+			{#if !node && !wired && !matter && !remote && f.includes("onoff")}
+				<MatterExposeRow {ieee} eps={[e.ep]} on={!!e.matter}
+					help={`Apple Home, Home Assistant and Alexa get this light by itself as well as in its rooms${canColor ? ", with its colour" : canCt ? ", with its colour temperature" : ""}. Its curves and the fade time still apply.`} />
+			{/if}
+			{#if !wired && !matter && !isNode(d)}<FirmwareRow device={d} />{/if}
+			<div class="flex flex-wrap gap-2">
+				{#if matter && !d.needs_pairing}<Button variant="outline" onclick={rescan}>Rescan device</Button>{/if}
+				<Button variant="destructive" onclick={remove}><Trash /> Remove device</Button>
+			</div>
+		</Card.Content>
+	</Card.Root>
+
 	{#if remote}
 		<Card.Root class="mt-4"><Card.Content class="text-muted-foreground text-sm">
 			This is a remote: it sends presses rather than answering commands. Set up its buttons under <a href="#/remotes" class="text-primary underline underline-offset-4">Remotes</a>.
@@ -291,7 +335,7 @@
 					<div class="text-muted-foreground text-xs">This light cannot dim. It is on while its room is at or above this brightness and off below it. Remove it to have the light follow only the room's on/off.</div>
 				{:else}
 					{#if tabs.length > 1}
-						<div class="bg-muted inline-flex self-start rounded-lg p-0.5" role="tablist">
+						<div class="bg-muted inline-flex self-start rounded-full p-0.5" role="tablist">
 							{#each tabs as [id, label] (id)}
 								<button class="tab" role="tab" aria-selected={c.tab === id} onclick={() => { c.tab = id; c.sel = 0; }}>{label}</button>
 							{/each}
@@ -499,55 +543,4 @@
 			</Card.Content>
 		</Card.Root>
 	{/if}
-
-	<NodeWifiCard device={d} />
-
-	<!-- Device -->
-	<Card.Root class="mt-4">
-		<Card.Header><Card.Title>Device</Card.Title></Card.Header>
-		<Card.Content class="flex flex-col gap-4">
-			<div>
-				<Label for="lname" class="mb-2 block">Name</Label>
-				<Input id="lname" bind:value={name} maxlength={31} onchange={rename} onkeydown={(ev) => { if (ev.key === "Enter") (ev.currentTarget as HTMLInputElement).blur(); }} />
-			</div>
-			<dl class="text-muted-foreground grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
-				{#if wired}
-					<dt>Wiring</dt><dd class="text-foreground">{d.gpio == null ? "no pin yet" : `GPIO ${d.gpio}`}</dd>
-				{:else}
-					<dt>Model</dt><dd class="text-foreground">{[d.manufacturer, d.model].filter(Boolean).join(" · ") || "unknown"}</dd>
-				{/if}
-				{#if !node}<dt>Address</dt><dd class="text-foreground font-mono text-xs">{d.ieee} · endpoint {e.ep}</dd>{/if}
-				{#if matter}
-					<dt>Matter</dt><dd class="text-foreground">node <span class="font-mono text-xs">{d.node_id}</span> · endpoint {d.remote_ep}{d.bridged ? " · behind a hub" : ""}</dd>
-					<dt>Vendor</dt><dd class="text-foreground font-mono text-xs">{hex4(d.vendor_id ?? 0)} · product {hex4(d.product_id ?? 0)}</dd>
-					<dt>Certificate</dt><dd class="text-foreground">{d.verified ? "verified" : "not verified"}</dd>
-					<dt>Connection</dt><dd class="text-foreground">{d.needs_pairing ? "needs pairing again: Matter was reset" : d.online ? "subscribed" : "offline"}</dd>
-					<dt>Last report</dt><dd class="text-foreground">{agoS(d.last_seen_s_ago)}</dd>
-				{:else if !wired}
-					<dt>Link</dt><dd class="text-foreground">{linkText(d)}{d.online ? "" : " · offline"}</dd>
-					<dt>Last seen</dt><dd class="text-foreground">{agoS(d.last_seen_s_ago)}</dd>
-				{/if}
-				{#if !node}<dt>Rooms</dt><dd class="text-foreground">{groupsOf.length ? groupsOf.join(", ") : "none"}</dd>{/if}
-			</dl>
-			{#if matter && d.bridged}
-				<div class="text-muted-foreground text-xs">A lamp added to the hub later appears here after <b>Rescan device</b>.</div>
-			{/if}
-			{#if !node && !wired && !matter && !remote && f.includes("onoff")}
-				<MatterExposeRow {ieee} eps={[e.ep]} on={!!e.matter}
-					help={`Apple Home, Home Assistant and Alexa get this light by itself as well as in its rooms${canColor ? ", with its colour" : canCt ? ", with its colour temperature" : ""}. Its curves and the fade time still apply.`} />
-			{/if}
-			{#if !wired && !matter && !isNode(d)}<FirmwareRow device={d} />{/if}
-			<div class="flex flex-wrap gap-2">
-				{#if matter && !d.needs_pairing}<Button variant="outline" onclick={rescan}>Rescan device</Button>{/if}
-				<Button variant="destructive" onclick={remove}><Trash /> Remove device</Button>
-			</div>
-		</Card.Content>
-	</Card.Root>
 {/if}
-
-<style>
-	.sel { height: 2.5rem; border-radius: var(--radius-md); border: 1px solid var(--input); background: var(--card);
-		color: var(--foreground); padding: 0 .6rem; font-size: .875rem; }
-	.tab { padding: .4rem .9rem; border-radius: 6px; font-size: .85rem; font-weight: 500; color: var(--muted-foreground); }
-	.tab[aria-selected="true"] { background: var(--card); color: var(--foreground); box-shadow: var(--elev-1); }
-</style>

@@ -105,7 +105,7 @@
 </div>
 
 <style>
-	.sel, .num { height: 2.25rem; border-radius: var(--radius-md); border: 1px solid var(--input); background: var(--card);
-		color: var(--foreground); padding: 0 .6rem; font-size: .875rem; }
+	/* Both are app.css's `.sel`, a little lower. */
+	.sel, .num { height: 2.25rem; }
 	.num { width: 4.5rem; }
 </style>

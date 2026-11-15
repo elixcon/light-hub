@@ -1,7 +1,7 @@
 <script lang="ts">
 	import * as Card from "$lib/components/ui/card";
 	import ChevronRight from "@lucide/svelte/icons/chevron-right";
-	import CreateByName from "$lib/components/CreateByName.svelte";
+	import ListHeading from "$lib/components/ListHeading.svelte";
 	import PowerSwitch from "$lib/components/PowerSwitch.svelte";
 	import { app, data, pending, key, value, setOnOff } from "$lib/state.svelte.ts";
 
@@ -11,12 +11,15 @@
 
 {#if !paired}
 	<Card.Root class="mt-4"><Card.Content class="text-sm">
-		<b>Not paired yet.</b> Open your hub, press <b>Add a light</b> and then <b>Pair a light</b>: this node joins by itself within half a minute. It joins any Zigbee network that is open for pairing, so open only yours. Wi-Fi closes two minutes after it has joined and nobody is using this page.
+		<b>Not paired yet.</b> Open your hub, go to Lights, press <b>+</b> and then <b>Pair a light</b>: this node joins by itself within half a minute. It joins any Zigbee network that is open for pairing, so open only yours. Wi-Fi closes two minutes after it has joined and nobody is using this page.
 	</Card.Content></Card.Root>
 {/if}
 
-<CreateByName title="Lights" addLabel="Add a light" placeholder="Name this light" path="/api/lights" route="/lights"
-	to={(l) => `/lights/${l.ieee}/${l.ep}`} />
+<ListHeading title="Lights" items={[
+	{ title: "Add a light", text: "A lamp or relay wired to a pin of this node.", placeholder: "Name this light", path: "/api/lights",
+		to: (l) => `/lights/${l.ieee}/${l.ep}` },
+	{ title: "Add a button", text: "A push button or switch wired to a pin of this node.", placeholder: "Name this button", path: "/api/buttons", route: "/remotes" },
+]} />
 {#if !data.devices.length}
 	<p class="text-muted-foreground mt-3 text-sm">Nothing wired yet. Each light you add here appears on the hub as an ordinary lamp, after this node has restarted onto Zigbee.</p>
 {:else}
@@ -38,8 +41,7 @@
 	{/if}
 {/if}
 
-<div class="mt-6"></div>
-<CreateByName title="Buttons" addLabel="Add a button" placeholder="Name this button" path="/api/buttons" route="/remotes" />
+<ListHeading title="Buttons" />
 {#if !data.buttons.length}
 	<p class="text-muted-foreground mt-3 text-sm">A button wired here is set up on the hub, under Remotes, like any remote's key.</p>
 {:else}

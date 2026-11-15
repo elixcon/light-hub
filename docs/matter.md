@@ -96,7 +96,7 @@ all added the same way. A hub such as a Hue Bridge brings every lamp behind it.
 1. In Apple Home, open the lamp (or the hub), go to its settings and choose *Turn On Pairing Mode*.
    Other apps call this sharing or linking to another service. It shows a code that works for a few
    minutes.
-2. On the *Lights* page choose *Add a Matter lamp* and type in the code. The coordinator finds the
+2. On the *Lights* page press *+*, choose *Add a Matter lamp* and type in the code. The coordinator finds the
    device on your network, pairs it and reads which of its endpoints are lights. On Wi-Fi this takes
    a few seconds.
 

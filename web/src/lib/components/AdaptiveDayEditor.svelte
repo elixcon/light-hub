@@ -233,7 +233,7 @@
 			</div>
 
 			<div class="flex flex-col gap-3">
-				<div class="bg-muted inline-flex self-start rounded-lg p-0.5" role="tablist">
+				<div class="bg-muted inline-flex self-start rounded-full p-0.5" role="tablist">
 					<button class="tab" role="tab" aria-selected={tab === "pct"} onclick={() => (tab = "pct")}>Brightness</button>
 					<button class="tab" role="tab" aria-selected={tab === "k"} onclick={() => (tab = "k")}>Colour shift</button>
 				</div>
@@ -290,8 +290,6 @@
 </Card.Root>
 
 <style>
-	.tab { padding: .4rem .9rem; border-radius: 6px; font-size: .85rem; font-weight: 500; color: var(--muted-foreground); }
-	.tab[aria-selected="true"] { background: var(--card); color: var(--foreground); box-shadow: var(--elev-1); }
 	.time { display: inline-flex; align-items: center; gap: 2px; }
 	.clear { display: inline-flex; padding: 4px; border-radius: 4px; color: var(--muted-foreground); }
 	.clear:hover { color: var(--foreground); }

@@ -258,13 +258,15 @@ void node_buttons_reload(void)
     uint64_t wanted = 0;
     uint16_t ids[CONFIG_ZBC_MAX_BUTTONS];
     const int n = (int)button_db_list_ids(ids, CONFIG_ZBC_MAX_BUTTONS);
+    /* One record at a time, on the heap: it carries room for every rule. */
+    zbc_button_t *b = malloc(sizeof(*b));
+    if (!b) {
+        ESP_LOGE(TAG, "No memory to reload the buttons; keeping the ones already loaded");
+        return;
+    }
     slot_t next[NODE_MAX_KEYS] = { 0 };
     int used = 0;
     for (int i = 0; i < n && used < NODE_MAX_KEYS; i++) {
-        zbc_button_t *b = malloc(sizeof(*b));
-        if (!b) {
-            break;
-        }
         if (button_db_get(ids[i], b) && b->src == ZBC_BTN_SRC_GPIO) {
             slot_t *s = &next[used++];
             s->used      = true;
@@ -281,8 +283,8 @@ void node_buttons_reload(void)
                 s->gpio = -1;
             }
         }
-        free(b);
     }
+    free(b);
     const bool unlock_self = btn_pins_settle(wanted);
 
     for (int i = 0; i < used; i++) {

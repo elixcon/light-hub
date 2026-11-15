@@ -1,141 +1,164 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 776" width="1160" height="776" role="img" aria-labelledby="t d">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 746" width="1160" height="746" role="img" aria-labelledby="t d">
 <title id="t">Elixcon Light Hub: what controls it and what it drives</title>
 <desc id="d">The web page, a WLED stream, home apps over Matter, Zigbee remotes and wired switches control the hub; the WLED stream is experimental. It drives Zigbee lamps, plugs and relays, and Light Nodes over Zigbee; Matter lamps; and relays and LED strips wired to the board. Each room is one dimmable light.</desc>
 <!-- Icons: Lucide (https://lucide.dev), ISC License, Copyright (c) Lucide Icons and Contributors. -->
+<!-- The look is the web page's (web/src/app.css): flat cards on a blurred room, ink as the accent, amber for light. -->
 <style>
 svg { font-family: -apple-system, BlinkMacSystemFont, Inter, "Segoe UI", Roboto, sans-serif; }
-.bg { fill: #fbf7f0; }
-.glow { stop-color: #007f79; }
-.hub, .tile { fill: #ffffff; stroke: rgb(28 27 23 / .10); }
+.bg { fill: #e9e1d3; }
+.wall { fill: #e9d3ab; } .sky { fill: #bcd6ee; } .linen { fill: #f8eedc; } .frame { fill: #a8906c; }
+.wood { fill: #c9a674; } .shade { fill: #fff0c8; } .glow { fill: #ffdf9a; } .leaf { fill: #7f9c79; }
+.sofa { fill: #f3e8d4; } .seat { fill: #8ea19b; } .ochre { fill: #d99a56; } .floor { fill: #d4b48a; }
+.veil { fill: rgb(246 238 224 / .45); }
+.card { fill: #fbfaf7; }
+.well { fill: rgb(28 27 23 / .08); }
+.lit { fill: url(#lamp); }
 .ic { fill: none; stroke: #1c1b17; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-.ic.lit { stroke: #d48800; }
-.ic.hubic { stroke: #007f79; }
-.hubtile { fill: rgb(0 127 121 / .12); }
-.label { fill: #1c1b17; font-size: 18px; font-weight: 600; }
-.sub, .muted { fill: #6e695d; font-size: 14.5px; }
-.title { fill: #1c1b17; font-size: 23px; font-weight: 700; }
+.ic.on { stroke: #1c1b17; }
+.hubdot { fill: #1c1b17; }
+.ic.hubic { stroke: #ffffff; }
+.rule { stroke: rgb(28 27 23 / .1); stroke-width: 1; }
+.link { fill: none; stroke: rgb(28 27 23 / .5); stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
+.head { fill: #1c1b17; font-size: 22px; font-weight: 600; letter-spacing: -.015em; }
+.ctitle { fill: #4e4a43; font-size: 15px; font-weight: 500; }
+.label { fill: #1c1b17; font-size: 16.5px; font-weight: 600; }
+.sub, .muted { fill: #4e4a43; font-size: 14px; }
+.title { fill: #1c1b17; font-size: 24px; font-weight: 600; letter-spacing: -.025em; }
 .cap { fill: #1c1b17; font-size: 16px; font-weight: 600; }
-.head { fill: #6e695d; font-size: 14px; font-weight: 600; letter-spacing: .08em; }
-.link { fill: none; stroke-width: 3.5; stroke-linecap: round; stroke-linejoin: round; }
-.link.zb { stroke: #007f79; } .link.wf { stroke: #007eb1; } .link.wr { stroke: #1c1b17; }
-.pill.zb { fill: #007f79; } .pill.wf { fill: #007eb1; } .pill.wr { fill: #1c1b17; }
-.pilltext { fill: #ffffff; font-size: 15px; font-weight: 600; }
-.room-t { fill: #3a2a0c; font-size: 16px; font-weight: 600; }
-.room-s { fill: #6b5226; font-size: 12.5px; }
-.track { fill: rgb(28 27 23 / .14); }
-.knob { fill: #ffffff; stroke: rgb(28 27 23 / .18); }
-.badge { fill: rgb(152 0 95 / .10); stroke: rgb(152 0 95 / .35); }
-.badgetext { fill: #98005f; font-size: 12.5px; font-weight: 600; }
+.badge { fill: none; stroke: rgb(28 27 23 / .25); }
+.badgetext { fill: #4e4a43; font-size: 12px; font-weight: 500; }
+.room-t { fill: #1c1b17; font-size: 16px; font-weight: 600; }
+.room-s { fill: rgb(28 27 23 / .72); font-size: 12.5px; }
 @media (prefers-color-scheme: dark) {
-  .bg { fill: #111110; }
-  .glow { stop-color: #5fbab4; }
-  .hub { fill: #1c1b17; stroke: rgb(246 245 242 / .18); }
-  .tile { fill: #36332c; stroke: rgb(246 245 242 / .28); }
-  .badge { fill: rgb(226 95 161 / .16); stroke: rgb(226 95 161 / .5); }
-  .badgetext { fill: #e25fa1; }
+  .bg { fill: #171512; }
+  .wall { fill: #3f2a18; } .sky { fill: #2c4c88; } .linen { fill: #9a7c58; } .frame { fill: #1c120a; }
+  .wood { fill: #6e4420; } .shade { fill: #c27a16; } .glow { fill: #c2741c; } .leaf { fill: #1f3320; }
+  .sofa { fill: #937452; } .seat { fill: #263a2c; } .ochre { fill: #8a3a1c; } .floor { fill: #20150c; }
+  .veil { fill: rgb(26 18 10 / .4); }
+  .card { fill: #211f1c; }
+  .well { fill: rgb(246 245 242 / .1); }
   .ic { stroke: #f6f5f2; }
-  .ic.lit { stroke: #f5b301; }
-  .ic.hubic { stroke: #5fbab4; }
-  .hubtile { fill: rgb(95 186 180 / .16); }
-  .label, .title, .cap { fill: #f6f5f2; }
-  .sub, .muted, .head { fill: #bcc7c6; }
-  .link.zb { stroke: #5fbab4; } .link.wf { stroke: #59b1dc; } .link.wr { stroke: #e6e3dc; }
-  .pill.zb { fill: #5fbab4; } .pill.wf { fill: #59b1dc; } .pill.wr { fill: #e6e3dc; }
-  .pilltext { fill: #111110; }
+  .hubdot { fill: #f3f1ec; }
+  .ic.hubic { stroke: #1c1b17; }
+  .rule { stroke: rgb(246 245 242 / .12); }
+  .link { stroke: rgb(246 245 242 / .55); }
+  .head, .label, .title, .cap { fill: #f6f5f2; }
+  .ctitle, .sub, .muted, .badgetext { fill: #d6d2c8; }
+  .badge { stroke: rgb(246 245 242 / .3); }
 }
 </style>
-<defs><radialGradient id="g" cx="610.0" cy="396" r="440" gradientUnits="userSpaceOnUse"><stop class="glow" offset="0" stop-opacity=".13"/><stop class="glow" offset="1" stop-opacity="0"/></radialGradient><linearGradient id="room" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fde6bd"/><stop offset="1" stop-color="#eab565"/></linearGradient><linearGradient id="level" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#f59e0b"/><stop offset="1" stop-color="#ffd27a"/></linearGradient></defs>
-<rect class="bg" width="1160" height="776" rx="24"/>
-<rect fill="url(#g)" width="1160" height="776" rx="24"/>
-<text class="head" x="32" y="52">CONTROLLED FROM</text>
-<text class="head" x="836" y="52">LIGHTS IT DRIVES</text>
-<path class="link wf" d="M382 130H426Q438 130 438 142V304Q438 316 450 316H466"/>
-<path class="link wf" d="M382 263H408Q420 263 420 275V344Q420 356 432 356H466"/>
-<path class="link wf" d="M382 396H466"/>
-<path class="link zb" d="M382 529H408Q420 529 420 517V448Q420 436 432 436H466"/>
-<path class="link wr" d="M382 662H426Q438 662 438 650V488Q438 476 450 476H466"/>
-<path class="link zb" d="M754 346H786Q798 346 798 334V182Q798 170 810 170H824"/>
-<path class="link zb" d="M798 250H824"/>
-<path class="link zb" d="M798 330H824"/>
-<path class="link wf" d="M754 396H800Q812 396 812 408V440Q812 452 824 452"/>
-<path class="link wr" d="M754 446H786Q798 446 798 458V650Q798 662 810 662H824"/>
-<path class="link wr" d="M798 574H824"/>
-<rect class="tile" x="32" y="101.0" width="58" height="58" rx="15"/>
-<g class="ic" transform="translate(46.0 115) scale(1.2500)"><rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/></g>
-<text class="label" x="106" y="118">Web page and REST API</text>
-<text class="sub" x="106" y="140">rooms, curves and buttons,</text>
-<text class="sub" x="106" y="159">in the browser or scripted</text>
-<rect class="tile" x="32" y="234.0" width="58" height="58" rx="15"/>
-<g class="ic" transform="translate(46.0 248) scale(1.2500)"><path d="m17 2-5 5-5-5"/><rect width="20" height="15" x="2" y="7" rx="2"/></g>
-<text class="label" x="106" y="251">WLED stream</text>
-<rect class="badge" x="230" y="235" width="106" height="21" rx="10.5"/>
-<text class="badgetext" x="283.0" y="249.5" text-anchor="middle">Experimental</text>
-<text class="sub" x="106" y="273">Hyperion, HyperHDR or LedFx</text>
-<text class="sub" x="106" y="292">on a room's Hue colour lamps</text>
-<rect class="tile" x="32" y="367.0" width="58" height="58" rx="15"/>
-<g class="ic" transform="translate(46.0 381) scale(1.2500)"><rect width="14" height="20" x="5" y="2" rx="2" ry="2"/><path d="M12 18h.01"/></g>
-<text class="label" x="106" y="384">Home apps over Matter</text>
-<text class="sub" x="106" y="406">Apple Home, Home Assistant,</text>
-<text class="sub" x="106" y="425">Alexa: one light per room</text>
-<rect class="tile" x="32" y="500.0" width="58" height="58" rx="15"/>
-<g class="ic" transform="translate(46.0 514) scale(1.2500)"><rect x="6" y="2" width="12" height="20" rx="4"/><circle cx="12" cy="9" r="3"/><path d="M10 16h4"/><path d="M10 19h4"/></g>
-<text class="label" x="106" y="526">Zigbee remotes</text>
-<text class="sub" x="106" y="548">IKEA, Philips Hue, Aqara</text>
-<rect class="tile" x="32" y="633.0" width="58" height="58" rx="15"/>
-<g class="ic" transform="translate(46.0 647) scale(1.2500)"><rect x="3" y="3" width="18" height="18" rx="3"/><rect x="8" y="6" width="8" height="12" rx="1.5"/><path d="M8 12h8"/></g>
-<text class="label" x="106" y="659">Wall switches, buttons</text>
-<text class="sub" x="106" y="681">wired to the board's pins</text>
-<rect class="hub" x="466" y="222" width="288" height="348" rx="22"/>
-<rect class="hubtile" x="583.0" y="242" width="54" height="54" rx="15"/>
-<g class="ic hubic" transform="translate(594.0 253) scale(1.3333)"><path d="M12 20v2"/><path d="M12 2v2"/><path d="M17 20v2"/><path d="M17 2v2"/><path d="M2 12h2"/><path d="M2 17h2"/><path d="M2 7h2"/><path d="M20 12h2"/><path d="M20 17h2"/><path d="M20 7h2"/><path d="M7 20v2"/><path d="M7 2v2"/><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="8" y="8" width="8" height="8" rx="1"/></g>
-<text class="title" x="610.0" y="328" text-anchor="middle">Elixcon Light Hub</text>
-<text class="muted" x="610.0" y="351" text-anchor="middle">ESP32-C6 · Zigbee · Wi-Fi · Matter</text>
-<rect x="484" y="370" width="252" height="84" rx="14" fill="url(#room)"/>
-<text class="room-t" x="500" y="397">Living room</text>
-<text class="room-s" x="500" y="415">Sofa strip, Ceiling, Desk strip</text>
-<rect class="track" x="500" y="431" width="176" height="7" rx="3.5"/>
-<rect x="500" y="431" width="97" height="7" rx="3.5" fill="url(#level)"/>
-<circle class="knob" cx="597" cy="434.5" r="9.5"/>
-<text class="room-s" x="722" y="439" text-anchor="end">55 %</text>
-<text class="cap" x="610.0" y="490" text-anchor="middle">Each room is one light</text>
-<text class="muted" x="610.0" y="513" text-anchor="middle">curves · fades · Adaptive Lighting</text>
-<text class="muted" x="610.0" y="534" text-anchor="middle">switches need no server</text>
-<rect class="pill zb" x="836" y="100" width="88" height="30" rx="15"/>
-<text class="pilltext" x="880.0" y="120.5" text-anchor="middle">Zigbee</text>
-<rect class="tile" x="836" y="141.0" width="58" height="58" rx="15"/>
-<g class="ic lit" transform="translate(850.0 155) scale(1.2500)"><path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5"/><path d="M9 18h6"/><path d="M10 22h4"/></g>
-<text class="label" x="910" y="167">Lamps</text>
-<text class="sub" x="910" y="189">dimmable, white, colour</text>
-<rect class="tile" x="836" y="221.0" width="58" height="58" rx="15"/>
-<g class="ic" transform="translate(850.0 235) scale(1.2500)"><path d="M12 22v-5"/><path d="M15 8V2"/><path d="M17 8a1 1 0 0 1 1 1v4a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V9a1 1 0 0 1 1-1z"/><path d="M9 8V2"/></g>
-<text class="label" x="910" y="247">Plugs and relays</text>
-<text class="sub" x="910" y="269">switched on and off</text>
-<rect class="tile" x="836" y="301.0" width="58" height="58" rx="15"/>
-<g class="ic lit" transform="translate(850.0 315) scale(1.2500)"><path d="M12 20v2"/><path d="M12 2v2"/><path d="M17 20v2"/><path d="M17 2v2"/><path d="M2 12h2"/><path d="M2 17h2"/><path d="M2 7h2"/><path d="M20 12h2"/><path d="M20 17h2"/><path d="M20 7h2"/><path d="M7 20v2"/><path d="M7 2v2"/><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="8" y="8" width="8" height="8" rx="1"/></g>
-<text class="label" x="910" y="318">Light Nodes</text>
-<text class="sub" x="910" y="340">a second ESP32-C6 for wired</text>
-<text class="sub" x="910" y="359">lights beyond the hub's pins</text>
-<rect class="pill wf" x="836" y="382" width="88" height="30" rx="15"/>
-<text class="pilltext" x="880.0" y="402.5" text-anchor="middle">Matter</text>
-<rect class="tile" x="836" y="423.0" width="58" height="58" rx="15"/>
-<g class="ic lit" transform="translate(850.0 437) scale(1.2500)"><path d="M10.293 2.293a1 1 0 0 1 1.414 0l2.5 2.5 5.994 1.227a1 1 0 0 1 .506 1.687l-7 7a1 1 0 0 1-1.687-.506l-1.227-5.994-2.5-2.5a1 1 0 0 1 0-1.414z"/><path d="m14.207 4.793-3.414 3.414"/><path d="M3 20a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v1a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/><path d="m9.086 6.5-4.793 4.793a1 1 0 0 0-.18 1.17L7 18"/></g>
-<text class="label" x="910" y="440">Matter lamps</text>
-<text class="sub" x="910" y="462">on Wi-Fi, on Thread, or</text>
-<text class="sub" x="910" y="481">behind a hub (Hue Bridge)</text>
-<rect class="pill wr" x="836" y="504" width="176" height="30" rx="15"/>
-<text class="pilltext" x="924.0" y="524.5" text-anchor="middle">Wired to the board</text>
-<rect class="tile" x="836" y="545.0" width="58" height="58" rx="15"/>
-<g class="ic" transform="translate(850.0 559) scale(1.2500)"><circle cx="15" cy="12" r="3"/><rect width="20" height="14" x="2" y="5" rx="7"/></g>
-<text class="label" x="910" y="571">Relays</text>
-<text class="sub" x="910" y="593">switched on and off</text>
-<rect class="tile" x="836" y="633.0" width="58" height="58" rx="15"/>
-<g class="ic lit" transform="translate(850.0 647) scale(1.2500)"><rect x="2" y="8" width="20" height="8" rx="2"/><path d="M6 12h.01"/><path d="M10 12h.01"/><path d="M14 12h.01"/><path d="M18 12h.01"/></g>
-<text class="label" x="910" y="659">LED strips</text>
-<text class="sub" x="910" y="681">dimmable or tunable white</text>
-<path class="link zb" d="M32 736h30"/>
-<text class="muted" x="72" y="741">Zigbee</text>
-<path class="link wf" d="M150 736h30"/>
-<text class="muted" x="190" y="741">Wi-Fi</text>
-<path class="link wr" d="M256 736h30"/>
-<text class="muted" x="296" y="741">wire</text>
+<defs>
+<clipPath id="frame"><rect width="1160" height="746" rx="24"/></clipPath>
+<filter id="blur" x="-5%" y="-5%" width="110%" height="110%"><feGaussianBlur stdDeviation="22"/></filter>
+<linearGradient id="lamp" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffddab"/><stop offset="1" stop-color="#d9aa5e"/></linearGradient>
+<linearGradient id="room" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffddab"/><stop offset="1" stop-color="#d9aa5e"/></linearGradient>
+</defs>
+<g clip-path="url(#frame)">
+<rect class="bg" width="1160" height="746"/>
+<g filter="url(#blur)"><svg x="-60" y="-60" width="1280" height="866" viewBox="0 0 120 100" preserveAspectRatio="xMidYMid slice"><path class="wall" d="M-20-20h160v140H-20z"/>
+<path class="sky" d="M-20-20h32v72h-32z"/><path class="linen" d="M12-20h8v100h-8z"/>
+<path class="frame" d="M100 14h24v30h-24z"/><path class="wood" d="M104 18h16v22h-16z"/>
+<path class="floor" d="M-20 76h160v44H-20z"/><path class="wood" d="M68 58h72v22H68z"/>
+<g class="glow"><circle cx="47" cy="36" r="34" opacity=".2"/><circle cx="47" cy="36" r="20" opacity=".35"/><circle cx="79" cy="48" r="26" opacity=".25"/><circle cx="79" cy="50" r="13" opacity=".5"/><ellipse cx="84" cy="58" rx="22" ry="3"/></g>
+<path class="frame" d="M46.5 40h1v40h-1z"/>
+<g class="shade"><rect x="38" y="24" width="18" height="17" rx="3"/><path d="M73 39h12l4 12H69z"/></g>
+<g class="leaf"><circle cx="63" cy="30" r="7"/><circle cx="60" cy="43" r="7"/><circle cx="64" cy="56" r="5"/></g>
+<rect class="sofa" x="-20" y="64" width="64" height="50" rx="7"/><circle class="ochre" cx="27" cy="60" r="8"/><circle class="seat" cx="40" cy="64" r="7"/>
+<ellipse class="wood" cx="64" cy="84" rx="26" ry="6"/><circle class="glow" cx="62" cy="79" r="5" opacity=".6"/><circle class="shade" cx="62" cy="79" r="2"/>
+<circle class="seat" cx="116" cy="106" r="24"/><ellipse class="linen" cx="84" cy="104" rx="14" ry="7"/>
+<path class="veil" d="M-20-20h160v140H-20z"/></svg></g>
+</g>
+<text class="head" x="32" y="58">Controlled from</text>
+<text class="head" x="836" y="58">Lights it drives</text>
+<path class="link" d="M382 242H412Q424 242 424 254V337Q424 349 436 349H466"/>
+<path class="link" d="M382 502.5H398Q410 502.5 410 490.5V411Q410 399 422 399H466"/>
+<path class="link" d="M382 659.5H426Q438 659.5 438 647.5V461Q438 449 450 449H466"/>
+<path class="link" d="M754 349H786Q798 349 798 337V235Q798 223 810 223H836"/>
+<path class="link" d="M754 399H800Q812 399 812 411V434Q812 446 824 446H836"/>
+<path class="link" d="M754 449H786Q798 449 798 461V610Q798 622 810 622H836"/>
+<rect class="card" x="32" y="84" width="350" height="316" rx="20"/>
+<text class="ctitle" x="50" y="114">Wi-Fi</text>
+<circle class="well" cx="70" cy="165" r="20"/>
+<g class="ic" transform="translate(58 153)"><rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/></g>
+<text class="label" x="104" y="150">Web page and REST API</text>
+<text class="sub" x="104" y="171">rooms, curves and buttons,</text>
+<text class="sub" x="104" y="190">in the browser or scripted</text>
+<path class="rule" d="M104 215.0H364"/>
+<circle class="well" cx="70" cy="259" r="20"/>
+<g class="ic" transform="translate(58 247)"><path d="m17 2-5 5-5-5"/><rect width="20" height="15" x="2" y="7" rx="2"/></g>
+<text class="label" x="104" y="244">WLED stream</text>
+<rect class="badge" x="217.4" y="229" width="96" height="21" rx="10.5"/>
+<text class="badgetext" x="265.4" y="243.5" text-anchor="middle">Experimental</text>
+<text class="sub" x="104" y="265">Hyperion, HyperHDR or LedFx</text>
+<text class="sub" x="104" y="284">on a room's Hue colour lamps</text>
+<path class="rule" d="M104 309.0H364"/>
+<circle class="well" cx="70" cy="353" r="20"/>
+<g class="ic" transform="translate(58 341)"><rect width="14" height="20" x="5" y="2" rx="2" ry="2"/><path d="M12 18h.01"/></g>
+<text class="label" x="104" y="338">Home apps over Matter</text>
+<text class="sub" x="104" y="359">Apple Home, Home Assistant,</text>
+<text class="sub" x="104" y="378">Alexa: one light per room</text>
+<rect class="card" x="32" y="448" width="350" height="109" rx="20"/>
+<text class="ctitle" x="50" y="478">Zigbee</text>
+<circle class="well" cx="70" cy="519.5" r="20"/>
+<g class="ic" transform="translate(58 507.5)"><rect x="6" y="2" width="12" height="20" rx="4"/><circle cx="12" cy="9" r="3"/><path d="M10 16h4"/><path d="M10 19h4"/></g>
+<text class="label" x="104" y="514">Zigbee remotes</text>
+<text class="sub" x="104" y="535">IKEA, Philips Hue, Aqara</text>
+<rect class="card" x="32" y="605" width="350" height="109" rx="20"/>
+<text class="ctitle" x="50" y="635">Wired</text>
+<circle class="well" cx="70" cy="676.5" r="20"/>
+<g class="ic" transform="translate(58 664.5)"><rect x="3" y="3" width="18" height="18" rx="3"/><rect x="8" y="6" width="8" height="12" rx="1.5"/><path d="M8 12h8"/></g>
+<text class="label" x="104" y="671">Wall switches, buttons</text>
+<text class="sub" x="104" y="692">wired to the board's pins</text>
+<rect class="card" x="836" y="84" width="292" height="278" rx="20"/>
+<text class="ctitle" x="854" y="114">Zigbee</text>
+<circle class="lit" cx="874" cy="155.5" r="20"/>
+<g class="ic on" transform="translate(862 143.5)"><path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5"/><path d="M9 18h6"/><path d="M10 22h4"/></g>
+<text class="label" x="908" y="150">Lamps</text>
+<text class="sub" x="908" y="171">dimmable, white, colour</text>
+<path class="rule" d="M908 196.0H1110"/>
+<circle class="well" cx="874" cy="230.5" r="20"/>
+<g class="ic" transform="translate(862 218.5)"><path d="M12 22v-5"/><path d="M15 8V2"/><path d="M17 8a1 1 0 0 1 1 1v4a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V9a1 1 0 0 1 1-1z"/><path d="M9 8V2"/></g>
+<text class="label" x="908" y="225">Plugs and relays</text>
+<text class="sub" x="908" y="246">switched on and off</text>
+<path class="rule" d="M908 271.0H1110"/>
+<circle class="lit" cx="874" cy="315" r="20"/>
+<g class="ic on" transform="translate(862 303)"><path d="M12 20v2"/><path d="M12 2v2"/><path d="M17 20v2"/><path d="M17 2v2"/><path d="M2 12h2"/><path d="M2 17h2"/><path d="M2 7h2"/><path d="M20 12h2"/><path d="M20 17h2"/><path d="M20 7h2"/><path d="M7 20v2"/><path d="M7 2v2"/><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="8" y="8" width="8" height="8" rx="1"/></g>
+<text class="label" x="908" y="300">Light Nodes</text>
+<text class="sub" x="908" y="321">a second ESP32-C6 for wired</text>
+<text class="sub" x="908" y="340">lights beyond the hub's pins</text>
+<rect class="card" x="836" y="382" width="292" height="128" rx="20"/>
+<text class="ctitle" x="854" y="412">Matter</text>
+<circle class="lit" cx="874" cy="463" r="20"/>
+<g class="ic on" transform="translate(862 451)"><path d="M10.293 2.293a1 1 0 0 1 1.414 0l2.5 2.5 5.994 1.227a1 1 0 0 1 .506 1.687l-7 7a1 1 0 0 1-1.687-.506l-1.227-5.994-2.5-2.5a1 1 0 0 1 0-1.414z"/><path d="m14.207 4.793-3.414 3.414"/><path d="M3 20a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v1a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/><path d="m9.086 6.5-4.793 4.793a1 1 0 0 0-.18 1.17L7 18"/></g>
+<text class="label" x="908" y="448">Matter lamps</text>
+<text class="sub" x="908" y="469">on Wi-Fi, or behind a hub</text>
+<text class="sub" x="908" y="488">such as a Hue Bridge</text>
+<rect class="card" x="836" y="530" width="292" height="184" rx="20"/>
+<text class="ctitle" x="854" y="560">Wired to the board</text>
+<circle class="well" cx="874" cy="601.5" r="20"/>
+<g class="ic" transform="translate(862 589.5)"><circle cx="15" cy="12" r="3"/><rect width="20" height="14" x="2" y="5" rx="7"/></g>
+<text class="label" x="908" y="596">Relays</text>
+<text class="sub" x="908" y="617">switched on and off</text>
+<path class="rule" d="M908 642.0H1110"/>
+<circle class="lit" cx="874" cy="676.5" r="20"/>
+<g class="ic on" transform="translate(862 664.5)"><rect x="2" y="8" width="20" height="8" rx="2"/><path d="M6 12h.01"/><path d="M10 12h.01"/><path d="M14 12h.01"/><path d="M18 12h.01"/></g>
+<text class="label" x="908" y="671">LED strips</text>
+<text class="sub" x="908" y="692">dimmable or tunable white</text>
+<rect class="card" x="466" y="220" width="288" height="358" rx="24"/>
+<circle class="hubdot" cx="610" cy="268" r="28"/>
+<g class="ic hubic" transform="translate(596 254) scale(1.1667)"><path d="M12 20v2"/><path d="M12 2v2"/><path d="M17 20v2"/><path d="M17 2v2"/><path d="M2 12h2"/><path d="M2 17h2"/><path d="M2 7h2"/><path d="M20 12h2"/><path d="M20 17h2"/><path d="M20 7h2"/><path d="M7 20v2"/><path d="M7 2v2"/><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="8" y="8" width="8" height="8" rx="1"/></g>
+<text class="title" x="610" y="332" text-anchor="middle">Elixcon Light Hub</text>
+<text class="muted" x="610" y="356" text-anchor="middle">ESP32-C6 · Zigbee · Wi-Fi · Matter</text>
+<rect x="484" y="376" width="252" height="100" rx="18" fill="url(#room)"/>
+<text class="room-t" x="502" y="405">Living room</text>
+<text class="room-s" x="502" y="424">Sofa strip, Ceiling, Desk strip</text>
+<rect x="502" y="438" width="42" height="24" rx="12" fill="rgb(0 0 0 / .28)"/>
+<circle cx="532" cy="450" r="10" fill="#ffffff"/>
+<rect x="554" y="438" width="126" height="24" rx="12" fill="rgb(0 0 0 / .16)"/>
+<rect x="554" y="438" width="80.1" height="24" rx="12" fill="rgb(255 255 255 / .55)"/>
+<circle cx="622.1" cy="450" r="4" fill="#ffffff"/>
+<text class="room-s" x="718" y="455" text-anchor="end">55 %</text>
+<text class="cap" x="610" y="512" text-anchor="middle">Each room is one light</text>
+<text class="muted" x="610" y="535" text-anchor="middle">curves · fades · Adaptive Lighting</text>
+<text class="muted" x="610" y="556" text-anchor="middle">switches need no server</text>
 </svg>

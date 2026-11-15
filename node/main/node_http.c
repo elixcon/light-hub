@@ -14,6 +14,7 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 
+#include "auth_http.h"
 #include "button_db.h"
 #include "crash_log.h"
 #include "device_db.h"
@@ -220,6 +221,12 @@ static esp_err_t device_dispatch(httpd_req_t *req)
         if (req->method == HTTP_DELETE) {
             light_db_remove(id);
             local_lights_reload();
+            /* A button that toggles it when the hub is out names it by its address,
+             * which a light made later may be given again. */
+            uint8_t ieee[ZBC_IEEE_LEN];
+            zbc_light_ieee(id, ieee);
+            button_db_forget_device(ieee);
+            node_buttons_reload();
             return send_ok(req, "200 OK");
         }
         if (req->method == HTTP_PATCH) {
@@ -367,6 +374,9 @@ static esp_err_t button_dispatch(httpd_req_t *req)
             json_stream_raw(&js, "}");
             return json_stream_end(&js);
         }
+        if (req->method != HTTP_POST) {
+            return send_error(req, "404 Not Found", "no such route");
+        }
         cJSON *json = read_json_body(req);
         if (!json) {
             return ESP_FAIL;
@@ -505,16 +515,17 @@ static esp_err_t settings_post_(httpd_req_t *req)
     if (!json) {
         return ESP_FAIL;
     }
-    const char *name = name_from_json(json);
-    esp_err_t   err  = ESP_OK;
-    if (name) {
+    const char *name    = name_from_json(json);
+    const bool  renamed = name != NULL;   /* `name` goes with the body */
+    esp_err_t   err     = ESP_OK;
+    if (renamed) {
         err = settings_name_ok(name) ? settings_set_name(name) : ESP_ERR_INVALID_ARG;
     }
     cJSON_Delete(json);
     if (err != ESP_OK) {
         return send_error(req, "400 Bad Request", "that name cannot be used");
     }
-    if (name) {
+    if (renamed) {
         /* The hostname comes from it, read once at boot. Back on Wi-Fi: this page is open. */
         restart_later(NODE_ASK_WIFI);
     }
@@ -569,17 +580,14 @@ static esp_err_t restart_post(httpd_req_t *req)
 }
 
 /* Every route counts as somebody using the page, which keeps Wi-Fi open. So the page
- * stops polling while its tab is hidden (stopPollingWhileHidden). */
+ * stops polling while its tab is hidden (stopPollingWhileHidden). Only somebody the
+ * lock lets in: a caller it turns away must not be able to hold Wi-Fi open. */
 static esp_err_t touched(httpd_req_t *req)
 {
-    node_touch();
+    if (access_mode() != ACCESS_LOCKED || auth_http_presented_key(req, NULL, NULL)) {
+        node_touch();
+    }
     return guarded(req);
-}
-
-static esp_err_t update_post(httpd_req_t *req)
-{
-    node_touch();
-    return ota_handle_handoff(req);
 }
 
 esp_err_t node_http_start(void)
@@ -599,7 +607,9 @@ esp_err_t node_http_start(void)
         { .uri = "/",                  .method = HTTP_GET,  .handler = watched, .user_ctx = (void *)index_get },
         { .uri = "/api/auth",          .method = HTTP_GET,  .handler = watched, .user_ctx = (void *)auth_state_get },
         { .uri = "/api/auth/session",  .method = HTTP_POST, .handler = watched, .user_ctx = (void *)auth_session_post },
-        { .uri = "/update",            .method = HTTP_POST, .handler = update_post },
+        /* Behind the lock, as on a hub: it restarts the node into its updater, which
+         * asks for the same key before it takes the file. */
+        R("/update",              HTTP_POST,   ota_handle_handoff),
         R("/api/status",          HTTP_GET,    status_get),
         R("/api/state",           HTTP_GET,    state_get),
         R("/api/devices",         HTTP_GET,    devices_get),

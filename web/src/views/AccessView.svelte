@@ -71,6 +71,12 @@
 			<div class="text-destructive text-sm">{error}</div>
 		{:else}
 			<div class="text-muted-foreground text-sm">{modeLine}</div>
+			{#if a && (a.mode === "open" || (a.mode === "setup" && !a.current))}
+				<div><Button onclick={async () => { await claim(); load(); }}>Secure it — give this browser a key</Button></div>
+			{/if}
+			{#if a && a.mode === "failsafe"}
+				<div><Button variant="outline" onclick={async () => { await closeFailsafe(); load(); }}>Close the failsafe now</Button></div>
+			{/if}
 			{#if keys.length}
 				<div class="divide-y">
 					{#each keys as k (k.id)}
@@ -89,12 +95,6 @@
 				</div>
 			{:else}
 				<div class="text-muted-foreground text-sm">No keys yet.</div>
-			{/if}
-			{#if a && (a.mode === "open" || (a.mode === "setup" && !a.current))}
-				<div><Button onclick={async () => { await claim(); load(); }}>Secure it — give this browser a key</Button></div>
-			{/if}
-			{#if a && a.mode === "failsafe"}
-				<div><Button variant="outline" onclick={async () => { await closeFailsafe(); load(); }}>Close the failsafe now</Button></div>
 			{/if}
 			<div class="border-border border-t pt-4">
 				<Label for="newkey" class="mb-2 block">New API key</Label>

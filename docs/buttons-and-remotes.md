@@ -7,7 +7,7 @@ place of gestures.
 
 ## Pairing a remote
 
-Battery remotes pair from *Remotes → Pair a remote*, and each one then has a card on that page. For
+Battery remotes pair from *Remotes → + → Pair a remote*, and each one then has a card on that page. For
 a remote the coordinator knows (IKEA BILRESA and SYMFONISK, Hue dimmer switch and Smart Button,
 Aqara mini switch, Tuya ZG-101ZL smart button), *Set up* asks for a room and creates all of its buttons with ready-made actions.
 For any other remote, use *Add a button* and press the button on the remote that you mean.

@@ -21,8 +21,9 @@ esp_err_t node_zb_start(void);
  * node_buttons_delivered, with `seq`. ESP_FAIL when it could not even be queued. */
 esp_err_t node_zb_send_button(uint8_t key, uint8_t event, uint8_t seq);
 
-/* Tells the hub what Wi-Fi is doing, when there is a network to tell it on. */
-void node_zb_send_wifi_state(uint8_t state, const uint8_t ipv4[4]);
+/* Tells the hub what Wi-Fi is doing, when there is a network to tell it on: ESP_FAIL
+ * when there is none yet, and nothing was sent. */
+esp_err_t node_zb_send_wifi_state(uint8_t state, const uint8_t ipv4[4]);
 
 /* Since when this boot has been on a Zigbee network, 0 while it has not. */
 int64_t node_zb_joined_at(void);

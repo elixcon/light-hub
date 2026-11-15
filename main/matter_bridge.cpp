@@ -576,10 +576,11 @@ typedef struct {
      * as the endpoint was made with, and a renamed button shows its new name after
      * a restart. */
     char     name[MB_LABEL_LEN];
-    /* Written by the CHIP task, read by the bridge task: 32 bits so a read can
-     * never be torn, compared with a signed difference so it survives the wrap. */
-    volatile uint32_t quiet_until_ms;
-    volatile uint32_t color_quiet_until_ms;   /* LAMP: the colour has a window of its own */
+    /* When each quiet window ends, as esp_timer_get_time(); 0 before the first.
+     * Written by the CHIP task, read by the bridge task: through quiet_for() and
+     * quiet_open() alone. */
+    int64_t  quiet_until_us;
+    int64_t  color_quiet_until_us;   /* LAMP: the colour has a window of its own */
     mb_move_t move;          /* bridge task only */
     mb_on_hold_t on_hold;    /* bridge task only */
     matter_group_t diag;     /* bridge task only; copied out by refresh_status */
@@ -595,7 +596,7 @@ typedef struct {
     bool     expose_logged;
     uint16_t al_endpoint_id;  /* 0 when there is no switch */
     esp_matter_bridge::device_t *al_dev;
-    volatile uint32_t al_quiet_until_ms;
+    int64_t  al_quiet_until_us;
 } mb_slot_t;
 
 typedef struct {
@@ -676,6 +677,32 @@ static mb_kept_t s_kept[MATTER_MAX_LISTED_FABRICS];
 static uint32_t now_ms(void)
 {
     return (uint32_t)(esp_timer_get_time() / 1000);
+}
+
+/* A quiet window: for `ms` from now the bridge keeps its hands off what a Matter
+ * command has just touched. Kept as the time it ends in microseconds since boot,
+ * 64 bits of them, which never wrap. As a 32-bit millisecond count compared by
+ * its signed difference, a window that had ended 24.8 days ago - or the 0 of a
+ * slot no command had ever touched, 24.8 days after the boot - read as open for
+ * the 24.8 days that followed, and nothing the room did reached a controller
+ * until a command came or they were over. The CHIP task writes it and the bridge
+ * task reads it, and 64 bits are two reads on this chip, hence the spinlock. */
+static portMUX_TYPE s_quiet_mux = portMUX_INITIALIZER_UNLOCKED;
+
+static void quiet_for(int64_t *until_us, uint32_t ms)
+{
+    const int64_t until = esp_timer_get_time() + (int64_t)ms * 1000;
+    portENTER_CRITICAL(&s_quiet_mux);
+    *until_us = until;
+    portEXIT_CRITICAL(&s_quiet_mux);
+}
+
+static bool quiet_open(const int64_t *until_us, int64_t now_us)
+{
+    portENTER_CRITICAL(&s_quiet_mux);
+    const int64_t until = *until_us;
+    portEXIT_CRITICAL(&s_quiet_mux);
+    return now_us < until;
 }
 
 static mb_slot_t *slot_by_endpoint(uint16_t endpoint_id)
@@ -1182,15 +1209,15 @@ static esp_err_t on_command(const ConcreteCommandPath &path, TLVReader &tlv, voi
      * CurrentLevel sync for a mode change would freeze a dimming that has nothing
      * to do with it, and the other way round. */
     if (in.kind == MB_AL_START || in.kind == MB_AL_STOP || in.kind == MB_AL_TOGGLE) {
-        slot->al_quiet_until_ms = now_ms() + MB_QUIET_MS;
+        quiet_for(&slot->al_quiet_until_us, MB_QUIET_MS);
     } else if (in.kind == MB_CT || in.kind == MB_HS || in.kind == MB_XY) {
         /* The colour's own, for the same reason: a colour change must not freeze
          * the brightness the controller sees, nor a dimming the colour. */
-        slot->color_quiet_until_ms = now_ms() + in.transition_ds * 100u + MB_QUIET_MS;
+        quiet_for(&slot->color_quiet_until_us, in.transition_ds * 100u + MB_QUIET_MS);
     } else {
         /* An On is carried out only once its wait is over. */
         const uint32_t held_ms = in.kind == MB_ON ? MB_ON_HOLD_US / 1000 : 0;
-        slot->quiet_until_ms   = now_ms() + held_ms + in.transition_ds * 100u + MB_QUIET_MS;
+        quiet_for(&slot->quiet_until_us, held_ms + in.transition_ds * 100u + MB_QUIET_MS);
     }
     if (xQueueSend(s_queue, &in, 0) != pdTRUE) {
         /* CHIP's own handler still runs and moves the attributes, so the
@@ -1214,7 +1241,7 @@ static void move_tick(mb_slot_t *slot, int64_t now_us)
     if (target) {
         const lighting_target_t t = slot_target(*slot);
         lighting_target_ramp_to(&t, zbc_level_to_pct(target), ds);
-        slot->quiet_until_ms = now_ms() + ds * 100u + MB_QUIET_MS;
+        quiet_for(&slot->quiet_until_us, ds * 100u + MB_QUIET_MS);
     }
 }
 
@@ -1526,7 +1553,7 @@ typedef struct {
     int8_t  occupied;
 } mb_seen_t;
 
-static void see_room_or_lamp(const mb_slot_t &s, mb_seen_t &g, uint32_t t)
+static void see_room_or_lamp(const mb_slot_t &s, mb_seen_t &g, int64_t now_us)
 {
     const lighting_target_t target = slot_target(s);
     g.pct   = ZBC_UNKNOWN;
@@ -1536,19 +1563,19 @@ static void see_room_or_lamp(const mb_slot_t &s, mb_seen_t &g, uint32_t t)
      * controller the lights were off and then flip them on; while nothing is
      * known, nothing is written. */
     g.on_known = g.on || lighting_target_known_off(&target);
-    g.held     = s.move.active || (int32_t)(t - s.quiet_until_ms) < 0;
+    g.held     = s.move.active || quiet_open(&s.quiet_until_us, now_us);
     if (s.kind != MB_SLOT_ROOM) {
         return;
     }
     lighting_al_status_t al;
     g.al_known  = lighting_group_al_status(s.group_id, &al);
     g.al_active = g.al_known && al.active;
-    g.al_held   = (int32_t)(t - s.al_quiet_until_ms) < 0;
+    g.al_held   = quiet_open(&s.al_quiet_until_us, now_us);
 }
 
 /* A device's side: whether it is there, and for a lamp its colour as it last
  * reported it, for a sensor what its rules make of it. */
-static void see_device(const mb_slot_t &s, mb_seen_t &g, uint32_t t)
+static void see_device(const mb_slot_t &s, mb_seen_t &g, int64_t now_us)
 {
     if (!device_db_get(s.ieee, &s_dev)) {
         return;
@@ -1573,7 +1600,7 @@ static void see_device(const mb_slot_t &s, mb_seen_t &g, uint32_t t)
         return;
     }
     g.color_known = true;
-    g.color_held  = (int32_t)(t - s.color_quiet_until_ms) < 0;
+    g.color_held  = quiet_open(&s.color_quiet_until_us, now_us);
     g.ct          = e->ct_mireds;
     g.hue         = e->hue;
     g.sat         = e->saturation;
@@ -1733,7 +1760,7 @@ static void sync_occupancy(mb_slot_t &s, const mb_seen_t &g)
  * lit, and the last commanded percentage; a lamp's the same for the one light. */
 static void sync_attributes(void)
 {
-    const uint32_t t = now_ms();
+    const int64_t t = esp_timer_get_time();
     static mb_seen_t g[MB_SLOTS];       /* bridge task only */
     for (size_t i = 0; i < MB_SLOTS; i++) {
         const mb_slot_t &s = s_slots[i];

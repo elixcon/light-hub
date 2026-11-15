@@ -30,7 +30,8 @@ typedef struct {
 esp_err_t mexp_db_init(void);
 bool      mexp_db_has(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep);
 /* ESP_ERR_NO_MEM when the endpoint is not yet in the table and the table is full.
- * Setting what is already set writes nothing. */
+ * Setting what is already set writes nothing. On any error the table is as it
+ * was: a change that could not be stored is not kept until the restart either. */
 esp_err_t mexp_db_set(const uint8_t ieee[ZBC_IEEE_LEN], uint8_t ep, bool expose);
 /* Copies up to max entries; returns how many. */
 size_t    mexp_db_list(mexp_entry_t *out, size_t max);

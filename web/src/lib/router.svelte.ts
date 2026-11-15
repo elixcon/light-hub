@@ -1,8 +1,6 @@
 /* Hash routes: the coordinator serves one HTML route, and the fragment never
  * reaches it, so the phone's back button works and a reload lands on the same
  * view. */
-/* A detail view's name starts with its list view's name less the final "s" -
- * that prefix is how StaggeredMenu marks the current section. */
 export type RouteName = "groups" | "group" | "lights" | "light" | "remotes" | "remote" | "remote-button"
   | "sensors" | "sensor" | "settings" | "access" | "matter" | "wifi" | "setup";
 
